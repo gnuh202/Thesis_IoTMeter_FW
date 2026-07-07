@@ -522,6 +522,50 @@ static int cmd_mqtt_cfg(int argc, char **argv)
     return rc;
 }
 
+/* log: change the runtime log level of a specific TAG (or all tags with '*').
+ * Raising the threshold (e.g. to warn/none) hides chatter from a noisy task;
+ * showing debug/verbose only works if CONFIG_LOG_MAXIMUM_LEVEL is built high
+ * enough (it is raised to DEBUG in this project). */
+static struct {
+    struct arg_str *tag;
+    struct arg_str *level;
+    struct arg_end *end;
+} s_log_args;
+
+static bool parse_log_level(const char *name, esp_log_level_t *out)
+{
+    if (strcmp(name, "none") == 0)         { *out = ESP_LOG_NONE;    return true; }
+    if (strcmp(name, "error") == 0)        { *out = ESP_LOG_ERROR;   return true; }
+    if (strcmp(name, "warn") == 0)         { *out = ESP_LOG_WARN;    return true; }
+    if (strcmp(name, "info") == 0)         { *out = ESP_LOG_INFO;    return true; }
+    if (strcmp(name, "debug") == 0)        { *out = ESP_LOG_DEBUG;   return true; }
+    if (strcmp(name, "verbose") == 0)      { *out = ESP_LOG_VERBOSE; return true; }
+    return false;
+}
+
+static int cmd_log(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&s_log_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, s_log_args.end, argv[0]);
+        return 1;
+    }
+
+    const char *tag = s_log_args.tag->sval[0];
+    const char *level_name = s_log_args.level->sval[0];
+
+    esp_log_level_t level;
+    if (!parse_log_level(level_name, &level)) {
+        printf("invalid level '%s' (none|error|warn|info|debug|verbose)\n", level_name);
+        return 1;
+    }
+
+    /* "*" applies to every tag; esp_log_level_set already treats "*" specially. */
+    esp_log_level_set(tag, level);
+    printf("log level of '%s' set to %s\n", tag, level_name);
+    return 0;
+}
+
 static esp_err_t register_meter_commands(void)
 {
     const esp_console_cmd_t latest_cmd = {
@@ -596,6 +640,18 @@ static esp_err_t register_meter_commands(void)
         .argtable = &s_mqttcfg_args,
     };
     ESP_RETURN_ON_ERROR(esp_console_cmd_register(&mqttcfg_cmd), TAG, "register mqtt-cfg failed");
+
+    s_log_args.tag = arg_str1(NULL, NULL, "<tag|*>", "log tag, or * for all tags");
+    s_log_args.level = arg_str1(NULL, NULL, "<level>", "none|error|warn|info|debug|verbose");
+    s_log_args.end = arg_end(3);
+    const esp_console_cmd_t log_cmd = {
+        .command = "log",
+        .help = "Set runtime log level: log mqtt_mgr none | log * warn | log net_mgr debug",
+        .hint = NULL,
+        .func = &cmd_log,
+        .argtable = &s_log_args,
+    };
+    ESP_RETURN_ON_ERROR(esp_console_cmd_register(&log_cmd), TAG, "register log failed");
 
     return ESP_OK;
 }

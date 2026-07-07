@@ -54,7 +54,12 @@ static char s_topic_telemetry[MQTT_TOPIC_MAX];
 static char s_topic_energy[MQTT_TOPIC_MAX];
 static char s_topic_io[MQTT_TOPIC_MAX];
 static char s_topic_heartbeat[MQTT_TOPIC_MAX];
+static char s_topic_cmd_out0[MQTT_TOPIC_MAX];   /* subscribed: relay out0 control */
+static char s_topic_cmd_out1[MQTT_TOPIC_MAX];   /* subscribed: relay out1 control */
 static char s_active_broker[CONFIG_STORE_MQTT_NAME_LEN];  /* name of connected profile, for heartbeat */
+
+/* Defined below; the event handler echoes io state after a relay command. */
+static void publish_io(void);
 
 /*
  * Sanitize a device name into something safe for an MQTT topic level: drop '/',
@@ -95,6 +100,43 @@ static void build_identity(void)
     snprintf(s_topic_energy, sizeof(s_topic_energy), "pm/%s/energy", s_device_id);
     snprintf(s_topic_io, sizeof(s_topic_io), "pm/%s/io", s_device_id);
     snprintf(s_topic_heartbeat, sizeof(s_topic_heartbeat), "pm/%s/heartbeat", s_device_id);
+    snprintf(s_topic_cmd_out0, sizeof(s_topic_cmd_out0), "pm/%s/cmd/out0", s_device_id);
+    snprintf(s_topic_cmd_out1, sizeof(s_topic_cmd_out1), "pm/%s/cmd/out1", s_device_id);
+}
+
+/*
+ * Parse a relay command payload and drive the output. The only accepted form is
+ * a JSON object {"on":<bool>}; anything else (bad JSON, missing/typed-wrong
+ * field, extra keys are ignored) is rejected without touching the relay. On a
+ * valid command the physical output is set and the io topic is re-published so
+ * subscribers see the confirmed state.
+ */
+static void handle_relay_command(int out_index, const char *data, int len)
+{
+    cJSON *root = cJSON_ParseWithLength(data, len);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "cmd/out%d: payload is not valid JSON; ignored", out_index);
+        return;
+    }
+
+    const cJSON *on = cJSON_GetObjectItemCaseSensitive(root, "on");
+    if (!cJSON_IsBool(on)) {
+        ESP_LOGW(TAG, "cmd/out%d: missing/invalid \"on\" bool; ignored", out_index);
+        cJSON_Delete(root);
+        return;
+    }
+
+    bool level = cJSON_IsTrue(on);
+    esp_err_t ret = (out_index == 0) ? io_expander_set_out0(level)
+                                     : io_expander_set_out1(level);
+    cJSON_Delete(root);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "cmd/out%d: set relay failed: %s", out_index, esp_err_to_name(ret));
+        return;
+    }
+    ESP_LOGI(TAG, "cmd/out%d -> %s", out_index, level ? "on" : "off");
+    publish_io();  /* echo confirmed state */
 }
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
@@ -112,10 +154,23 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
          * the esp-mqtt task before esp_mqtt_client_start() returns and assigns
          * s_client, so the global may still be NULL here. */
         esp_mqtt_client_publish(event->client, s_topic_status, "online", 0, 1, 1);
+        /* Subscribe to the relay command topics (QoS1). */
+        esp_mqtt_client_subscribe(event->client, s_topic_cmd_out0, 1);
+        esp_mqtt_client_subscribe(event->client, s_topic_cmd_out1, 1);
         break;
     case MQTT_EVENT_DISCONNECTED:
         s_connected = false;
         ESP_LOGW(TAG, "disconnected from broker");
+        break;
+    case MQTT_EVENT_DATA:
+        /* Route relay commands. Topic is not NUL-terminated: compare by length. */
+        if (event->topic_len == (int)strlen(s_topic_cmd_out0) &&
+            strncmp(event->topic, s_topic_cmd_out0, event->topic_len) == 0) {
+            handle_relay_command(0, event->data, event->data_len);
+        } else if (event->topic_len == (int)strlen(s_topic_cmd_out1) &&
+                   strncmp(event->topic, s_topic_cmd_out1, event->topic_len) == 0) {
+            handle_relay_command(1, event->data, event->data_len);
+        }
         break;
     case MQTT_EVENT_ERROR:
         if (event->error_handle != NULL &&

@@ -1,6 +1,12 @@
 # Thiết kế MQTT Client (ESP32-S3, ESP-IDF)
 
-> Trạng thái: **BẢN THIẾT KẾ để review**. Chưa code. `[QUYẾT ĐỊNH]` = đã chốt, `[TODO-SAU]` = pha sau.
+> Trạng thái: **ĐANG TRIỂN KHAI**. `[QUYẾT ĐỊNH]` = đã chốt, `[TODO-SAU]` = pha sau.
+>
+> **Đã implement:** `config_mqtt_t` v2 (3 broker profiles trong NVS, 1 active), mqtt_manager kết nối theo profile active (TLS-capable qua cert bundle IDF), LWT online/offline, client_id tự sinh (device_name + MAC suffix), publish định kỳ `telemetry`/`energy`/`io`/`heartbeat` (cJSON), reconnect chủ động khi đổi interface, subscribe `cmd/out0`/`cmd/out1` điều khiển 2 relay (payload JSON `{"on":bool}`, validate chặt, echo lại `io`). Cấu hình qua console `mqtt-cfg` (xem [console_commands.md](console_commands.md)).
+>
+> **Chưa làm (`[TODO-SAU]`):** nhập CA cert custom qua console/portal, alarm topic, cmd/reboot, live-apply (đổi cấu hình hiện phải reboot).
+>
+> Kiến trúc tổng thể & vòng đời khởi động: xem [architecture.md](architecture.md).
 
 ## 1. Mục tiêu
 

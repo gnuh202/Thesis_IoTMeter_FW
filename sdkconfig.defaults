@@ -14,3 +14,7 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 # --- TLS: bundled root CAs for MQTT broker verification (no per-broker cert needed) ---
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# --- Logging: compile debug-level logs in so the 'log' console command can
+#     raise verbosity at runtime (default stays INFO). ---
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

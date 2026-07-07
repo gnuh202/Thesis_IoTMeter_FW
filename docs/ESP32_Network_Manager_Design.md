@@ -1,6 +1,12 @@
 # Thiết kế Network Manager + Configuration Portal (ESP32-S3, ESP-IDF)
 
-> Trạng thái: **BẢN THIẾT KẾ để review**. Chưa code. Các mục đánh dấu `[QUYẾT ĐỊNH]` là chốt chọn, `[TODO-SAU]` là để pha sau.
+> Trạng thái: **ĐÃ TRIỂN KHAI** (trừ các mục `[TODO-SAU]`). Đây là tài liệu thiết kế gốc; phần data-path (ETH/WiFi failover, gom init, AP on-demand, auto-AP recovery) đã code xong và chạy trên thiết bị thật. Các mục đánh dấu `[QUYẾT ĐỊNH]` là chốt chọn, `[TODO-SAU]` là **chưa làm**.
+>
+> **Đã implement:** NetworkManager state machine + failover ETH>STA (option B: STA chỉ bật khi ETH mất), gom init hạ tầng (NVS/netif/event loop) trong `network_manager_infra_init()`, AP on-demand (boot STA-only), auto-AP recovery (mất hết mạng → tự bật AP → grace 60s khi mạng về). Cấu hình qua console `net-cfg` (xem [console_commands.md](console_commands.md)).
+>
+> **Chưa làm (`[TODO-SAU]`):** Web Configuration Portal (trang web nhập cấu hình khi vào AP), Modbus TCP server, LCD2004 + 5 nút, static IP (hiện chỉ DHCP). Cấu hình mạng hiện nhập qua console, chưa có web form.
+>
+> Kiến trúc tổng thể & vòng đời khởi động: xem [architecture.md](architecture.md).
 
 ## 1. Mục tiêu
 
