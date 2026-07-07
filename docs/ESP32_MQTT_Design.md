@@ -2,7 +2,7 @@
 
 > Trạng thái: **ĐANG TRIỂN KHAI**. `[QUYẾT ĐỊNH]` = đã chốt, `[TODO-SAU]` = pha sau.
 >
-> **Đã implement:** `config_mqtt_t` v2 (3 broker profiles trong NVS, 1 active), mqtt_manager kết nối theo profile active (TLS-capable qua cert bundle IDF), LWT online/offline, client_id tự sinh (device_name + MAC suffix), publish định kỳ `telemetry`/`energy`/`io`/`heartbeat` (cJSON), reconnect chủ động khi đổi interface, subscribe `cmd/out0`/`cmd/out1` điều khiển 2 relay (payload JSON `{"on":bool}`, validate chặt, echo lại `io`). Cấu hình qua console `mqtt-cfg` (xem [console_commands.md](console_commands.md)).
+> **Đã implement:** `config_mqtt_t` v2 (3 broker profiles trong NVS, 1 active), mqtt_manager kết nối theo profile active (TLS-capable qua cert bundle IDF), LWT online/offline, client_id tự sinh (device_name + MAC suffix), publish định kỳ `telemetry`/`energy`/`io`/`heartbeat` (cJSON), reconnect chủ động khi đổi interface, subscribe `cmd/out0`/`cmd/out1` điều khiển 2 relay (payload JSON `{"state":"on"|"off"}`, validate chặt, echo lại `io`). Cấu hình qua console `mqtt-cfg` (xem [console_commands.md](console_commands.md)).
 >
 > **Chưa làm (`[TODO-SAU]`):** nhập CA cert custom qua console/portal, alarm topic, cmd/reboot, live-apply (đổi cấu hình hiện phải reboot).
 >
@@ -86,30 +86,12 @@ pm/<device_name>/...
 - **Client ID MQTT** (khác `<id>` topic): tự sinh = `device_name + "-" + 3 byte cuối MAC` để duy nhất trên broker kể cả khi 2 thiết bị trùng device_name.
 - device_name nên sạch (không dấu cách/ký tự đặc biệt) để hợp lệ trong topic. Sẽ sanitize khi build topic.
 
-### Publish (thiết bị → broker)
+**Bảng topic + payload chi tiết (field, kiểu, ví dụ JSON): xem [mqtt_payloads.md](mqtt_payloads.md) — đó là nguồn duy nhất.** Tóm tắt: publish `telemetry`/`energy`/`io`/`status`(LWT)/`heartbeat`; subscribe `cmd/out0`/`cmd/out1` với payload `{"state":"on"|"off"}`.
 
-| Topic | Nội dung | QoS | Retain |
-|---|---|---|---|
-| `pm/<id>/telemetry` | JSON số đo (V/I/P/Q/S/PF/freq/temp) | 0 | no |
-| `pm/<id>/energy` | JSON năng lượng (kWh import/export, demand) | 1 | no |
-| `pm/<id>/io` | JSON trạng thái in0/in1/out0/out1 | 1 | yes |
-| `pm/<id>/status` | online/offline (LWT), fw version | 1 | yes |
-| `pm/<id>/heartbeat` | uptime, RSSI, free heap, iface active, **fw_version, active_broker, ip_address** | 0 | no |
-
-- **LWT (Last Will)**: broker tự publish `status=offline` (retained) khi thiết bị mất kết nối đột ngột. Lúc connect publish `status=online`.
+- **LWT (Last Will)**: broker tự publish `offline` (retained) khi thiết bị mất kết nối đột ngột. Lúc connect publish `online`.
 - `io` và `status` **retained** → client mới subscribe thấy ngay trạng thái cuối.
-
-### Subscribe (broker → thiết bị)
-
-| Topic | Payload (JSON) | Hành động |
-|---|---|---|
-| `pm/<id>/cmd/out0` | `{"on":true}` / `{"on":false}` | `io_expander_set_out0()` |
-| `pm/<id>/cmd/out1` | `{"on":true}` / `{"on":false}` | `io_expander_set_out1()` |
-
-- Payload là **JSON** (không phải `"0"/"1"`): `{"on":<bool>}`. Dễ mở rộng sau (thêm field như `pulse_ms`, `source`... mà không phá format).
-- Sau khi đặt relay, publish lại `pm/<id>/io` để xác nhận (echo trạng thái thật).
-- **Validate payload chặt**: parse JSON, chỉ chấp nhận field `on` kiểu bool; payload sai/thiếu field/không phải JSON → bỏ qua + log cảnh báo. Không thực thi gì khác.
-- `[TODO-SAU]` (tùy chọn) `pm/<id>/cmd/reboot` — có trong doc network nhưng để sau, và phải cân nhắc an toàn.
+- **Validate payload chặt** với lệnh relay: sai JSON / thiếu field / giá trị lạ → bỏ qua + log cảnh báo, không đụng relay.
+- `[TODO-SAU]` (tùy chọn) `pm/<id>/cmd/reboot` — để sau, cân nhắc an toàn.
 
 ## 6. Kiến trúc module
 
@@ -190,7 +172,7 @@ Cần bật `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE` để dùng CA bundle. Cert riê
 1. **Broker-independent, 3 profile** trong NVS, 1 active. Dev mặc định Mosquitto. ✓
 2. **Device ID topic = DeviceName**; **client_id = DeviceName + MAC suffix** (tự sinh, duy nhất). ✓
 3. **QoS**: telemetry QoS0 (no retain); energy/io/alarm/cmd QoS1. ✓
-4. **Payload lệnh relay = JSON** `{"on":true}` / `{"on":false}` — một format duy nhất. ✓
+4. **Payload lệnh relay = JSON** `{"state":"on"}` / `{"state":"off"}` — một format duy nhất. ✓
 
 ## 12. Chốt thêm
 

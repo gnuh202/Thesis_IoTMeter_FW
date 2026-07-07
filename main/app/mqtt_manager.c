@@ -106,10 +106,10 @@ static void build_identity(void)
 
 /*
  * Parse a relay command payload and drive the output. The only accepted form is
- * a JSON object {"on":<bool>}; anything else (bad JSON, missing/typed-wrong
- * field, extra keys are ignored) is rejected without touching the relay. On a
- * valid command the physical output is set and the io topic is re-published so
- * subscribers see the confirmed state.
+ * a JSON object {"state":"on"|"off"}; anything else (bad JSON, missing/wrong
+ * type, unrecognized value, extra keys are ignored) is rejected without touching
+ * the relay. On a valid command the physical output is set and the io topic is
+ * re-published so subscribers see the confirmed state.
  */
 static void handle_relay_command(int out_index, const char *data, int len)
 {
@@ -119,14 +119,24 @@ static void handle_relay_command(int out_index, const char *data, int len)
         return;
     }
 
-    const cJSON *on = cJSON_GetObjectItemCaseSensitive(root, "on");
-    if (!cJSON_IsBool(on)) {
-        ESP_LOGW(TAG, "cmd/out%d: missing/invalid \"on\" bool; ignored", out_index);
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    if (!cJSON_IsString(state) || state->valuestring == NULL) {
+        ESP_LOGW(TAG, "cmd/out%d: missing/invalid \"state\" string; ignored", out_index);
         cJSON_Delete(root);
         return;
     }
 
-    bool level = cJSON_IsTrue(on);
+    bool level;
+    if (strcmp(state->valuestring, "on") == 0) {
+        level = true;
+    } else if (strcmp(state->valuestring, "off") == 0) {
+        level = false;
+    } else {
+        ESP_LOGW(TAG, "cmd/out%d: state must be \"on\" or \"off\"; ignored", out_index);
+        cJSON_Delete(root);
+        return;
+    }
+
     esp_err_t ret = (out_index == 0) ? io_expander_set_out0(level)
                                      : io_expander_set_out1(level);
     cJSON_Delete(root);
