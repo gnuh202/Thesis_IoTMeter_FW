@@ -1,0 +1,573 @@
+menu "Application Configuration"
+
+    orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
+
+    menu "Modbus"
+
+        config APP_MB_SLAVE_ADDR
+            hex "Modbus slave address"
+            range 0x01 0xF7
+            default 0xAB
+            help
+                RTU slave address of this energy meter.
+
+        config APP_MB_SLAVE_UART_PORT
+            int "Modbus slave UART port"
+            range 0 2
+            default 1
+            help
+                UART port used for the RS485 Modbus slave.
+
+        config APP_MB_SLAVE_RXD_GPIO
+            int "Modbus slave RXD GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 13
+            help
+                RS485 RX GPIO for Modbus slave.
+
+        config APP_MB_SLAVE_TXD_GPIO
+            int "Modbus slave TXD GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 14
+            help
+                RS485 TX GPIO for Modbus slave.
+
+        config APP_MB_SLAVE_TASK_STACK_SIZE
+            int "Modbus slave task stack size"
+            range 3072 16384
+            default 4096
+            help
+                Stack size for Modbus slave event task.
+
+        config APP_MB_SLAVE_TASK_PRIORITY
+            int "Modbus slave task priority"
+            range 1 20
+            default 7
+            help
+                Priority for Modbus slave event task.
+
+        config APP_MB_MASTER_UART_PORT
+            int "Modbus master UART port"
+            range 0 2
+            default 2
+            help
+                UART port reserved for future Modbus master.
+
+        config APP_MB_MASTER_RXD_GPIO
+            int "Modbus master RXD GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 11
+            help
+                RX GPIO reserved for future Modbus master.
+
+        config APP_MB_MASTER_TXD_GPIO
+            int "Modbus master TXD GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 12
+            help
+                TX GPIO reserved for future Modbus master.
+
+    endmenu
+
+    menu "I2C"
+
+        config APP_I2C_PORT_NUM
+            int "I2C port number"
+            range 0 1
+            default 0
+            help
+                I2C master port number.
+
+        config APP_I2C_SDA_IO
+            int "I2C SDA GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 8
+            help
+                GPIO number for I2C SDA.
+
+        config APP_I2C_SCL_IO
+            int "I2C SCL GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 9
+            help
+                GPIO number for I2C SCL.
+
+        config APP_I2C_CLK_SPEED_HZ
+            int "I2C clock speed"
+            range 10000 400000
+            default 100000
+            help
+                I2C clock speed in Hz.
+
+    endmenu
+
+    menu "PCF8574"
+
+        config APP_PCF8574_I2C_ADDR
+            hex "PCF8574 I2C address"
+            range 0x20 0x27
+            default 0x20
+            help
+                PCF8574 7-bit I2C address.
+
+        config APP_PCF8574_INT_GPIO
+            int "PCF8574 INT GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 10
+            help
+                ESP32 GPIO connected to PCF8574 INT pin.
+
+        config APP_IO_EXPANDER_TASK_STACK_SIZE
+            int "IO expander task stack size"
+            range 1024 16384
+            default 3072
+            help
+                Defines stack size for IO expander task.
+
+        config APP_IO_EXPANDER_TASK_PRIORITY
+            int "IO expander task priority"
+            range 1 20
+            default 6
+            help
+                Defines priority for IO expander task.
+
+    endmenu
+
+    menu "ATM90E32AS Energy Meter"
+
+        config APP_SHARED_SPI_HOST
+            int "Shared SPI host"
+            range 1 2
+            default 1
+            help
+                SPI host used by ATM90E32AS and SD card.
+
+        config APP_SHARED_SPI_MISO_GPIO
+            int "Shared SPI MISO GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 16
+            help
+                Shared SPI MISO GPIO.
+
+        config APP_SHARED_SPI_SCLK_GPIO
+            int "Shared SPI SCLK GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 17
+            help
+                Shared SPI SCLK GPIO.
+
+        config APP_SHARED_SPI_MOSI_GPIO
+            int "Shared SPI MOSI GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 18
+            help
+                Shared SPI MOSI GPIO.
+
+        config APP_ATM90E32AS_CS_GPIO
+            int "ATM90E32AS CS GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 38
+            help
+                Chip select GPIO for ATM90E32AS.
+
+        config APP_ATM90E32AS_IRQ2_GPIO
+            int "ATM90E32AS IRQ2 GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 39
+            help
+                IRQ2 input GPIO from ATM90E32AS.
+
+        config APP_ATM90E32AS_IRQ1_GPIO
+            int "ATM90E32AS IRQ1 GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 40
+            help
+                IRQ1 input GPIO from ATM90E32AS.
+
+        config APP_ATM90E32AS_WARN_GPIO
+            int "ATM90E32AS WARN_OUT GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 41
+            help
+                WARN_OUT input GPIO from ATM90E32AS.
+
+        config APP_ATM90E32AS_MODE_SEL_GPIO
+            int "ATM90E32AS mode select GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 21
+            help
+                Selects 3P3W high or 3P4W low.
+
+        config APP_ATM90E32AS_DEFAULT_MODE_3P3W
+            bool "Default wiring: 3-phase 3-wire mode"
+            default n
+            help
+                Initial wiring mode used only on first boot when no calibration
+                is saved in NVS. 3P3W drives the mode-select relay high; disabled
+                means 3P4W. Once a wiring mode is set and saved from the console
+                (meter-cal set --field wiring ... / save), the NVS value overrides
+                this default on every subsequent boot.
+
+        config APP_ATM90E32AS_DEFAULT_LINE_FREQ_60HZ
+            bool "Default grid frequency: 60 Hz"
+            default n
+            help
+                Initial line frequency used only on first boot when no calibration
+                is saved in NVS. Disabled means 50 Hz. A saved calibration in NVS
+                overrides this default.
+
+        config APP_ATM90E32AS_SPI_CLOCK_HZ
+            int "ATM90E32AS SPI clock Hz"
+            range 100000 2000000
+            default 200000
+            help
+                ATM90E32AS SPI clock. Use low speed during bring-up.
+
+        config APP_SD_CS_GPIO
+            int "SD card CS GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 8
+            help
+                SD card chip select GPIO on shared SPI bus.
+
+        config APP_SD_DET_GPIO
+            int "SD card detect GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 15
+            help
+                SD card detect input GPIO with pull-up.
+
+        config APP_ENERGY_METER_TASK_STACK_SIZE
+            int "Energy meter task stack size"
+            range 4096 16384
+            default 4096
+            help
+                Defines stack size for energy meter task.
+
+        config APP_ENERGY_METER_TASK_PRIORITY
+            int "Energy meter task priority"
+            range 1 20
+            default 6
+            help
+                Defines priority for energy meter task.
+
+        config APP_ENERGY_METER_POLL_PERIOD_MS
+            int "Energy meter poll period ms"
+            range 200 60000
+            default 1000
+            help
+                Period between ATM90E32AS measurement reads.
+
+        config APP_ENERGY_METER_LOG_EACH_SAMPLE
+            bool "Log each ATM90E32AS sample"
+            default n
+            help
+                Print every measurement to console. Disable to keep console shell clean.
+
+    endmenu
+
+    menu "Console Calibration"
+
+        config APP_CONSOLE_ENABLE
+            bool "Enable calibration console"
+            default y
+            help
+                Start esp_console REPL for ATM90E32AS calibration commands.
+
+        config APP_CONSOLE_PROMPT
+            string "Console prompt"
+            default "meter>"
+            help
+                Prompt string for the calibration console.
+
+        config APP_CONSOLE_MAX_CMDLINE_LENGTH
+            int "Console max command line length"
+            range 128 2048
+            default 512
+            help
+                Maximum command line length for the console.
+
+        config APP_CONSOLE_AUTH_ENABLE
+            bool "Require login for the console"
+            default y
+            help
+                Gate the calibration console behind a username/password prompt.
+                This is a developer tool, so login is enabled by default to keep
+                end users out. Authentication is cleartext over the serial link;
+                it deters casual access, it is not a cryptographic safeguard.
+
+        config APP_CONSOLE_AUTH_USERNAME
+            string "Console login username"
+            depends on APP_CONSOLE_AUTH_ENABLE
+            default "admin"
+            help
+                Username required to unlock the calibration console.
+
+        config APP_CONSOLE_AUTH_PASSWORD
+            string "Console login password"
+            depends on APP_CONSOLE_AUTH_ENABLE
+            default "meter-admin"
+            help
+                Password required to unlock the calibration console. Change this
+                before shipping devices.
+
+        config APP_CONSOLE_AUTH_MAX_ATTEMPTS
+            int "Console login attempts before lockout"
+            depends on APP_CONSOLE_AUTH_ENABLE
+            range 1 10
+            default 3
+            help
+                Number of failed login attempts allowed before the console
+                blocks further attempts until reboot.
+
+    endmenu
+
+    menu "WiFi Meter Server"
+
+        config APP_WIFI_METER_AP_SSID
+            string "WiFi meter AP SSID"
+            default "PowerMeter-AP"
+            help
+                SSID for local AP serving ATM90E32AS measurements.
+
+        config APP_WIFI_METER_AP_PASSWORD
+            string "WiFi meter AP password"
+            default "12345678"
+            help
+                Password for local AP. Empty string means open AP.
+
+        config APP_WIFI_METER_AP_CHANNEL
+            int "WiFi meter AP channel"
+            range 1 13
+            default 6
+            help
+                WiFi AP channel.
+
+        config APP_WIFI_METER_AP_MAX_CONN
+            int "WiFi meter AP max connections"
+            range 1 8
+            default 4
+            help
+                Maximum AP client connections.
+
+        config APP_WIFI_METER_HTTP_PORT
+            int "WiFi meter HTTP port"
+            range 1 65535
+            default 80
+            help
+                HTTP server port for measurement endpoint.
+
+        config APP_WIFI_METER_STA_SSID
+            string "WiFi STA SSID"
+            default ""
+            help
+                Router SSID for periodic upload.
+
+        config APP_WIFI_METER_STA_PASSWORD
+            string "WiFi STA password"
+            default ""
+            help
+                Router password for periodic upload.
+
+        config APP_WIFI_METER_UPLOAD_ENABLE
+            bool "Enable periodic upload"
+            default n
+            help
+                Periodically upload latest meter JSON to server.
+
+        config APP_WIFI_METER_UPLOAD_URL
+            string "Upload URL"
+            default ""
+            help
+                HTTP server URL for periodic POST upload.
+
+        config APP_WIFI_METER_UPLOAD_PERIOD_MS
+            int "Upload period ms"
+            range 1000 600000
+            default 5000
+            help
+                Period between upload attempts.
+
+        config APP_WIFI_METER_UPLOAD_TIMEOUT_MS
+            int "Upload timeout ms"
+            range 1000 60000
+            default 5000
+            help
+                HTTP client timeout for upload.
+
+        config APP_WIFI_METER_UPLOAD_TASK_STACK_SIZE
+            int "Upload task stack size"
+            range 3072 16384
+            default 4096
+            help
+                Stack size for WiFi upload task.
+
+        config APP_WIFI_METER_UPLOAD_TASK_PRIORITY
+            int "Upload task priority"
+            range 1 20
+            default 5
+            help
+                Priority for WiFi upload task.
+
+    endmenu
+
+    menu "Network Communication"
+
+        config APP_W5500_SPI_HOST
+            int "W5500 SPI host"
+            range 1 2
+            default 2
+            help
+                SPI host used by W5500.
+
+        config APP_W5500_SPI_MOSI_GPIO
+            int "W5500 SPI MOSI GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 5
+            help
+                GPIO number for W5500 SPI MOSI.
+
+        config APP_W5500_SPI_MISO_GPIO
+            int "W5500 SPI MISO GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 6
+            help
+                GPIO number for W5500 SPI MISO.
+
+        config APP_W5500_SPI_SCLK_GPIO
+            int "W5500 SPI SCLK GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 7
+            help
+                GPIO number for W5500 SPI SCLK.
+
+        config APP_W5500_SPI_CS_GPIO
+            int "W5500 SPI CS GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 9
+            help
+                GPIO number for W5500 SPI CS.
+
+        config APP_W5500_INT_GPIO
+            int "W5500 INT GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 4
+            help
+                GPIO number for W5500 interrupt.
+
+        config APP_W5500_RESET_PCF8574_PIN
+            int "W5500 reset PCF8574 pin"
+            range 0 7
+            default 0
+            help
+                PCF8574 pin used to reset W5500.
+
+        config APP_W5500_SPI_CLOCK_MHZ
+            int "W5500 SPI clock MHz"
+            range 1 40
+            default 20
+            help
+                SPI clock for W5500 in MHz.
+
+        config APP_NETWORK_COMM_TASK_STACK_SIZE
+            int "Network communication task stack size"
+            range 3072 16384
+            default 4096
+            help
+                Defines stack size for network communication task.
+
+        config APP_NETWORK_COMM_TASK_PRIORITY
+            int "Network communication task priority"
+            range 1 20
+            default 5
+            help
+                Defines priority for network communication task.
+
+        config APP_NETWORK_PING_PERIOD_MS
+            int "Network ping period ms"
+            range 1000 60000
+            default 5000
+            help
+                Period between ping sessions.
+
+        config APP_NET_ETH_LINK_TIMEOUT_MS
+            int "Ethernet link-up timeout ms"
+            range 1000 30000
+            default 5000
+            help
+                How long network_manager waits for the Ethernet PHY link after
+                boot before falling back to WiFi STA (AUTO mode).
+
+        config APP_NET_ETH_DHCP_TIMEOUT_MS
+            int "Ethernet DHCP timeout ms"
+            range 1000 60000
+            default 10000
+            help
+                How long to wait for an Ethernet IP after link-up before
+                treating it as a failure.
+
+        config APP_NET_ETH_DOWN_DEBOUNCE_MS
+            int "Ethernet link-down debounce ms"
+            range 0 30000
+            default 3000
+            help
+                How long the Ethernet link must stay down before failing over to
+                WiFi STA. Debounces cable jitter and brief link drops.
+
+        config APP_NET_STA_RETRY_MAX
+            int "WiFi STA connect retries before AP fallback"
+            range 1 20
+            default 5
+            help
+                Number of STA connect attempts (after Ethernet is unavailable)
+                before entering auto-AP recovery mode.
+
+        config APP_NET_AP_RECOVERY_GRACE_MS
+            int "Auto-AP recovery grace period ms"
+            range 0 600000
+            default 60000
+            help
+                After auto-AP recovery has started, how long to keep the SoftAP up
+                once a data path (Ethernet or STA) returns, before stopping the AP
+                and switching back. Gives a user time to finish configuring over AP.
+
+    endmenu
+
+    menu "MQTT Client"
+
+        config APP_MQTT_ENABLE
+            bool "Enable MQTT client"
+            default y
+            help
+                Build the MQTT telemetry/control client. When disabled, no MQTT
+                task is started. Runtime on/off is controlled separately by the
+                enabled flag in the active broker profile (NVS).
+
+        config APP_MQTT_PUBLISH_PERIOD_MS
+            int "Default telemetry publish period ms"
+            range 1000 600000
+            default 5000
+            help
+                Default period between telemetry publishes. This is only the
+                first-boot default; the runtime value lives in NVS
+                (config_mqtt_t.publish_period_ms) and can be changed without a
+                rebuild.
+
+        config APP_MQTT_TASK_STACK_SIZE
+            int "MQTT manager task stack size"
+            range 4096 16384
+            default 6144
+            help
+                Stack for the MQTT manager task. TLS handshakes need a large
+                stack; keep at least 6144 when TLS profiles are used.
+
+        config APP_MQTT_TASK_PRIORITY
+            int "MQTT manager task priority"
+            range 1 20
+            default 5
+            help
+                FreeRTOS priority of the MQTT manager task.
+
+    endmenu
+
+endmenu

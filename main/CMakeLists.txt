@@ -1,0 +1,15 @@
+idf_component_register(SRCS "app_main.c"
+                            "app/app_tasks.c"
+                            "app/io_expander.c"
+                            "app/config_store.c"
+                            "app/network_manager.c"
+                            "app/wifi_manager.c"
+                            "app/ethernet_driver.c"
+                            "app/energy_meter_task.c"
+                            "app/console_task.c"
+                            "app/modbus_slave_task.c"
+                            "app/modbus_master_task.c"
+                            "app/network_comm_task.c"
+                            "app/mqtt_manager.c"
+                    REQUIRES esp_driver_uart esp_driver_gpio esp_driver_spi esp_eth esp_event esp_netif esp_wifi esp_http_server esp_http_client esp_timer console nvs_flash lwip i2c_bus pcf8574 spi_bus_shared sd_card atm90e32as espressif__esp-modbus mqtt esp-tls mbedtls json esp_app_format
+                    INCLUDE_DIRS ".")

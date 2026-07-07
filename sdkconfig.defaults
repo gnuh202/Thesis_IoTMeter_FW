@@ -1,0 +1,16 @@
+# Project defaults for ESP32-S3 N16R2 (16 MB flash, 2 MB PSRAM).
+# These are applied when sdkconfig is (re)generated, so the flash/partition
+# setup survives a clean or an sdkconfig delete.
+
+# --- Flash: N16R2 has 16 MB ---
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# --- Partition table: custom, 3 MB app + FAT storage ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# --- TLS: bundled root CAs for MQTT broker verification (no per-broker cert needed) ---
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
