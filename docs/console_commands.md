@@ -137,7 +137,7 @@ mqtt-cfg enable
 # reboot
 ```
 
-> TLS/custom-CA chưa cấu hình được qua console (CA PEM quá dài cho một dòng lệnh) — xem [ESP32_MQTT_Design.md](ESP32_MQTT_Design.md) mục `[TODO-SAU]`.
+> TLS/custom-CA chưa cấu hình được qua console (CA PEM quá dài cho một dòng lệnh) — xem [mqtt_guide.md](mqtt_guide.md) mục ghi chú TLS/TODO.
 
 ---
 

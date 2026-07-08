@@ -44,7 +44,9 @@ Phân lớp app / driver / BSP và vòng đời khởi động: xem [docs/archit
 - [docs/architecture.md](docs/architecture.md) — kiến trúc, phân lớp, vòng đời khởi động (đọc trước khi bàn giao).
 - [docs/console_commands.md](docs/console_commands.md) — đầy đủ các lệnh console + bảng TAG log.
 - [docs/ESP32_Network_Manager_Design.md](docs/ESP32_Network_Manager_Design.md) — thiết kế network stack.
-- [docs/ESP32_MQTT_Design.md](docs/ESP32_MQTT_Design.md) — thiết kế MQTT.
+- [docs/mqtt_guide.md](docs/mqtt_guide.md) — hướng dẫn MQTT: cấu hình, lệnh PC/ESP console, testcase.
+- [docs/mqtt_payloads.md](docs/mqtt_payloads.md) — nguồn duy nhất cho topic + payload MQTT.
+- [docs/ESP32_WebPortal_Design.md](docs/ESP32_WebPortal_Design.md) — thiết kế Web Configuration Portal.
 - [docs/atm90e32as_console_calib.md](docs/atm90e32as_console_calib.md) — hướng dẫn hiệu chỉnh đo.
 - [docs/modbus_slave_register_map.md](docs/modbus_slave_register_map.md) — bản đồ thanh ghi Modbus.
 
