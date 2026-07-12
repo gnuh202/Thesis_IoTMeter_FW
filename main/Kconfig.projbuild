@@ -133,6 +133,63 @@ menu "Application Configuration"
 
     endmenu
 
+    menu "HMI"
+
+        config APP_HMI_TEST_ENABLE
+            bool "Enable HMI bring-up test task"
+            default y
+            help
+                Starts the LCD2004/buttons/LEDs/buzzer hardware test task.
+
+        config APP_HMI_LCD2004_I2C_ADDR
+            hex "LCD2004 I2C backpack address"
+            range 0x20 0x27
+            default 0x27
+            help
+                PCF8574 backpack 7-bit I2C address for LCD2004.
+
+        config APP_HMI_PCF8575_I2C_ADDR
+            hex "HMI PCF8575 I2C address"
+            range 0x20 0x27
+            default 0x21
+            help
+                PCF8575 7-bit I2C address for HMI buttons, LEDs, and buzzer.
+
+        config APP_HMI_TASK_STACK_SIZE
+            int "HMI test task stack size"
+            range 2048 16384
+            default 4096
+            help
+                Stack size for the HMI test task.
+
+        config APP_HMI_TASK_PRIORITY
+            int "HMI test task priority"
+            range 1 20
+            default 5
+            help
+                Priority for the HMI test task.
+
+        config APP_HMI_BUZZER_CLICK_MS
+            int "HMI buzzer click duration in milliseconds"
+            range 0 1000
+            default 500
+            help
+                Duration of the active buzzer click on each button press. Set to 0 to disable the click effect.
+
+        config APP_HMI_BUTTON_ACTIVE_LOW
+            bool "HMI buttons are active-low"
+            default y
+            help
+                Select if pressed buttons pull PCF8575 input pins low.
+
+        config APP_HMI_LED_ACTIVE_HIGH
+            bool "HMI LEDs are active-high"
+            default y
+            help
+                Select if PCF8575 output high turns an LED on.
+
+    endmenu
+
     menu "ATM90E32AS Energy Meter"
 
         config APP_SHARED_SPI_HOST

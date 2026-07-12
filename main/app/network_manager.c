@@ -13,6 +13,7 @@
 #include "sdkconfig.h"
 #include "config_store.h"
 #include "ethernet_driver.h"
+#include "web_portal.h"
 #include "wifi_manager.h"
 
 /*
@@ -101,6 +102,51 @@ static void publish_iface(network_iface_t iface, bool has_ip, const char *ip)
         s_status.ip[0] = '\0';
     }
     xSemaphoreGive(s_status_mutex);
+}
+
+static void set_ap_active(bool active)
+{
+    if (s_status_mutex == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_status_mutex, portMAX_DELAY);
+    s_status.ap_active = active;
+    xSemaphoreGive(s_status_mutex);
+}
+
+/* Start/stop SoftAP and the HTTP portal as one lifecycle unit. */
+static esp_err_t stop_ap_with_portal(void);
+
+static esp_err_t start_ap_with_portal(void)
+{
+    esp_err_t ret = wifi_manager_start_ap();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = web_portal_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "web portal start failed: %s", esp_err_to_name(ret));
+        wifi_manager_stop_ap();
+        return ret;
+    }
+
+    set_ap_active(true);
+    return ESP_OK;
+}
+
+static esp_err_t stop_ap_with_portal(void)
+{
+    esp_err_t web_ret = web_portal_stop();
+    if (web_ret != ESP_OK) {
+        ESP_LOGW(TAG, "web portal stop failed: %s", esp_err_to_name(web_ret));
+    }
+
+    esp_err_t ap_ret = wifi_manager_stop_ap();
+    if (ap_ret == ESP_OK) {
+        set_ap_active(false);
+    }
+    return ap_ret != ESP_OK ? ap_ret : web_ret;
 }
 
 /* Make the given netif the default route for outbound traffic. */
@@ -216,7 +262,7 @@ static void network_manager_task(void *arg)
                          * this is a total network loss. Raise the recovery AP so
                          * the device stays reachable for reconfiguration. */
                         ESP_LOGW(TAG, "Ethernet down and no STA credentials; starting recovery AP");
-                        if (wifi_manager_start_ap() == ESP_OK) {
+                        if (start_ap_with_portal() == ESP_OK) {
                             ap_recovery = true;
                             set_state(NETWORK_STATE_AP_MODE);
                         }
@@ -242,12 +288,13 @@ static void network_manager_task(void *arg)
             } else {
                 /* STA is trying but has no IP. If it has failed to associate too
                  * many times, both data paths are effectively gone: raise the
-                 * recovery AP (the STA keeps retrying underneath in case the
-                 * router returns). */
+                 * recovery AP. Stop STA retries first so the SoftAP stays on a
+                 * stable channel and remains discoverable for local config. */
                 if (!ap_recovery && wifi_manager_sta_fail_count() >= CONFIG_APP_NET_STA_RETRY_MAX) {
                     ESP_LOGW(TAG, "WiFi STA failed %u times; starting recovery AP",
                              (unsigned)wifi_manager_sta_fail_count());
-                    if (wifi_manager_start_ap() == ESP_OK) {
+                    wifi_manager_sta_disconnect();
+                    if (start_ap_with_portal() == ESP_OK) {
                         ap_recovery = true;
                         set_state(NETWORK_STATE_AP_MODE);
                     }
@@ -272,7 +319,7 @@ static void network_manager_task(void *arg)
                     ESP_LOGI(TAG, "data path restored; recovery AP will close after grace period");
                 } else if ((now - recovery_ok_since_us) / 1000 >= CONFIG_APP_NET_AP_RECOVERY_GRACE_MS) {
                     ESP_LOGI(TAG, "grace period elapsed; stopping recovery AP");
-                    wifi_manager_stop_ap();
+                    stop_ap_with_portal();
                     ap_recovery = false;
                     recovery_ok_since_us = 0;
                 }
@@ -336,31 +383,19 @@ esp_err_t network_manager_start(void)
 }
 
 /*
- * Config-portal and restart entry points are declared for the web/LCD layers.
- * They are stubs until the WiFi driver is migrated behind the manager.
+ * Config-portal and restart entry points are used by console/web/LCD layers.
+ * Config portal owns SoftAP + web_portal as one lifecycle unit.
  */
 esp_err_t network_manager_start_config_portal(void)
 {
     /* Bring up the SoftAP on demand. It coexists with the active ETH/STA data
      * path, so telemetry is not interrupted while the portal is open. */
-    esp_err_t ret = wifi_manager_start_ap();
-    if (ret == ESP_OK) {
-        xSemaphoreTake(s_status_mutex, portMAX_DELAY);
-        s_status.ap_active = true;
-        xSemaphoreGive(s_status_mutex);
-    }
-    return ret;
+    return start_ap_with_portal();
 }
 
 esp_err_t network_manager_stop_config_portal(void)
 {
-    esp_err_t ret = wifi_manager_stop_ap();
-    if (ret == ESP_OK) {
-        xSemaphoreTake(s_status_mutex, portMAX_DELAY);
-        s_status.ap_active = false;
-        xSemaphoreGive(s_status_mutex);
-    }
-    return ret;
+    return stop_ap_with_portal();
 }
 
 esp_err_t network_manager_restart(void)

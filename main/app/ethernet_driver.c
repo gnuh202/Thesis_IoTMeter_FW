@@ -11,7 +11,7 @@
 #include "esp_eth_phy.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_netif.h"
+#include "gpio_isr_service.h"
 #include "io_expander.h"
 #include "network_manager.h"
 #include "sdkconfig.h"
@@ -111,23 +111,37 @@ esp_err_t ethernet_driver_init(void)
     eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(spi_host, &dev_config);
     w5500_config.int_gpio_num = CONFIG_APP_W5500_INT_GPIO;
 
-    esp_err_t gpio_isr_ret = gpio_install_isr_service(0);
-    if (gpio_isr_ret != ESP_OK && gpio_isr_ret != ESP_ERR_INVALID_STATE) {
-        ESP_RETURN_ON_ERROR(gpio_isr_ret, TAG, "install GPIO ISR service failed");
-    }
+    /* The W5500 SPI MAC installs the global GPIO ISR service itself for its INT
+     * pin. If another driver (io_expander) already installed it, ESP-IDF logs a
+     * noisy "GPIO isr service already installed" error even though it is benign.
+     * Pre-install it through our idempotent helper and silence the gpio tag for
+     * the window where esp_eth may re-install, then restore the level. */
+    esp_err_t gpio_isr_ret = gpio_isr_service_ensure_installed(0);
+    ESP_RETURN_ON_ERROR(gpio_isr_ret, TAG, "install GPIO ISR service failed");
+
+    esp_log_level_t prev_gpio_log = esp_log_level_get("gpio");
+    esp_log_level_set("gpio", ESP_LOG_NONE);
 
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
     phy_config.reset_gpio_num = -1;
 
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
-    ESP_RETURN_ON_FALSE(mac != NULL, ESP_ERR_NO_MEM, TAG, "create W5500 MAC failed");
+    if (mac == NULL) {
+        esp_log_level_set("gpio", prev_gpio_log);
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_NO_MEM, TAG, "create W5500 MAC failed");
+    }
 
     esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
-    ESP_RETURN_ON_FALSE(phy != NULL, ESP_ERR_NO_MEM, TAG, "create W5500 PHY failed");
+    if (phy == NULL) {
+        esp_log_level_set("gpio", prev_gpio_log);
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_NO_MEM, TAG, "create W5500 PHY failed");
+    }
 
     esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
-    ESP_RETURN_ON_ERROR(esp_eth_driver_install(&eth_config, &s_eth_handle), TAG, "install Ethernet driver failed");
+    esp_err_t install_ret = esp_eth_driver_install(&eth_config, &s_eth_handle);
+    esp_log_level_set("gpio", prev_gpio_log);
+    ESP_RETURN_ON_ERROR(install_ret, TAG, "install Ethernet driver failed");
 
     s_eth_netif_glue = esp_eth_new_netif_glue(s_eth_handle);
     ESP_RETURN_ON_FALSE(s_eth_netif_glue != NULL, ESP_ERR_NO_MEM, TAG, "create netif glue failed");

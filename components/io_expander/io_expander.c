@@ -6,7 +6,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "freertos/task.h"
+#include "gpio_isr_service.h"
 #include "i2c_bus.h"
 #include "pcf8574.h"
 #include "sdkconfig.h"
@@ -106,10 +106,8 @@ static esp_err_t io_expander_interrupt_init(void)
     };
     ESP_RETURN_ON_ERROR(gpio_config(&int_gpio_config), TAG, "config PCF8574 INT GPIO failed");
 
-    esp_err_t ret = gpio_install_isr_service(0);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_RETURN_ON_ERROR(ret, TAG, "install GPIO ISR service failed");
-    }
+    esp_err_t ret = gpio_isr_service_ensure_installed(0);
+    ESP_RETURN_ON_ERROR(ret, TAG, "install GPIO ISR service failed");
 
     ret = gpio_isr_handler_add(CONFIG_APP_PCF8574_INT_GPIO, io_expander_isr_handler, NULL);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {

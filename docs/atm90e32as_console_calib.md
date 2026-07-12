@@ -37,7 +37,7 @@ Tài khoản mặc định (đổi trong `menuconfig` → *Application Configura
 | Config                            | Mặc định      |
 | --------------------------------- | ------------- |
 | `APP_CONSOLE_AUTH_USERNAME`       | `admin`       |
-| `APP_CONSOLE_AUTH_PASSWORD`       | `meter-admin` |
+| `APP_CONSOLE_AUTH_PASSWORD`       | `admin`       |
 | `APP_CONSOLE_AUTH_MAX_ATTEMPTS`   | `3`           |
 
 - Sai quá số lần cho phép → console **khóa tới khi reboot**.
