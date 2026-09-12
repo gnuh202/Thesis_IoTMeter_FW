@@ -11,5 +11,13 @@ idf_component_register(SRCS "app_main.c"
                             "app/mqtt_manager.c"
                             "app/web_portal.c"
                             "app/hmi_test_task.c"
-                    REQUIRES esp_driver_uart esp_driver_gpio esp_driver_spi esp_eth esp_event esp_netif esp_wifi esp_http_server esp_http_client esp_timer console nvs_flash lwip i2c_bus pcf8574 spi_bus_shared sd_card atm90e32as espressif__esp-modbus mqtt esp-tls mbedtls json esp_app_format config_store io_expander hmi_bsp lcd_menu gpio_isr_service
+                            "app/boot_manager.c"
+                            "app/home_screen.c"
+                            "app/measurement_data.c"
+                            "app/system_status.c"
+                            "app/config_manager.c"
+                            "app/register_access.c"
+                            "app/config_apply.c"
+                            "app/cert_store.c"
+                    REQUIRES esp_driver_uart esp_driver_gpio esp_driver_spi esp_eth esp_event esp_netif esp_wifi esp_http_server esp_http_client esp_timer console nvs_flash lwip i2c_bus pcf8574 spi_bus_shared sd_card atm90e32as espressif__esp-modbus mqtt esp-tls mbedtls json esp_app_format app_update esp_psram config_store io_expander hmi_bsp lcd_menu gpio_isr_service modbus_meters fatfs wear_levelling
                     INCLUDE_DIRS ".")

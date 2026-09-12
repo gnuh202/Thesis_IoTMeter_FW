@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -25,7 +26,7 @@ typedef enum {
     LCD_MENU_KEY_UP,     /* move selection up / scroll up */
     LCD_MENU_KEY_DOWN,   /* move selection down / scroll down */
     LCD_MENU_KEY_LEFT,   /* Back: leave submenu, or trigger save prompt at root */
-    LCD_MENU_KEY_RIGHT,  /* Drill-in only: enter a submenu; ignored on other items */
+    LCD_MENU_KEY_RIGHT,  /* Reserved: intentionally ignored by menu navigation */
     LCD_MENU_KEY_OK,     /* Activate: enter submenu, toggle bool, run action, confirm save */
     LCD_MENU_KEY_BACK = LCD_MENU_KEY_LEFT,
 } lcd_menu_key_t;
@@ -34,6 +35,7 @@ typedef enum {
     LCD_MENU_ITEM_SUBMENU = 0,
     LCD_MENU_ITEM_ACTION,
     LCD_MENU_ITEM_BOOL,
+    LCD_MENU_ITEM_VALUE, /* label left + dynamic value right; OK runs action */
     LCD_MENU_ITEM_BACK,
     LCD_MENU_ITEM_SAVE,
 } lcd_menu_item_type_t;
@@ -45,6 +47,8 @@ typedef esp_err_t (*lcd_menu_bool_set_cb_t)(lcd_menu_t *menu, const lcd_menu_ite
 typedef esp_err_t (*lcd_menu_bool_changed_cb_t)(lcd_menu_t *menu, const lcd_menu_item_t *item, bool value, void *user_ctx);
 typedef esp_err_t (*lcd_menu_save_cb_t)(lcd_menu_t *menu, void *user_ctx);
 typedef esp_err_t (*lcd_menu_discard_cb_t)(lcd_menu_t *menu, void *user_ctx);
+typedef void (*lcd_menu_value_get_cb_t)(lcd_menu_t *menu, const lcd_menu_item_t *item,
+                                        char *buf, size_t buf_size, void *user_ctx);
 
 struct lcd_menu_item_t {
     const char *label;
@@ -54,6 +58,7 @@ struct lcd_menu_item_t {
     lcd_menu_bool_get_cb_t bool_get;
     lcd_menu_bool_set_cb_t bool_set;
     lcd_menu_action_cb_t action;
+    lcd_menu_value_get_cb_t value_get;
     void *user_data;
 };
 
@@ -72,6 +77,7 @@ typedef struct {
     bool wrap_cursor;
     bool show_scroll_markers;
     bool ask_save_on_exit;
+    bool show_position_counter;
     void *user_ctx;
     lcd_menu_write_line_cb_t write_line;
     lcd_menu_bool_changed_cb_t bool_changed;

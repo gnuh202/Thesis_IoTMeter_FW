@@ -29,6 +29,15 @@ extern "C" {
  * begins driving the event group. Safe to call once. */
 esp_err_t ethernet_driver_init(void);
 
+/* Apply the stored DHCP/static IP configuration to the Ethernet netif. Called
+ * during ethernet_driver_init() before esp_eth_start(), and again by
+ * config_apply when the user changes the network settings at runtime.
+ *
+ * A missing or unparseable static address is not treated as fatal: the function
+ * logs and leaves DHCP in place rather than bringing the interface up with a
+ * half-applied address. Returns ESP_ERR_INVALID_STATE before the netif exists. */
+esp_err_t ethernet_driver_apply_ip(void);
+
 /* Event group carrying ETHERNET_DRIVER_GOT_IP_BIT (set on got-IP, cleared on
  * link down). NULL until ethernet_driver_init() has run. */
 EventGroupHandle_t ethernet_driver_event_group(void);

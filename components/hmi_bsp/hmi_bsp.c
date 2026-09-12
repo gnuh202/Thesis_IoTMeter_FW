@@ -36,7 +36,14 @@ static uint16_t hmi_bsp_make_output_latch(void)
 {
     uint16_t latch = HMI_BUTTON_INPUT_MASK;
 
-    if (s_buzzer_on) {
+    /* Buzzer: for an active-low buzzer the PCF8575 pin must idle HIGH and be
+     * driven LOW to sound; only set the bit when we want it silent. */
+#if CONFIG_APP_HMI_BUZZER_ACTIVE_HIGH
+    bool buzzer_level = s_buzzer_on;
+#else
+    bool buzzer_level = !s_buzzer_on;
+#endif
+    if (buzzer_level) {
         latch |= (1U << HMI_PCF8575_PIN_BUZZER);
     }
 
@@ -85,6 +92,12 @@ esp_err_t hmi_bsp_lcd_print_line(uint8_t row, const char *text)
     return lcd2004_i2c_print_line(s_lcd, row, text);
 }
 
+esp_err_t hmi_bsp_lcd_backlight(bool on)
+{
+    ESP_RETURN_ON_ERROR(hmi_bsp_init(), TAG, "init HMI failed");
+    return lcd2004_i2c_backlight(s_lcd, on);
+}
+
 esp_err_t hmi_bsp_read_buttons(uint8_t *pressed_mask)
 {
     ESP_RETURN_ON_FALSE(pressed_mask != NULL, ESP_ERR_INVALID_ARG, TAG, "pressed_mask is NULL");
@@ -98,10 +111,13 @@ esp_err_t hmi_bsp_read_buttons(uint8_t *pressed_mask)
         uint8_t mask;
     } buttons[] = {
         {HMI_PCF8575_PIN_SW_RIGHT, HMI_BSP_BUTTON_RIGHT},
-        {HMI_PCF8575_PIN_SW_BOTTOM, HMI_BSP_BUTTON_BOTTOM},
+        /* New PCB swaps the physical TOP/BOTTOM switch positions.
+         * The UI still treats TOP as UP/increment and BOTTOM as DOWN/decrement,
+         * so remap at the BSP layer instead of changing every menu. */
+        {HMI_PCF8575_PIN_SW_BOTTOM, HMI_BSP_BUTTON_TOP},
         {HMI_PCF8575_PIN_SW_CENTER, HMI_BSP_BUTTON_CENTER},
         {HMI_PCF8575_PIN_SW_LEFT, HMI_BSP_BUTTON_LEFT},
-        {HMI_PCF8575_PIN_SW_TOP, HMI_BSP_BUTTON_TOP},
+        {HMI_PCF8575_PIN_SW_TOP, HMI_BSP_BUTTON_BOTTOM},
     };
 
     uint8_t mask = 0;
@@ -149,6 +165,12 @@ esp_err_t hmi_bsp_buzzer_set(bool on)
 
 esp_err_t hmi_bsp_buzzer_click(uint32_t ms)
 {
-    (void)ms;
+    if (ms == 0) {
+        /* Click disabled: make sure the buzzer stays silent. */
+        return hmi_bsp_buzzer_set(false);
+    }
+
+    ESP_RETURN_ON_ERROR(hmi_bsp_buzzer_set(true), TAG, "buzzer on failed");
+    vTaskDelay(pdMS_TO_TICKS(ms));
     return hmi_bsp_buzzer_set(false);
 }

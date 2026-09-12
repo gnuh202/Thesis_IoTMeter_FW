@@ -1,6 +1,8 @@
 #include "wifi_manager.h"
 
+#include <stdlib.h>
 #include <string.h>
+#include "config_manager.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -8,6 +10,7 @@
 #include "esp_wifi.h"
 #include "network_manager.h"
 #include "sdkconfig.h"
+#include "system_status.h"
 
 /*
  * WiFi manager. Extracted verbatim from wifi_meter_server.c during phase-A
@@ -48,6 +51,7 @@ static void wifi_manager_event_handler(void *arg, esp_event_base_t event_base, i
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_event_group, WIFI_MANAGER_STA_GOT_IP_BIT);
+        system_status_set(SYS_MODULE_WIFI, SYS_STATUS_OFFLINE);
         if (s_sta_enabled) {
             s_sta_fail_count++;
             ESP_LOGW(TAG, "WiFi STA disconnected (fail %u), reconnecting", (unsigned)s_sta_fail_count);
@@ -58,6 +62,7 @@ static void wifi_manager_event_handler(void *arg, esp_event_base_t event_base, i
         ESP_LOGI(TAG, "WiFi STA got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_sta_fail_count = 0;
         xEventGroupSetBits(s_event_group, WIFI_MANAGER_STA_GOT_IP_BIT);
+        system_status_set(SYS_MODULE_WIFI, SYS_STATUS_READY);
     }
 }
 
@@ -136,6 +141,24 @@ esp_err_t wifi_manager_sta_set_credentials(const char *ssid, const char *passwor
     return ESP_OK;
 }
 
+/*
+ * Read the SSID back out of the WiFi driver instead of caching a "we have creds"
+ * flag. network_manager's failover decision is re-evaluated on every poll, and
+ * credentials can now arrive at runtime via config_apply(CONFIG_APPLY_WIFI) —
+ * a flag latched once at task start would never see them.
+ */
+bool wifi_manager_sta_has_credentials(void)
+{
+    if (!s_started) {
+        return false;
+    }
+    wifi_config_t sta_config = {0};
+    if (esp_wifi_get_config(WIFI_IF_STA, &sta_config) != ESP_OK) {
+        return false;
+    }
+    return sta_config.sta.ssid[0] != '\0';
+}
+
 esp_err_t wifi_manager_sta_connect(void)
 {
     ESP_RETURN_ON_FALSE(s_started, ESP_ERR_INVALID_STATE, TAG, "wifi manager not started");
@@ -180,9 +203,9 @@ esp_netif_t *wifi_manager_sta_netif(void)
 }
 
 /*
- * Bring the SoftAP up on demand for the config portal / auto-AP recovery.
- * Switches the WiFi mode to APSTA so the AP coexists with any STA link, then
- * applies the AP config. No-op if the AP is already active.
+ * Bring the SoftAP up on demand for the user-launched config portal. Disconnects
+ * the STA so AP and STA do not coexist; the caller may restart STA after the AP
+ * is torn down. No-op if the AP is already active.
  */
 esp_err_t wifi_manager_start_ap(void)
 {
@@ -191,25 +214,67 @@ esp_err_t wifi_manager_start_ap(void)
         return ESP_OK;
     }
 
+    /* AP and STA are mutually exclusive. Tear down the STA side first so the
+     * SoftAP does not have to share channels/bus time with an active WiFi link.
+     * Caller (network_manager) decides whether to re-connect later. */
+    if (s_sta_enabled) {
+        s_sta_enabled = false;
+        xEventGroupClearBits(s_event_group, WIFI_MANAGER_STA_GOT_IP_BIT);
+        esp_wifi_disconnect();
+    }
+
+    char ssid[CONFIG_MANAGER_SSID_LEN];
+    char pass[CONFIG_MANAGER_PASS_LEN];
+    strlcpy(ssid, CONFIG_APP_WIFI_METER_AP_SSID, sizeof(ssid));
+    strlcpy(pass, CONFIG_APP_WIFI_METER_AP_PASSWORD, sizeof(pass));
+
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg != NULL && config_manager_get(cfg) == ESP_OK) {
+        if (cfg->ap_ssid[0] != '\0') {
+            strlcpy(ssid, cfg->ap_ssid, sizeof(ssid));
+        }
+        /* Password may be empty (open AP) when set from portal; always take it
+         * when config is available so Kconfig is only the factory seed. */
+        strlcpy(pass, cfg->ap_pass, sizeof(pass));
+    }
+    free(cfg);
+
     wifi_config_t ap_config = {0};
-    strlcpy((char *)ap_config.ap.ssid, CONFIG_APP_WIFI_METER_AP_SSID, sizeof(ap_config.ap.ssid));
-    strlcpy((char *)ap_config.ap.password, CONFIG_APP_WIFI_METER_AP_PASSWORD, sizeof(ap_config.ap.password));
-    ap_config.ap.ssid_len = strlen(CONFIG_APP_WIFI_METER_AP_SSID);
+    strlcpy((char *)ap_config.ap.ssid, ssid, sizeof(ap_config.ap.ssid));
+    strlcpy((char *)ap_config.ap.password, pass, sizeof(ap_config.ap.password));
+    ap_config.ap.ssid_len = strlen(ssid);
     ap_config.ap.channel = CONFIG_APP_WIFI_METER_AP_CHANNEL;
     ap_config.ap.max_connection = CONFIG_APP_WIFI_METER_AP_MAX_CONN;
-    ap_config.ap.authmode = strlen(CONFIG_APP_WIFI_METER_AP_PASSWORD) == 0 ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+    ap_config.ap.authmode = (pass[0] == '\0') ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "set APSTA mode failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap_config), TAG, "set AP config failed");
 
     s_ap_active = true;
-    ESP_LOGI(TAG, "SoftAP started. SSID=%s", CONFIG_APP_WIFI_METER_AP_SSID);
+    ESP_LOGI(TAG, "SoftAP started (STA stopped). SSID=%s", ssid);
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_ap_get_ssid(char *out, size_t out_len)
+{
+    ESP_RETURN_ON_FALSE(out != NULL && out_len > 0U, ESP_ERR_INVALID_ARG, TAG, "bad out");
+    out[0] = '\0';
+
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg != NULL && config_manager_get(cfg) == ESP_OK && cfg->ap_ssid[0] != '\0') {
+        strlcpy(out, cfg->ap_ssid, out_len);
+        free(cfg);
+        return ESP_OK;
+    }
+    free(cfg);
+    strlcpy(out, CONFIG_APP_WIFI_METER_AP_SSID, out_len);
     return ESP_OK;
 }
 
 /*
- * Take the SoftAP down and return to STA-only mode. The STA link (if any) is
- * left untouched. No-op if the AP is not active.
+ * Take the SoftAP down and return to STA-only mode. If STA credentials are
+ * configured, reconnect the STA so the data path returns automatically after the
+ * user closes the portal. No-op if the AP is not active.
  */
 esp_err_t wifi_manager_stop_ap(void)
 {
@@ -220,12 +285,39 @@ esp_err_t wifi_manager_stop_ap(void)
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set STA mode failed");
 
+    /* AP/STA are mutually exclusive (start_ap stopped STA). Bring STA back so
+     * the operator's data path resumes when the portal closes. Credentials
+     * are checked live — they may have arrived via the portal we just tore down. */
+    if (wifi_manager_sta_has_credentials()) {
+        s_sta_enabled = true;
+        s_sta_fail_count = 0;
+        esp_wifi_connect();
+        ESP_LOGI(TAG, "SoftAP stopped; STA reconnecting");
+    } else {
+        ESP_LOGI(TAG, "SoftAP stopped (no STA credentials)");
+    }
+
     s_ap_active = false;
-    ESP_LOGI(TAG, "SoftAP stopped");
     return ESP_OK;
 }
 
 bool wifi_manager_ap_is_active(void)
 {
     return s_ap_active;
+}
+
+uint8_t wifi_manager_ap_sta_count(void)
+{
+    if (!s_ap_active) {
+        return 0;
+    }
+
+    wifi_sta_list_t sta_list = {0};
+    if (esp_wifi_ap_get_sta_list(&sta_list) != ESP_OK) {
+        return 0;
+    }
+    if (sta_list.num <= 0) {
+        return 0;
+    }
+    return (uint8_t)sta_list.num;
 }

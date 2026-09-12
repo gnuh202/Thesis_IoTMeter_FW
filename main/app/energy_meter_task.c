@@ -1,9 +1,19 @@
 #include "energy_meter_task.h"
 
+#include <limits.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "atm90e32as.h"
+#include "config_manager.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "measurement_data.h"
+#include "modbus_master_task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
@@ -12,20 +22,53 @@
 #include "sd_card.h"
 #include "sdkconfig.h"
 #include "spi_bus_shared.h"
+#include "system_status.h"
+#include "esp_crc.h"
 
 #ifndef CONFIG_APP_ATM90E32AS_DEFAULT_MODE_3P3W
 #define CONFIG_APP_ATM90E32AS_DEFAULT_MODE_3P3W 0
 #endif
 
-#ifndef CONFIG_APP_ATM90E32AS_DEFAULT_LINE_FREQ_60HZ
-#define CONFIG_APP_ATM90E32AS_DEFAULT_LINE_FREQ_60HZ 0
+/* Fallbacks if sdkconfig not yet regenerated after Kconfig change. */
+#ifndef CONFIG_APP_ATM90E32AS_DEFAULT_PGA_4X
+#ifndef CONFIG_APP_ATM90E32AS_DEFAULT_PGA_2X
+#ifndef CONFIG_APP_ATM90E32AS_DEFAULT_PGA_1X
+#define CONFIG_APP_ATM90E32AS_DEFAULT_PGA_1X 1
 #endif
+#endif
+#endif
+
+#ifndef CONFIG_APP_ATM90E32AS_DEFAULT_LINE_FREQ_60HZ
+#ifndef CONFIG_APP_ATM90E32AS_DEFAULT_LINE_FREQ_50HZ
+#define CONFIG_APP_ATM90E32AS_DEFAULT_LINE_FREQ_50HZ 1
+#endif
+#endif
+
+#ifndef CONFIG_APP_ATM90E32AS_R_BURDEN_MOHM
+#define CONFIG_APP_ATM90E32AS_R_BURDEN_MOHM 4400
+#endif
+#ifndef CONFIG_APP_ATM90E32AS_CT_RATIO
+#define CONFIG_APP_ATM90E32AS_CT_RATIO 2000
+#endif
+#ifndef CONFIG_APP_ATM90E32AS_I_RATED_A
+#define CONFIG_APP_ATM90E32AS_I_RATED_A 100
+#endif
+#ifndef CONFIG_APP_ATM90E32AS_I_EXPECTED_A
+#define CONFIG_APP_ATM90E32AS_I_EXPECTED_A 75
+#endif
+
+/* CT / PGA auto-select constants (locked product design). */
+#define ENERGY_METER_VADC_LIMIT_V   0.72f          /* 720 mVrms full-scale target */
+#define ENERGY_METER_FACTORY_GAIN   0x8000U        /* IC default UGAIN/IGAIN */
+#define ENERGY_METER_R_BURDEN_OHM \
+    ((float)CONFIG_APP_ATM90E32AS_R_BURDEN_MOHM / 1000.0f)
 
 static const char *TAG = "energy_meter";
 static atm90e32as_handle_t s_meter;
 static SemaphoreHandle_t s_meter_mutex;
 static SemaphoreHandle_t s_measurements_mutex;
 static atm90e32as_calib_t s_current_calib;
+static atm90e32as_calib_t s_applied_calib;
 static atm90e32as_measurements_t s_latest_measurements;
 static bool s_measurements_valid;
 
@@ -43,16 +86,304 @@ static float s_demand_max_w;
 static uint16_t s_demand_window_min = 15;
 
 #define ENERGY_METER_CALIB_MAGIC 0x9032CA1BU
-#define ENERGY_METER_CALIB_VERSION 1
+/* Single calibration profile (no 3W/4W slots — wiring switch only drives relay,
+ * phase gains remain common across modes). Magic kept for blob identification
+ * on NVS load; legacy v2/v3 blobs (with version + profile[2]) are rejected on
+ * size mismatch — user erases flash whenever the NVS layout changes. */
 #define ENERGY_METER_NVS_NAMESPACE "atm90e32as"
-#define ENERGY_METER_NVS_CALIB_KEY "calib_v1"
+#define ENERGY_METER_NVS_CALIB_KEY "profiles_v2"
+#define ENERGY_METER_RELAY_SETTLE_MS 20
+#define ENERGY_METER_MEASUREMENT_SETTLE_MS 200
 
 typedef struct {
     uint32_t magic;
-    uint16_t version;
-    uint16_t reserved;
     atm90e32as_calib_t calib;
 } energy_meter_calib_blob_t;
+
+/* Single calibration profile — phase gains + chip-wide stamps (pga, line_freq,
+ * wiring_mode). The same struct is used for the active calibration in RAM, the
+ * NVS blob, and the SD CALB payload source. Switching wiring mode only
+ * changes the chip mode bit / relay; phase gains are never touched. */
+static atm90e32as_calib_t s_calib;
+
+static esp_err_t energy_meter_apply_locked(const atm90e32as_calib_t *target);
+static void energy_meter_stamp_chipwide_locked(atm90e32as_pga_gain_t pga,
+                                              atm90e32as_line_freq_t freq);
+
+/* Kconfig "ATM90E32AS Parameters" — first-boot / factory defaults only. */
+static atm90e32as_pga_gain_t energy_meter_kconfig_default_pga(void)
+{
+#if CONFIG_APP_ATM90E32AS_DEFAULT_PGA_4X
+    return ATM90E32AS_PGA_GAIN_4X;
+#elif CONFIG_APP_ATM90E32AS_DEFAULT_PGA_2X
+    return ATM90E32AS_PGA_GAIN_2X;
+#else
+    return ATM90E32AS_PGA_GAIN_1X;
+#endif
+}
+
+static atm90e32as_line_freq_t energy_meter_kconfig_default_line_freq(void)
+{
+#if CONFIG_APP_ATM90E32AS_DEFAULT_LINE_FREQ_60HZ
+    return ATM90E32AS_LINE_FREQ_60HZ;
+#else
+    return ATM90E32AS_LINE_FREQ_50HZ;
+#endif
+}
+
+/* Convert PGA enum to the integer × multiplier used by the Ilim formula.
+ * Public so LCD / console code can format PGA as "×N". */
+unsigned energy_meter_pga_mult(atm90e32as_pga_gain_t pga)
+{
+    switch (pga) {
+    case ATM90E32AS_PGA_GAIN_2X: return 2U;
+    case ATM90E32AS_PGA_GAIN_4X: return 4U;
+    case ATM90E32AS_PGA_GAIN_1X:
+    default: return 1U;
+    }
+}
+
+/* config_manager.pga stores the × multiplier (1/2/4). 0 = unset. */
+static atm90e32as_pga_gain_t energy_meter_pga_from_config_u8(uint8_t pga)
+{
+    switch (pga) {
+    case 4U: return ATM90E32AS_PGA_GAIN_4X;
+    case 2U: return ATM90E32AS_PGA_GAIN_2X;
+    case 1U:
+    default: return ATM90E32AS_PGA_GAIN_1X;
+    }
+}
+
+static uint8_t energy_meter_pga_to_config_u8(atm90e32as_pga_gain_t pga)
+{
+    return (uint8_t)energy_meter_pga_mult(pga);
+}
+
+/* Persist system PGA into config snapshot (does not apply chip). */
+static esp_err_t energy_meter_persist_pga_to_config(atm90e32as_pga_gain_t pga)
+{
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t ret = config_manager_get(cfg);
+    if (ret == ESP_OK) {
+        uint8_t want = energy_meter_pga_to_config_u8(pga);
+        if (cfg->pga != want) {
+            cfg->pga = want;
+            ret = config_manager_update(cfg);
+            if (ret == ESP_OK) {
+                ret = config_manager_save();
+            }
+        }
+    }
+    free(cfg);
+    return ret;
+}
+
+/* Resolve system PGA: config (1/2/4) → else migrate from calib/Kconfig once. */
+static atm90e32as_pga_gain_t energy_meter_resolve_system_pga(atm90e32as_pga_gain_t calib_hint,
+                                                            bool *out_need_persist)
+{
+    if (out_need_persist) {
+        *out_need_persist = false;
+    }
+    /* Heap the snapshot: config_manager_t is ~2.6 KB and energy_meter_init runs on
+     * main_task (CONFIG_ESP_MAIN_TASK_STACK_SIZE, often 3584 B). A stack local here
+     * overflows into the heap and corrupts TLSF before spi_bus_initialize(). */
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) {
+        return energy_meter_kconfig_default_pga();
+    }
+    atm90e32as_pga_gain_t result = energy_meter_kconfig_default_pga();
+    if (config_manager_get(cfg) == ESP_OK) {
+        if (cfg->pga == 1U || cfg->pga == 2U || cfg->pga == 4U) {
+            result = energy_meter_pga_from_config_u8(cfg->pga);
+        } else {
+            /* Unset (legacy snapshot): prefer calib NVS hint, else Kconfig. */
+            atm90e32as_pga_gain_t pga = calib_hint;
+            if (pga > ATM90E32AS_PGA_GAIN_4X) {
+                pga = energy_meter_kconfig_default_pga();
+            }
+            if (out_need_persist) {
+                *out_need_persist = true;
+            }
+            result = pga;
+        }
+    }
+    free(cfg);
+    return result;
+}
+
+/* Ilim(pga) = VADC_limit * NCT / (R_burden * pga_mult)  [primary amps] */
+static float energy_meter_ilim_a(uint16_t ct_ratio, unsigned pga_mult)
+{
+    float r = ENERGY_METER_R_BURDEN_OHM;
+    if (r <= 0.0f || pga_mult == 0U || ct_ratio == 0U) {
+        return 0.0f;
+    }
+    return (ENERGY_METER_VADC_LIMIT_V * (float)ct_ratio) / (r * (float)pga_mult);
+}
+
+/*
+ * PGA auto-select (locked):
+ *   R_BURDEN is Kconfig-only; VADC_LIMIT = 720 mVrms.
+ *   Ilim(PGA) = 0.72 * NCT / (R_Burden * PGA).
+ *
+ *   Roles:
+ *     - I_Expected: must always be covered by the chosen PGA. If a higher PGA
+ *       would clip I_Expected, we fall back to the lower one.
+ *     - I_Rated: the nameplate headroom. If a higher PGA clips I_Rated but
+ *       still covers I_Expected, we accept the trade-off (operator warning,
+ *       but PGA stays higher for accuracy at the operating point).
+ *
+ *   Walk 1X → 2X → 4X:
+ *     - If Ilim(1) < I_Expected → PGA=1, range warning (cannot go lower),
+ *                                  I_Expected is left unchanged in the
+ *                                  result (operator must lower Expected).
+ *     - Else if Ilim(1) < I_Rated → PGA=1 (cannot go higher without
+ *                                    sacrificing Rated; stop here).
+ *     - Else try 2X:
+ *         - If Ilim(2) < I_Expected → PGA=1 (2X would clip Expected).
+ *         - Else if Ilim(2) < I_Rated → PGA=2 (2X clips Rated, stop here).
+ *         - Else try 4X:
+ *             - If Ilim(4) < I_Expected → PGA=2 (4X would clip Expected).
+ *             - Else                    → PGA=4 (4X clips Rated but Expected
+ *                                          still fits; trade-off accepted).
+ *
+ *   Trade-off case (e.g. 100A Rated + 75A Expected + PGA=4 → Ilim=81.8A)
+ *   sets rated_truncated=true so the LCD / console can warn the operator
+ *   that headroom above I_Rated was sacrificed for accuracy at I_Expected.
+ */
+esp_err_t energy_meter_ct_select_pga(uint16_t ct_ratio, uint16_t i_rated_a,
+                                     uint16_t i_expected_a,
+                                     energy_meter_ct_apply_result_t *out)
+{
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
+    /* NCT: 1000..6000, multiples of 100 (product LCD step). */
+    ESP_RETURN_ON_FALSE(ct_ratio >= 1000U && ct_ratio <= 6000U && (ct_ratio % 100U) == 0U &&
+                        i_rated_a >= 1U && i_expected_a >= 1U,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid CT params");
+
+    memset(out, 0, sizeof(*out));
+    out->ct_ratio = ct_ratio;
+    out->i_rated_a = i_rated_a;
+    out->i_expected_a = i_expected_a;
+    out->expected_clamped = false;
+    out->rated_truncated = false;
+
+    /* Candidates in INCREASING gain order so we walk 1 → 2 → 4. */
+    const atm90e32as_pga_gain_t candidates[] = {
+        ATM90E32AS_PGA_GAIN_1X,
+        ATM90E32AS_PGA_GAIN_2X,
+        ATM90E32AS_PGA_GAIN_4X,
+    };
+    const size_t n_cand = sizeof(candidates) / sizeof(candidates[0]);
+
+    /* PGA=1 is the floor. */
+    float ilim1 = energy_meter_ilim_a(ct_ratio, 1U);
+    if (ilim1 + 1e-6f < (float)i_expected_a) {
+        /* Case A: even 1× cannot cover Expected. Stay at 1×, do NOT mutate. */
+        out->pga = ATM90E32AS_PGA_GAIN_1X;
+        out->ilim_a = ilim1;
+        out->expected_clamped = true;
+        out->rated_truncated = ((float)i_rated_a > ilim1);
+        return ESP_OK;
+    }
+
+    atm90e32as_pga_gain_t chosen = ATM90E32AS_PGA_GAIN_1X;
+    float chosen_ilim = ilim1;
+
+    for (size_t i = 1; i < n_cand; i++) {
+        unsigned mult = energy_meter_pga_mult(candidates[i]);
+        float ilim_next = energy_meter_ilim_a(ct_ratio, mult);
+
+        /* If the higher PGA would clip Expected, we cannot pick it. Stop here. */
+        if (ilim_next + 1e-6f < (float)i_expected_a) {
+            break;
+        }
+        /* Higher PGA still covers Expected. Take it.
+         * If it also clips Rated we will set rated_truncated below for the UI. */
+        chosen = candidates[i];
+        chosen_ilim = ilim_next;
+    }
+
+    out->pga = chosen;
+    out->ilim_a = chosen_ilim;
+    if (chosen_ilim + 1e-6f < (float)i_rated_a) {
+        /* Trade-off: PGA covers Expected but clips Rated headroom. */
+        out->rated_truncated = true;
+    }
+    return ESP_OK;
+}
+
+esp_err_t energy_meter_ct_apply(uint16_t ct_ratio, uint16_t i_rated_a,
+                                uint16_t i_expected_a, bool reset_igain,
+                                bool save_calib_nvs,
+                                energy_meter_ct_apply_result_t *out)
+{
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL,
+                        ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    energy_meter_ct_apply_result_t local;
+    energy_meter_ct_apply_result_t *r = out ? out : &local;
+    esp_err_t ret = energy_meter_ct_select_pga(ct_ratio, i_rated_a, i_expected_a, r);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    r->igain_reset = reset_igain;
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    s_current_calib.pga_gain = r->pga;
+    if (reset_igain) {
+        for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+            s_current_calib.phase[i].current_gain = ENERGY_METER_FACTORY_GAIN;
+            s_calib.phase[i].current_gain = ENERGY_METER_FACTORY_GAIN;
+        }
+    }
+    /* PGA is chip-wide runtime stamp only; authoritative store is config_manager. */
+    energy_meter_stamp_chipwide_locked(r->pga, s_current_calib.line_freq);
+    s_calib = s_current_calib;
+    ret = energy_meter_apply_locked(&s_current_calib);
+    xSemaphoreGive(s_meter_mutex);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "CT apply failed: 0x%x", ret);
+        return ret;
+    }
+
+    /* System PGA lives in config snapshot (with CT params saved by caller). */
+    esp_err_t pga_cfg_ret = energy_meter_persist_pga_to_config(r->pga);
+    if (pga_cfg_ret != ESP_OK) {
+        ESP_LOGW(TAG, "CT apply: PGA chip OK but config persist failed: %s",
+                 esp_err_to_name(pga_cfg_ret));
+    }
+
+    ESP_LOGI(TAG,
+             "CT apply: NCT=%u Rated=%uA Expected=%uA PGA=%ux Ilim=%.1fA%s%s Igain%s",
+             (unsigned)r->ct_ratio, (unsigned)r->i_rated_a, (unsigned)r->i_expected_a,
+             energy_meter_pga_mult(r->pga), (double)r->ilim_a,
+             r->expected_clamped ? " [exp range warning]" : "",
+             r->rated_truncated ? " [rated truncated]" : "",
+             reset_igain ? "=0x8000" : " kept");
+
+    if (save_calib_nvs) {
+        ret = energy_meter_save_calibration();
+    }
+    return ret;
+}
+
+static void energy_meter_default_profiles(void)
+{
+    /* Phase-gain factory defaults only. System PGA is stamped later from
+     * config_manager (or one-shot migrate). Do not recompute CT→PGA here. */
+    atm90e32as_pga_gain_t pga = energy_meter_kconfig_default_pga();
+    atm90e32as_line_freq_t freq = energy_meter_kconfig_default_line_freq();
+
+    atm90e32as_get_default_calib(&s_calib);
+    s_calib.pga_gain = pga;
+    s_calib.line_freq = freq;
+}
 
 static esp_err_t energy_meter_nvs_init(void)
 {
@@ -70,23 +401,23 @@ static esp_err_t energy_meter_load_calibration_from_nvs(atm90e32as_calib_t *cali
 
     nvs_handle_t nvs;
     esp_err_t ret = nvs_open(ENERGY_METER_NVS_NAMESPACE, NVS_READONLY, &nvs);
-    if (ret != ESP_OK) {
-        return ret;
-    }
+    if (ret != ESP_OK) return ret;
 
     energy_meter_calib_blob_t blob;
     size_t size = sizeof(blob);
     ret = nvs_get_blob(nvs, ENERGY_METER_NVS_CALIB_KEY, &blob, &size);
     nvs_close(nvs);
-
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    if (size != sizeof(blob) || blob.magic != ENERGY_METER_CALIB_MAGIC || blob.version != ENERGY_METER_CALIB_VERSION) {
+    if (ret != ESP_OK) return ret;
+    /* Single-profile layout. Legacy v2/v3 blobs (with version + profile[2])
+     * fail this size check and fall back to defaults — user erases flash on
+     * layout changes anyway. */
+    if (size != sizeof(blob) || blob.magic != ENERGY_METER_CALIB_MAGIC ||
+        atm90e32as_validate_calibration(&blob.calib) != ESP_OK) {
         return ESP_ERR_INVALID_VERSION;
     }
 
-    *calib = blob.calib;
+    s_calib = blob.calib;
+    *calib = s_calib;
     return ESP_OK;
 }
 
@@ -97,11 +428,10 @@ static esp_err_t energy_meter_save_calibration_to_nvs(const atm90e32as_calib_t *
     nvs_handle_t nvs;
     ESP_RETURN_ON_ERROR(nvs_open(ENERGY_METER_NVS_NAMESPACE, NVS_READWRITE, &nvs), TAG, "open calibration NVS failed");
 
+    s_calib = *calib;
     energy_meter_calib_blob_t blob = {
         .magic = ENERGY_METER_CALIB_MAGIC,
-        .version = ENERGY_METER_CALIB_VERSION,
-        .reserved = 0,
-        .calib = *calib,
+        .calib = s_calib,
     };
 
     esp_err_t ret = nvs_set_blob(nvs, ENERGY_METER_NVS_CALIB_KEY, &blob, sizeof(blob));
@@ -164,18 +494,80 @@ static esp_err_t energy_meter_init(void)
         ESP_RETURN_ON_FALSE(s_meter_mutex != NULL, ESP_ERR_NO_MEM, TAG, "create meter mutex failed");
     }
 
-    atm90e32as_calib_t calib;
-    atm90e32as_get_default_calib(&calib);
-    calib.wiring_mode = CONFIG_APP_ATM90E32AS_DEFAULT_MODE_3P3W ? ATM90E32AS_WIRING_3P3W : ATM90E32AS_WIRING_3P4W;
-    calib.line_freq = CONFIG_APP_ATM90E32AS_DEFAULT_LINE_FREQ_60HZ ? ATM90E32AS_LINE_FREQ_60HZ : ATM90E32AS_LINE_FREQ_50HZ;
+    ESP_RETURN_ON_ERROR(measurement_data_init(), TAG, "init measurement data model failed");
+
+    energy_meter_default_profiles();
+    /* Pick default wiring mode (Kconfig) for first-boot bring-up. */
+    s_calib.wiring_mode = CONFIG_APP_ATM90E32AS_DEFAULT_MODE_3P3W ? ATM90E32AS_WIRING_3P3W
+                                                                   : ATM90E32AS_WIRING_3P4W;
+    atm90e32as_calib_t calib = s_calib;
 
     esp_err_t calib_ret = energy_meter_load_calibration_from_nvs(&calib);
     if (calib_ret == ESP_OK) {
-        ESP_LOGI(TAG, "loaded ATM90E32AS calibration from NVS");
+        ESP_LOGI(TAG, "loaded ATM90E32AS calibration from NVS (active %s)",
+                 calib.wiring_mode == ATM90E32AS_WIRING_3P3W ? "3P3W" : "3P4W");
     } else {
         ESP_LOGW(TAG, "using ATM90E32AS bring-up defaults; no saved calibration: %s", esp_err_to_name(calib_ret));
     }
+
+    /* System PGA ownership: config_manager.
+     *
+     * - Config has 1/2/4  → use it (normal path after CT Apply / prior boot).
+     * - Config pga unset (0): compute PGA from CT params (NCT/I_Rated/I_Expected)
+     *   exactly like a confirmed Current CT Apply, stamp chip, persist config.pga.
+     *   Covers true first boot (defaults) and legacy migrate without PGA tail. */
+    bool persist_pga = false;
+    atm90e32as_pga_gain_t sys_pga =
+        energy_meter_resolve_system_pga(calib.pga_gain, &persist_pga);
+
+    if (persist_pga) {
+        uint16_t nct = (uint16_t)CONFIG_APP_ATM90E32AS_CT_RATIO;
+        uint16_t i_rated = (uint16_t)CONFIG_APP_ATM90E32AS_I_RATED_A;
+        uint16_t i_exp = (uint16_t)CONFIG_APP_ATM90E32AS_I_EXPECTED_A;
+        /* Heap: same main_task stack budget as resolve_system_pga(). */
+        config_manager_t *cfg = malloc(sizeof(*cfg));
+        if (cfg != NULL && config_manager_get(cfg) == ESP_OK) {
+            if (cfg->ct_ratio >= 1000U) {
+                nct = cfg->ct_ratio;
+            }
+            if (cfg->i_rated_a >= 1U) {
+                i_rated = cfg->i_rated_a;
+            }
+            if (cfg->i_expected_a >= 1U) {
+                i_exp = cfg->i_expected_a;
+            }
+        }
+        free(cfg);
+        energy_meter_ct_apply_result_t ct;
+        if (energy_meter_ct_select_pga(nct, i_rated, i_exp, &ct) == ESP_OK) {
+            sys_pga = ct.pga;
+            ESP_LOGI(TAG,
+                     "%s CT→PGA: NCT=%u Rated=%uA Exp=%uA → PGA=x%u Ilim=%.1fA%s%s",
+                     (calib_ret != ESP_OK) ? "first-boot" : "migrate",
+                     (unsigned)nct, (unsigned)i_rated, (unsigned)i_exp,
+                     energy_meter_pga_mult(sys_pga), (double)ct.ilim_a,
+                     ct.expected_clamped ? " [exp warn]" : "",
+                     ct.rated_truncated ? " [rated trunc]" : "");
+        } else {
+            ESP_LOGW(TAG, "CT→PGA select failed; keep fallback PGA=x%u",
+                     energy_meter_pga_mult(sys_pga));
+        }
+    }
+
+    calib.pga_gain = sys_pga;
+    energy_meter_stamp_chipwide_locked(sys_pga, calib.line_freq);
+    if (persist_pga) {
+        esp_err_t pr = energy_meter_persist_pga_to_config(sys_pga);
+        if (pr == ESP_OK) {
+            ESP_LOGI(TAG, "persisted system PGA=x%u into config snapshot",
+                     energy_meter_pga_mult(sys_pga));
+        } else {
+            ESP_LOGW(TAG, "PGA persist to config failed: %s", esp_err_to_name(pr));
+        }
+    }
+
     s_current_calib = calib;
+    s_applied_calib = calib;
 
     /* Switch the wiring-mode relay to the resolved mode right after MCU power-up,
      * so a saved 3P3W/3P4W setup takes effect on boot without any user action. */
@@ -190,7 +582,9 @@ static esp_err_t energy_meter_init(void)
     ESP_RETURN_ON_ERROR(atm90e32as_create(&config, &s_meter), TAG, "create ATM90E32AS failed");
     ESP_RETURN_ON_ERROR(atm90e32as_init(s_meter), TAG, "init ATM90E32AS failed");
 
-    ESP_LOGW(TAG, "ATM90E32AS uses bring-up calibration defaults. Replace with measured board calibration before thesis measurements.");
+    if (calib_ret != ESP_OK) {
+        ESP_LOGW(TAG, "ATM90E32AS uses bring-up calibration defaults. Replace with measured board calibration before thesis measurements.");
+    }
     ESP_LOGI(TAG, "SD card inserted=%d", sd_card_is_inserted());
     return ESP_OK;
 }
@@ -240,7 +634,62 @@ static void energy_meter_task(void *arg)
                 s_demand_accum_w = 0.0;
                 s_demand_samples = 0;
             }
+
+            /* Feed the central data model (pure copy; no hardware access). */
+            measurement_data_t md = {0};
+            int valid_voltage_count = 0;
+            for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+                if (measurements.voltage_valid[i]) {
+                    md.voltage_avg += measurements.voltage[i];
+                    md.voltage_valid_mask |= (uint8_t)(1U << i);
+                    valid_voltage_count++;
+                }
+                md.current_avg += measurements.current[i];
+            }
+            if (valid_voltage_count > 0) md.voltage_avg /= valid_voltage_count;
+            md.current_avg /= ATM90E32AS_PHASE_COUNT;
+            md.wiring_mode = (uint8_t)measurements.wiring_mode;
+            md.voltage_l1 = measurements.voltage[ATM90E32AS_PHASE_A];
+            md.voltage_l2 = measurements.voltage_valid[ATM90E32AS_PHASE_B]
+                                ? measurements.voltage[ATM90E32AS_PHASE_B] : 0.0f;
+            md.voltage_l3 = measurements.voltage[ATM90E32AS_PHASE_C];
+            if (measurements.wiring_mode == ATM90E32AS_WIRING_3P3W) {
+                md.voltage_uab = measurements.voltage[ATM90E32AS_PHASE_A];
+                md.voltage_ucb = measurements.voltage[ATM90E32AS_PHASE_C];
+            }
+            md.current_l1 = measurements.current[ATM90E32AS_PHASE_A];
+            md.current_l2 = measurements.current[ATM90E32AS_PHASE_B];
+            md.current_l3 = measurements.current[ATM90E32AS_PHASE_C];
+            md.current_neutral = measurements.current_neutral;
+            md.frequency = measurements.frequency;
+            md.p1 = measurements.active_power[ATM90E32AS_PHASE_A];
+            md.p2 = measurements.active_power[ATM90E32AS_PHASE_B];
+            md.p3 = measurements.active_power[ATM90E32AS_PHASE_C];
+            md.p_total = measurements.total_active_power;
+            md.q1 = measurements.reactive_power[ATM90E32AS_PHASE_A];
+            md.q2 = measurements.reactive_power[ATM90E32AS_PHASE_B];
+            md.q3 = measurements.reactive_power[ATM90E32AS_PHASE_C];
+            md.q_total = measurements.total_reactive_power;
+            md.s1 = measurements.apparent_power[ATM90E32AS_PHASE_A];
+            md.s2 = measurements.apparent_power[ATM90E32AS_PHASE_B];
+            md.s3 = measurements.apparent_power[ATM90E32AS_PHASE_C];
+            md.s_total = measurements.total_apparent_power;
+            md.pf1 = measurements.power_factor[ATM90E32AS_PHASE_A];
+            md.pf2 = measurements.power_factor[ATM90E32AS_PHASE_B];
+            md.pf3 = measurements.power_factor[ATM90E32AS_PHASE_C];
+            md.pf_total = measurements.total_power_factor;
+            md.energy_import = (float)(s_active_import_wh / 1000.0);
+            md.energy_export = (float)(s_active_export_wh / 1000.0);
+            md.energy_reactive_import = (float)(s_reactive_import_varh / 1000.0);
+            md.energy_reactive_export = (float)(s_reactive_export_varh / 1000.0);
+            md.temp_atm90 = measurements.temperature;
+            md.last_update_us = (uint64_t)esp_timer_get_time();
             xSemaphoreGive(s_measurements_mutex);
+
+            measurement_data_update(&md);
+
+            /* First successful read after init or error recovery -> READY. */
+            system_status_set(SYS_MODULE_ATM90, SYS_STATUS_READY);
 
 #if CONFIG_APP_ENERGY_METER_LOG_EACH_SAMPLE
             ESP_LOGI(TAG,
@@ -259,7 +708,18 @@ static void energy_meter_task(void *arg)
 #endif
         } else {
             ESP_LOGE(TAG, "read ATM90E32AS measurements failed: %s", esp_err_to_name(ret));
+            system_status_set(SYS_MODULE_ATM90, SYS_STATUS_ERROR);
         }
+
+        /* Mirror the SD card's real runtime state onto the status registry. The
+         * sd_card component cannot include system_status.h (it would need to
+         * depend on main, which already depends on sd_card), so the debounced
+         * insert/mount result from its monitor task is sampled here on the
+         * existing poll tick — no extra task or timer. system_status_set() is
+         * idempotent, so repeating the same state costs nothing. */
+        system_status_set(SYS_MODULE_SD_CARD,
+                          sd_card_is_mounted() ? SYS_STATUS_READY
+                          : (sd_card_is_inserted() ? SYS_STATUS_ERROR : SYS_STATUS_OFFLINE));
 
         vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_ENERGY_METER_POLL_PERIOD_MS));
     }
@@ -335,6 +795,18 @@ esp_err_t energy_meter_set_demand_window_minutes(uint16_t minutes)
     return ESP_OK;
 }
 
+esp_err_t energy_meter_get_demand_window_minutes(uint16_t *out_minutes)
+{
+    ESP_RETURN_ON_FALSE(out_minutes != NULL, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
+    ESP_RETURN_ON_FALSE(s_measurements_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
+    *out_minutes = s_demand_window_min;
+    xSemaphoreGive(s_measurements_mutex);
+
+    return ESP_OK;
+}
+
 esp_err_t energy_meter_get_latest(atm90e32as_measurements_t *out)
 {
     ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
@@ -398,16 +870,157 @@ esp_err_t energy_meter_get_calibration(atm90e32as_calib_t *calib)
     return ESP_OK;
 }
 
+/* Stamp chip-wide PGA + line frequency onto the active calibration. */
+static void energy_meter_stamp_chipwide_locked(atm90e32as_pga_gain_t pga,
+                                               atm90e32as_line_freq_t freq)
+{
+    s_calib.pga_gain = pga;
+    s_calib.line_freq = freq;
+    s_current_calib.pga_gain = pga;
+    s_current_calib.line_freq = freq;
+}
+
+/* Keep config_manager.line_freq as a RO mirror for alarms/registers. Never the
+ * other way around — config must not own the chip value. */
+static void energy_meter_sync_line_freq_mirror(atm90e32as_line_freq_t freq)
+{
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) {
+        return;
+    }
+    if (config_manager_get(cfg) == ESP_OK) {
+        uint8_t want = (freq == ATM90E32AS_LINE_FREQ_60HZ) ? 1U : 0U;
+        if (cfg->line_freq != want) {
+            cfg->line_freq = want;
+            cfg->alarm_nominal_frequency_hz = want ? 60U : 50U;
+            cfg->alarm_frequency_low_hz = want ? 57.0f : 47.0f;
+            cfg->alarm_frequency_high_hz = want ? 63.0f : 53.0f;
+            (void)config_manager_update(cfg);
+        }
+    }
+    free(cfg);
+}
+
 esp_err_t energy_meter_set_calibration(const atm90e32as_calib_t *calib)
 {
     ESP_RETURN_ON_FALSE(calib != NULL, ESP_ERR_INVALID_ARG, TAG, "calib is NULL");
     ESP_RETURN_ON_FALSE(s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
 
     xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
-    s_current_calib = *calib;
+    /* PGA and line_freq are console/Kconfig-owned. Callers (gain set, portal
+     * auto-cal, SD import path via set) cannot smuggle a new value here. */
+    atm90e32as_pga_gain_t pga = s_current_calib.pga_gain;
+    atm90e32as_line_freq_t freq = s_current_calib.line_freq;
+    atm90e32as_calib_t next = *calib;
+    next.pga_gain = pga;
+    next.line_freq = freq;
+    s_calib = next;
+    s_current_calib = next;
+    energy_meter_stamp_chipwide_locked(pga, freq);
     xSemaphoreGive(s_meter_mutex);
 
     return ESP_OK;
+}
+
+esp_err_t energy_meter_set_pga_gain(atm90e32as_pga_gain_t pga, bool apply)
+{
+    ESP_RETURN_ON_FALSE(pga >= ATM90E32AS_PGA_GAIN_1X && pga <= ATM90E32AS_PGA_GAIN_4X,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid pga");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG,
+                        "meter not initialized");
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    energy_meter_stamp_chipwide_locked(pga, s_current_calib.line_freq);
+    esp_err_t ret = ESP_OK;
+    if (apply) {
+        ret = energy_meter_apply_locked(&s_current_calib);
+    }
+    xSemaphoreGive(s_meter_mutex);
+    if (ret == ESP_OK) {
+        /* Dev console path: still persist system PGA to config (authoritative). */
+        esp_err_t pr = energy_meter_persist_pga_to_config(pga);
+        if (pr != ESP_OK) {
+            ESP_LOGW(TAG, "PGA set chip OK but config persist failed: %s",
+                     esp_err_to_name(pr));
+        }
+        ESP_LOGI(TAG, "PGA set to x%d%s (config-owned)", 1 << pga, apply ? " (applied)" : "");
+    }
+    return ret;
+}
+
+esp_err_t energy_meter_set_line_freq(atm90e32as_line_freq_t freq, bool apply)
+{
+    ESP_RETURN_ON_FALSE(freq == ATM90E32AS_LINE_FREQ_50HZ || freq == ATM90E32AS_LINE_FREQ_60HZ,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid line freq");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG,
+                        "meter not initialized");
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    energy_meter_stamp_chipwide_locked(s_current_calib.pga_gain, freq);
+    esp_err_t ret = ESP_OK;
+    if (apply) {
+        ret = energy_meter_apply_locked(&s_current_calib);
+    }
+    xSemaphoreGive(s_meter_mutex);
+    if (ret == ESP_OK) {
+        energy_meter_sync_line_freq_mirror(freq);
+        ESP_LOGI(TAG, "line_freq set to %s%s",
+                 freq == ATM90E32AS_LINE_FREQ_60HZ ? "60Hz" : "50Hz",
+                 apply ? " (applied)" : "");
+    }
+    return ret;
+}
+
+static esp_err_t energy_meter_apply_locked(const atm90e32as_calib_t *target)
+{
+    ESP_RETURN_ON_ERROR(atm90e32as_validate_calibration(target), TAG, "invalid calibration");
+    atm90e32as_calib_t previous = s_applied_calib;
+    bool wiring_changed = previous.wiring_mode != target->wiring_mode;
+
+    if (wiring_changed) {
+        ESP_LOGI(TAG, "Wiring mode change: %s -> %s",
+                 previous.wiring_mode == ATM90E32AS_WIRING_3P4W ? "3P4W" : "3P3W",
+                 target->wiring_mode == ATM90E32AS_WIRING_3P4W ? "3P4W" : "3P3W");
+        xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
+        s_measurements_valid = false;
+        xSemaphoreGive(s_measurements_mutex);
+        energy_meter_set_wiring_relay(target->wiring_mode);
+        vTaskDelay(pdMS_TO_TICKS(ENERGY_METER_RELAY_SETTLE_MS));
+    }
+
+    esp_err_t ret = atm90e32as_apply_calibration(s_meter, target);
+    if (ret != ESP_OK && wiring_changed) {
+        energy_meter_set_wiring_relay(previous.wiring_mode);
+        vTaskDelay(pdMS_TO_TICKS(ENERGY_METER_RELAY_SETTLE_MS));
+        esp_err_t rollback = atm90e32as_apply_calibration(s_meter, &previous);
+        ESP_LOGE(TAG, "apply failed (%s), rollback=%s", esp_err_to_name(ret), esp_err_to_name(rollback));
+        return ret;
+    }
+    if (ret == ESP_OK) {
+        s_current_calib = *target;
+        s_applied_calib = *target;
+        s_calib = *target;
+        if (wiring_changed) vTaskDelay(pdMS_TO_TICKS(ENERGY_METER_MEASUREMENT_SETTLE_MS));
+    }
+    return ret;
+}
+
+esp_err_t energy_meter_set_wiring_mode(atm90e32as_wiring_mode_t mode, bool apply)
+{
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    /* Phase gains are SHARED across wiring modes — only the chip mode bit and
+     * the relay change. PGA / line_freq stay at their current values. */
+    s_current_calib.wiring_mode = mode;
+    s_calib.wiring_mode = mode;
+    esp_err_t ret = ESP_OK;
+    if (apply) {
+        ret = energy_meter_apply_locked(&s_current_calib);
+    }
+    xSemaphoreGive(s_meter_mutex);
+
+    return ret;
 }
 
 esp_err_t energy_meter_apply_calibration(void)
@@ -415,11 +1028,11 @@ esp_err_t energy_meter_apply_calibration(void)
     ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
 
     xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
-    /* Drive the wiring-mode relay (3P4W vs 3P3W) to match the calibration
-     * before the meter registers are updated, so the front-end wiring and the
-     * chip's metering mode stay consistent. */
-    energy_meter_set_wiring_relay(s_current_calib.wiring_mode);
-    esp_err_t ret = atm90e32as_apply_calibration(s_meter, &s_current_calib);
+    atm90e32as_calib_t target = s_calib;
+    target.pga_gain = s_current_calib.pga_gain;
+    target.line_freq = s_current_calib.line_freq;
+    target.wiring_mode = s_current_calib.wiring_mode;
+    esp_err_t ret = energy_meter_apply_locked(&target);
     xSemaphoreGive(s_meter_mutex);
 
     return ret;
@@ -447,29 +1060,1268 @@ esp_err_t energy_meter_load_calibration(bool apply)
     s_current_calib = calib;
     esp_err_t ret = ESP_OK;
     if (apply) {
-        ret = atm90e32as_apply_calibration(s_meter, &s_current_calib);
+        ret = energy_meter_apply_locked(&s_current_calib);
     }
     xSemaphoreGive(s_meter_mutex);
 
     return ret;
 }
 
+/* Factory-reset entry point: drop the persisted calibration blob so the next
+ * boot falls back to the bring-up defaults in energy_meter_init(). Runtime
+ * registers are left alone on purpose — the caller reboots after a reset. */
+esp_err_t energy_meter_erase_calibration(void)
+{
+    ESP_RETURN_ON_ERROR(energy_meter_nvs_init(), TAG, "init NVS failed");
+
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(ENERGY_METER_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;  /* nothing persisted yet */
+    }
+    ESP_RETURN_ON_ERROR(ret, TAG, "open calibration NVS failed");
+
+    ret = nvs_erase_all(nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        ret = ESP_OK;
+    }
+    if (ret == ESP_OK) {
+        ret = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    return ret;
+}
+
+esp_err_t energy_meter_export_blob(uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    ESP_RETURN_ON_FALSE(out != NULL && out_len != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    energy_meter_calib_blob_t blob = {
+        .magic = ENERGY_METER_CALIB_MAGIC,
+    };
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    blob.calib = s_calib;
+    xSemaphoreGive(s_meter_mutex);
+
+    size_t blob_size = sizeof(blob);
+    ESP_RETURN_ON_FALSE(out_cap >= blob_size, ESP_ERR_INVALID_SIZE, TAG, "output buffer too small");
+
+    memcpy(out, &blob, blob_size);
+    *out_len = blob_size;
+    ESP_LOGI(TAG, "exported %zu-byte blob (active=%s)", blob_size,
+             blob.calib.wiring_mode == ATM90E32AS_WIRING_3P3W ? "3P3W" : "3P4W");
+    return ESP_OK;
+}
+
+esp_err_t energy_meter_import_blob(const uint8_t *in, size_t len, bool apply, bool save_nvs)
+{
+    ESP_RETURN_ON_FALSE(in != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    energy_meter_calib_blob_t blob;
+    ESP_RETURN_ON_FALSE(len == sizeof(blob), ESP_ERR_INVALID_SIZE, TAG, "blob size mismatch");
+    memcpy(&blob, in, sizeof(blob));
+
+    /* Validate magic; legacy v2/v3 blobs (with version + profile[2]) fail this
+     * size check above and fall back to defaults. */
+    if (blob.magic != ENERGY_METER_CALIB_MAGIC) {
+        ESP_LOGE(TAG, "import failed: bad magic 0x%08lx", (unsigned long)blob.magic);
+        return ESP_ERR_INVALID_VERSION;
+    }
+    esp_err_t valid = atm90e32as_validate_calibration(&blob.calib);
+    if (valid != ESP_OK) {
+        ESP_LOGE(TAG, "import failed: validation error 0x%x", valid);
+        return valid;
+    }
+
+    /* Install to RAM. PGA/line_freq stay at the running console/Kconfig values —
+     * backup blobs must not override chip-wide parameters. */
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    atm90e32as_pga_gain_t keep_pga = s_current_calib.pga_gain;
+    atm90e32as_line_freq_t keep_freq = s_current_calib.line_freq;
+    s_calib = blob.calib;
+    s_current_calib = s_calib;
+    /* Preserve the running chip-wide stamps; only wiring_mode + phase cal change. */
+    s_current_calib.pga_gain = keep_pga;
+    s_current_calib.line_freq = keep_freq;
+    energy_meter_stamp_chipwide_locked(keep_pga, keep_freq);
+    xSemaphoreGive(s_meter_mutex);
+
+    ESP_LOGI(TAG, "imported blob: active=%s (PGA/freq preserved)",
+             s_current_calib.wiring_mode == ATM90E32AS_WIRING_3P3W ? "3P3W" : "3P4W");
+
+    /* Apply to hardware if requested */
+    if (apply) {
+        esp_err_t ret = energy_meter_apply_calibration();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "import apply failed: 0x%x", ret);
+            return ret;
+        }
+    }
+
+    /* Save to NVS if requested - must save the full blob */
+    if (save_nvs) {
+        esp_err_t ret = energy_meter_nvs_init();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "import NVS init failed: 0x%x", ret);
+            return ret;
+        }
+
+        nvs_handle_t nvs;
+        ret = nvs_open(ENERGY_METER_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "import NVS open failed: 0x%x", ret);
+            return ret;
+        }
+
+        energy_meter_calib_blob_t save_blob = {
+            .magic = ENERGY_METER_CALIB_MAGIC,
+            .calib = s_calib,
+        };
+        xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+        save_blob.calib = s_calib;
+        xSemaphoreGive(s_meter_mutex);
+
+        ret = nvs_set_blob(nvs, ENERGY_METER_NVS_CALIB_KEY, &save_blob, sizeof(save_blob));
+        if (ret == ESP_OK) {
+            ret = nvs_commit(nvs);
+        }
+        nvs_close(nvs);
+
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "import NVS write failed: 0x%x", ret);
+            return ret;
+        }
+    }
+
+    return ESP_OK;
+}
+
+/* Calibration backup file format wrapper
+ *
+ * Single-profile format (no file_version field):
+ *   Ugain, Igain, Uoffset, Ioffset, phase_comp, Poffset, Qoffset,
+ *   pq_gain, fundamental_power_gain  × 3 phases in payload.
+ * Header carries wiring_mode as metadata tag for filename / display only.
+ * PGA / line_freq / CT / refs are intentionally NOT in the bin (system-owned).
+ *
+ * Legacy (handled for read-back compatibility):
+ *   v1/v2 files have a file_version field that shifts the header layout.
+ *   We detect them by payload size and hand off to the legacy blob import. */
+#define CALIB_FILE_MAGIC 0x424C4143U  /* 'CALB' */
+#define CALIB_FILE_HEADER_LEN 18
+
+typedef struct __attribute__((packed)) {
+    uint32_t file_magic;
+    uint16_t header_len;
+    uint16_t wiring_mode;   /* 0=3P4W, 1=3P3W — metadata tag only */
+    uint16_t reserved;
+    uint32_t payload_len;
+    uint32_t crc32;
+} calib_file_header_t;
+
+/* Packed phase cal fields only — no floats, no PGA/freq. */
+typedef struct __attribute__((packed)) {
+    uint16_t voltage_gain;
+    uint16_t current_gain;
+    int16_t voltage_offset;
+    int16_t current_offset;
+    int16_t active_power_offset;
+    int16_t reactive_power_offset;
+    uint16_t pq_gain;
+    int16_t phase_comp;
+    uint16_t fundamental_power_gain;
+} calib_phase_pack_t;
+
+typedef struct __attribute__((packed)) {
+    calib_phase_pack_t phase[ATM90E32AS_PHASE_COUNT];
+} calib_format_c_payload_t;
+
+static void calib_phase_to_pack(calib_phase_pack_t *dst, const atm90e32as_phase_calib_t *src)
+{
+    dst->voltage_gain = src->voltage_gain;
+    dst->current_gain = src->current_gain;
+    dst->voltage_offset = src->voltage_offset;
+    dst->current_offset = src->current_offset;
+    dst->active_power_offset = src->active_power_offset;
+    dst->reactive_power_offset = src->reactive_power_offset;
+    dst->pq_gain = src->pq_gain;
+    dst->phase_comp = src->phase_comp;
+    dst->fundamental_power_gain = src->fundamental_power_gain;
+}
+
+static void calib_phase_from_pack(atm90e32as_phase_calib_t *dst, const calib_phase_pack_t *src)
+{
+    dst->voltage_gain = src->voltage_gain;
+    dst->current_gain = src->current_gain;
+    dst->voltage_offset = src->voltage_offset;
+    dst->current_offset = src->current_offset;
+    dst->active_power_offset = src->active_power_offset;
+    dst->reactive_power_offset = src->reactive_power_offset;
+    dst->pq_gain = src->pq_gain;
+    dst->phase_comp = src->phase_comp;
+    dst->fundamental_power_gain = src->fundamental_power_gain;
+    dst->_abi_pad = 0;
+    dst->_abi_reserved[0] = 0;
+    dst->_abi_reserved[1] = 0;
+}
+
+static esp_err_t calib_backup_install_phase_cal(const atm90e32as_calib_t *src_phases,
+                                                atm90e32as_wiring_mode_t file_mode,
+                                                bool apply, bool save_nvs)
+{
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    atm90e32as_wiring_mode_t current_mode = s_current_calib.wiring_mode;
+    const char *current_mode_str = (current_mode == ATM90E32AS_WIRING_3P3W) ? "3W" : "4W";
+    const char *file_mode_str = (file_mode == ATM90E32AS_WIRING_3P3W) ? "3W" : "4W";
+    /* PGA/freq are system-owned (config / runtime), never taken from the file. */
+    atm90e32as_pga_gain_t keep_pga = s_current_calib.pga_gain;
+    atm90e32as_line_freq_t keep_freq = s_current_calib.line_freq;
+
+    atm90e32as_calib_t calib = *src_phases;
+    calib.pga_gain = keep_pga;
+    calib.line_freq = keep_freq;
+
+    esp_err_t apply_ret = ESP_OK;
+    if (apply) {
+        /* Single-profile mode: phase gains apply to the common profile. */
+        calib.wiring_mode = current_mode;
+        s_calib = calib;
+        s_current_calib = calib;
+        energy_meter_stamp_chipwide_locked(keep_pga, keep_freq);
+        apply_ret = energy_meter_apply_locked(&s_current_calib);
+        ESP_LOGI(TAG, "applied imported %s cal to current %s (PGA/freq/CT kept)",
+                 file_mode_str, current_mode_str);
+    } else {
+        /* Save only — keep current wiring, just stash the new phase gains
+         * into the single profile. */
+        calib.wiring_mode = file_mode;
+        s_calib = calib;
+        energy_meter_stamp_chipwide_locked(keep_pga, keep_freq);
+        ESP_LOGI(TAG, "imported %s cal (not applied, PGA/freq/CT kept)",
+                 file_mode_str);
+    }
+    xSemaphoreGive(s_meter_mutex);
+
+    if (apply_ret != ESP_OK) {
+        return apply_ret;
+    }
+
+    if (save_nvs) {
+        esp_err_t ret = energy_meter_nvs_init();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        nvs_handle_t nvs;
+        ret = nvs_open(ENERGY_METER_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        energy_meter_calib_blob_t save_blob = {
+            .magic = ENERGY_METER_CALIB_MAGIC,
+            .calib = s_calib,
+        };
+        ret = nvs_set_blob(nvs, ENERGY_METER_NVS_CALIB_KEY, &save_blob, sizeof(save_blob));
+        if (ret == ESP_OK) {
+            ret = nvs_commit(nvs);
+        }
+        nvs_close(nvs);
+        return ret;
+    }
+    return ESP_OK;
+}
+
+esp_err_t calib_backup_pack(uint8_t *file_out, size_t cap, size_t *file_len)
+{
+    ESP_RETURN_ON_FALSE(file_out != NULL && file_len != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
+    ESP_RETURN_ON_FALSE(s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    atm90e32as_calib_t calib = s_current_calib;
+    xSemaphoreGive(s_meter_mutex);
+
+    calib_format_c_payload_t payload;
+    memset(&payload, 0, sizeof(payload));
+    for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+        calib_phase_to_pack(&payload.phase[i], &calib.phase[i]);
+    }
+
+    size_t payload_len = sizeof(payload);
+    size_t total = CALIB_FILE_HEADER_LEN + payload_len;
+    ESP_RETURN_ON_FALSE(cap >= total, ESP_ERR_INVALID_SIZE, TAG, "output buffer too small");
+
+    uint32_t crc = esp_crc32_le(0, (const uint8_t *)&payload, payload_len);
+    calib_file_header_t header = {
+        .file_magic = CALIB_FILE_MAGIC,
+        .header_len = CALIB_FILE_HEADER_LEN,
+        .wiring_mode = (uint16_t)calib.wiring_mode,
+        .reserved = 0,
+        .payload_len = (uint32_t)payload_len,
+        .crc32 = crc,
+    };
+
+    memcpy(file_out, &header, sizeof(header));
+    memcpy(file_out + CALIB_FILE_HEADER_LEN, &payload, payload_len);
+    *file_len = total;
+
+    const char *mode_str = (calib.wiring_mode == ATM90E32AS_WIRING_3P3W) ? "3W" : "4W";
+    ESP_LOGI(TAG, "packed calibration file: %zu bytes (%s, crc=0x%08lx)",
+             total, mode_str, (unsigned long)crc);
+    return ESP_OK;
+}
+
+esp_err_t calib_backup_pack_single(uint8_t *file_out, size_t cap, size_t *file_len)
+{
+    return calib_backup_pack(file_out, cap, file_len);
+}
+
+esp_err_t calib_backup_unpack(const uint8_t *file_in, size_t file_len, bool apply, bool save_nvs)
+{
+    ESP_RETURN_ON_FALSE(file_in != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
+    ESP_RETURN_ON_FALSE(file_len >= CALIB_FILE_HEADER_LEN, ESP_ERR_INVALID_SIZE, TAG, "file too small");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    /* The header is the same packed struct regardless of legacy vs new layout
+     * (the legacy file_version field was removed in the new format and is no
+     * longer present). The header_len byte tells us how much to skip to reach
+     * the payload. Detect legacy v1 (full dual-profile blob) and v2 (full
+     * atm90e32as_calib_t) by payload size — both are still accepted for
+     * read-back, but we always write the new single-profile format. */
+    uint32_t file_magic;
+    memcpy(&file_magic, file_in, sizeof(file_magic));
+    if (file_magic != CALIB_FILE_MAGIC) {
+        ESP_LOGE(TAG, "unpack failed: bad file magic 0x%08lx", (unsigned long)file_magic);
+        return ESP_ERR_INVALID_VERSION;
+    }
+
+    uint16_t header_len;
+    memcpy(&header_len, file_in + sizeof(uint32_t), sizeof(header_len));
+
+    /* Reject legacy v1/v2 headers (they include a file_version field at offset
+     * 6 = sizeof(magic)+sizeof(version_field); we detect by checking the
+     * version_field value is 1..3 OR the layout doesn't match the new header
+     * length). New format: header_len = 18. Legacy: 20. */
+    uint16_t file_version_legacy = 0;
+    if (header_len == 20) {
+        memcpy(&file_version_legacy, file_in + sizeof(uint32_t) + sizeof(uint16_t), sizeof(uint16_t));
+    }
+
+    if (header_len != CALIB_FILE_HEADER_LEN && header_len != 20) {
+        ESP_LOGE(TAG, "unpack failed: unexpected header_len %u", header_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint16_t wiring_mode_raw;
+    uint32_t payload_len_raw;
+    uint32_t crc32_stored;
+    if (header_len == CALIB_FILE_HEADER_LEN) {
+        /* New layout: magic(4) header_len(2) wiring_mode(2) reserved(2) payload_len(4) crc32(4) = 18 */
+        memcpy(&wiring_mode_raw,  file_in + 6,  sizeof(uint16_t));
+        memcpy(&payload_len_raw,  file_in + 10, sizeof(uint32_t));
+        memcpy(&crc32_stored,     file_in + 14, sizeof(uint32_t));
+    } else {
+        /* Legacy layout: magic(4) version(2) header_len(2) wiring_mode(2) reserved(2) payload_len(4) crc32(4) = 20 */
+        memcpy(&wiring_mode_raw,  file_in + 8,  sizeof(uint16_t));
+        memcpy(&payload_len_raw,  file_in + 12, sizeof(uint32_t));
+        memcpy(&crc32_stored,     file_in + 16, sizeof(uint32_t));
+        if (file_version_legacy < 1 || file_version_legacy > 3) {
+            ESP_LOGE(TAG, "unpack failed: unsupported legacy file version %u", file_version_legacy);
+            return ESP_ERR_INVALID_VERSION;
+        }
+    }
+
+    size_t expected_total = header_len + payload_len_raw;
+    if (file_len != expected_total) {
+        ESP_LOGE(TAG, "unpack failed: file_len=%zu, expected=%zu", file_len, expected_total);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    const uint8_t *payload = file_in + header_len;
+    uint32_t computed_crc = esp_crc32_le(0, payload, payload_len_raw);
+    if (computed_crc != crc32_stored) {
+        ESP_LOGE(TAG, "unpack failed: CRC mismatch (computed=0x%08lx, expected=0x%08lx)",
+                 (unsigned long)computed_crc, (unsigned long)crc32_stored);
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    atm90e32as_wiring_mode_t file_mode = (atm90e32as_wiring_mode_t)wiring_mode_raw;
+    if (file_mode != ATM90E32AS_WIRING_3P4W && file_mode != ATM90E32AS_WIRING_3P3W) {
+        /* v1 used 0xFFFF for full blob — fall through by payload size. */
+        file_mode = ATM90E32AS_WIRING_3P4W;
+    }
+
+    /* Legacy v1: full dual-profile blob payload */
+    if (header_len == 20 && (file_version_legacy == 1 ||
+                             payload_len_raw == sizeof(energy_meter_calib_blob_t))) {
+        ESP_LOGI(TAG, "unpacking legacy v1 full blob: %zu bytes", file_len);
+        return energy_meter_import_blob(payload, payload_len_raw, apply, save_nvs);
+    }
+
+    atm90e32as_calib_t calib;
+    memset(&calib, 0, sizeof(calib));
+    calib.wiring_mode = file_mode;
+
+    /* New format (or legacy v3) — single-profile phase-cal payload. */
+    if (payload_len_raw == sizeof(calib_format_c_payload_t)) {
+        if (payload_len_raw != sizeof(calib_format_c_payload_t)) {
+            ESP_LOGE(TAG, "unpack failed: payload_len=%lu expected=%zu",
+                     (unsigned long)payload_len_raw, sizeof(calib_format_c_payload_t));
+            return ESP_ERR_INVALID_SIZE;
+        }
+        calib_format_c_payload_t cpay;
+        memcpy(&cpay, payload, sizeof(cpay));
+        for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+            if (cpay.phase[i].voltage_gain == 0 || cpay.phase[i].current_gain == 0) {
+                ESP_LOGE(TAG, "unpack: phase %d has zero gain", i);
+                return ESP_ERR_INVALID_ARG;
+            }
+            calib_phase_from_pack(&calib.phase[i], &cpay.phase[i]);
+        }
+        ESP_LOGI(TAG, "unpacking phase-cal payload: %zu bytes", file_len);
+        return calib_backup_install_phase_cal(&calib, file_mode, apply, save_nvs);
+    }
+
+    /* Legacy v2: full atm90e32as_calib_t — take phase fields only; drop PGA/freq. */
+    if (payload_len_raw != sizeof(atm90e32as_calib_t)) {
+        ESP_LOGE(TAG, "unpack failed: payload_len=%lu expected=%zu",
+                 (unsigned long)payload_len_raw, sizeof(atm90e32as_calib_t));
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memcpy(&calib, payload, sizeof(calib));
+    if (calib.wiring_mode != file_mode &&
+        (file_mode == ATM90E32AS_WIRING_3P4W || file_mode == ATM90E32AS_WIRING_3P3W)) {
+        calib.wiring_mode = file_mode;
+    }
+    /* Validate gains only; PGA/freq in file are ignored by install. */
+    for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+        if (calib.phase[i].voltage_gain == 0 || calib.phase[i].current_gain == 0) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    ESP_LOGI(TAG, "unpacking legacy v2 full calib (phase fields only): %zu bytes", file_len);
+    return calib_backup_install_phase_cal(&calib, file_mode, apply, save_nvs);
+}
+
+esp_err_t calib_backup_json(char *json_out, size_t cap, size_t *json_len)
+{
+    ESP_RETURN_ON_FALSE(json_out != NULL && json_len != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
+    ESP_RETURN_ON_FALSE(s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    atm90e32as_calib_t calib = s_current_calib;
+    xSemaphoreGive(s_meter_mutex);
+
+    /* CSV companion is display-only: environment/config context for the bin.
+     * PGA / CT / freq come from config_manager (system), phase rows from calib. */
+    const char *mode_str = (calib.wiring_mode == ATM90E32AS_WIRING_3P4W) ? "3P4W" : "3P3W";
+    const char *freq_str = (calib.line_freq == ATM90E32AS_LINE_FREQ_60HZ) ? "60Hz" : "50Hz";
+    unsigned pga_x = energy_meter_pga_mult(calib.pga_gain);
+
+    uint16_t nct = (uint16_t)CONFIG_APP_ATM90E32AS_CT_RATIO;
+    uint16_t i_rated = (uint16_t)CONFIG_APP_ATM90E32AS_I_RATED_A;
+    uint16_t i_exp = (uint16_t)CONFIG_APP_ATM90E32AS_I_EXPECTED_A;
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg != NULL && config_manager_get(cfg) == ESP_OK) {
+        if (cfg->ct_ratio >= 1U) {
+            nct = cfg->ct_ratio;
+        }
+        if (cfg->i_rated_a >= 1U) {
+            i_rated = cfg->i_rated_a;
+        }
+        if (cfg->i_expected_a >= 1U) {
+            i_exp = cfg->i_expected_a;
+        }
+        if (cfg->pga == 1U || cfg->pga == 2U || cfg->pga == 4U) {
+            pga_x = cfg->pga;
+        }
+        if (cfg->line_freq == 1U) {
+            freq_str = "60Hz";
+        } else if (cfg->line_freq == 0U) {
+            freq_str = "50Hz";
+        }
+        if (cfg->wiring_mode == 1U) {
+            mode_str = "3P3W";
+        } else if (cfg->wiring_mode == 0U) {
+            mode_str = "3P4W";
+        }
+    }
+    free(cfg);
+
+    /* CSV companion (display-only): system PGA/freq/CT + phase cal snapshot. */
+    int len = snprintf(json_out, cap,
+        "# Calib meta (bin is authoritative for phase gains)\n"
+        "# wiring=%s freq=%s PGA=%ux Rburden=%.2fOhm\n"
+        "# CT NCT=%u I_Rated=%uA I_Expected=%uA VADC=720mV\n"
+        "# Phase,Vg,Ig,Vo,Io,Po,Qo,PQ,Ph,Fg\n"
+        "A,%u,%u,%d,%d,%d,%d,%u,%d,%u\n"
+        "B,%u,%u,%d,%d,%d,%d,%u,%d,%u\n"
+        "C,%u,%u,%d,%d,%d,%d,%u,%d,%u\n",
+        mode_str, freq_str, pga_x, (double)ENERGY_METER_R_BURDEN_OHM,
+        (unsigned)nct, (unsigned)i_rated, (unsigned)i_exp,
+        calib.phase[0].voltage_gain, calib.phase[0].current_gain,
+        calib.phase[0].voltage_offset, calib.phase[0].current_offset,
+        calib.phase[0].active_power_offset, calib.phase[0].reactive_power_offset,
+        calib.phase[0].pq_gain, calib.phase[0].phase_comp, calib.phase[0].fundamental_power_gain,
+        calib.phase[1].voltage_gain, calib.phase[1].current_gain,
+        calib.phase[1].voltage_offset, calib.phase[1].current_offset,
+        calib.phase[1].active_power_offset, calib.phase[1].reactive_power_offset,
+        calib.phase[1].pq_gain, calib.phase[1].phase_comp, calib.phase[1].fundamental_power_gain,
+        calib.phase[2].voltage_gain, calib.phase[2].current_gain,
+        calib.phase[2].voltage_offset, calib.phase[2].current_offset,
+        calib.phase[2].active_power_offset, calib.phase[2].reactive_power_offset,
+        calib.phase[2].pq_gain, calib.phase[2].phase_comp, calib.phase[2].fundamental_power_gain
+    );
+
+    if (len < 0 || (size_t)len >= cap) {
+        ESP_LOGE(TAG, "CSV buffer too small (need ~%d, have %zu)", len, cap);
+        return ESP_ERR_NO_MEM;
+    }
+
+    *json_len = (size_t)len;
+    return ESP_OK;
+}
+
 esp_err_t energy_meter_reset_calibration_defaults(bool apply)
 {
     ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
 
+    /* Factory phase gains only. Keep system PGA from config (do not recompute
+     * CT→PGA here — that is CT Apply's job). If config PGA unset, fall back
+     * to Kconfig enum default. */
+    atm90e32as_pga_gain_t pga = energy_meter_kconfig_default_pga();
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg != NULL && config_manager_get(cfg) == ESP_OK &&
+        (cfg->pga == 1U || cfg->pga == 2U || cfg->pga == 4U)) {
+        pga = energy_meter_pga_from_config_u8(cfg->pga);
+    }
+    free(cfg);
+    atm90e32as_line_freq_t freq = energy_meter_kconfig_default_line_freq();
+
     xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
-    atm90e32as_line_freq_t line_freq = s_current_calib.line_freq;
+    /* Keep active wiring; factory U/I = 0x8000 via atm90e32as_get_default_calib. */
     atm90e32as_wiring_mode_t wiring_mode = s_current_calib.wiring_mode;
     atm90e32as_get_default_calib(&s_current_calib);
-    s_current_calib.line_freq = line_freq;
     s_current_calib.wiring_mode = wiring_mode;
+    s_current_calib.pga_gain = pga;
+    s_current_calib.line_freq = freq;
+    s_calib = s_current_calib;
+    energy_meter_stamp_chipwide_locked(pga, freq);
     esp_err_t ret = ESP_OK;
     if (apply) {
-        ret = atm90e32as_apply_calibration(s_meter, &s_current_calib);
+        ret = energy_meter_apply_locked(&s_current_calib);
     }
     xSemaphoreGive(s_meter_mutex);
+    if (ret == ESP_OK) {
+        energy_meter_sync_line_freq_mirror(freq);
+    }
 
+    return ret;
+}
+
+/* Resolve the calibration reference for every selected phase.
+ *   MANUAL   : one shared scalar — a single source wired to all channels.
+ *   EXTERNAL : ONE Modbus poll, then the per-phase value from the reference meter. */
+static esp_err_t energy_meter_multi_reference_value(const energy_meter_multi_calib_request_t *request,
+                                                    uint8_t mask, float *ref)
+{
+    if (request->source == ENERGY_METER_CALIB_REFERENCE_MANUAL) {
+        ESP_RETURN_ON_FALSE(isfinite(request->manual_reference) && request->manual_reference > 0.0f,
+                            ESP_ERR_INVALID_ARG, TAG, "invalid manual reference");
+        for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+            if (mask & (1u << p)) ref[p] = request->manual_reference;
+        }
+        return ESP_OK;
+    }
+
+    modbus_master_status_t status;
+    meter_readings_t readings;
+    ESP_RETURN_ON_ERROR(modbus_master_get_status(&status), TAG, "external meter status unavailable");
+    ESP_RETURN_ON_FALSE(status.enabled && status.online_count > 0,
+                        ESP_ERR_INVALID_STATE, TAG, "external meter is not online");
+    ESP_RETURN_ON_ERROR(modbus_master_get_readings(&readings), TAG, "external reading unavailable");
+    for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+        if (!(mask & (1u << p))) continue;
+        float value = request->current ? readings.current[p] : readings.voltage[p];
+        ESP_RETURN_ON_FALSE(isfinite(value) && value > 0.0f, ESP_ERR_INVALID_RESPONSE, TAG,
+                            "external reference invalid for phase %d", p);
+        ref[p] = value;
+    }
+    ESP_LOGI(TAG, "calibration reference from %s", modbus_meters_device_name(status.device));
+    return ESP_OK;
+}
+
+/* Average one measurement field for every selected phase. Each sample reads the
+ * chip ONCE and accumulates all masked phases from that same snapshot, so the
+ * phases stay time-aligned (the whole point of calibrating them together).
+ * noload=false rejects non-positive readings (gain path with a live reference);
+ * noload=true accepts zero, since trending to zero is the goal of offset calib. */
+static esp_err_t energy_meter_average_measurement_masked(const energy_meter_multi_calib_request_t *request,
+                                                         uint8_t mask, bool noload, float *average)
+{
+    uint16_t samples = request->samples ? request->samples : 20;
+    double sum[ATM90E32AS_PHASE_COUNT] = {0.0, 0.0, 0.0};
+    for (uint16_t n = 0; n < samples; n++) {
+        atm90e32as_measurements_t measurement;
+        ESP_RETURN_ON_ERROR(atm90e32as_read_measurements(s_meter, &measurement), TAG,
+                            "calibration sample failed");
+        for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+            if (!(mask & (1u << p))) continue;
+            if (!request->current && !measurement.voltage_valid[p]) {
+                ESP_LOGE(TAG, "voltage not valid on phase %d during calibration", p);
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            float value = request->current ? measurement.current[p] : measurement.voltage[p];
+            if (!isfinite(value) || (!noload && value <= 0.0f)) {
+                ESP_LOGE(TAG, "invalid %s sample on phase %d (value=%.6f)",
+                         noload ? "offset" : "gain", p, value);
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+            sum[p] += value;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+        if (mask & (1u << p)) average[p] = (float)(sum[p] / samples);
+    }
+    return ESP_OK;
+}
+
+/* Multi-phase U/I gain and offset calibration: one DSP snapshot for every
+ * selected phase, one chip write.
+ *
+ * Rollback rule — the calibration is reverted ONLY when a value could not be
+ * computed or could not be applied. A missed tolerance, or a verify sample that
+ * cannot be read back, is reported and the written value is KEPT: the computed
+ * correction itself was sound, so discarding it would only hide a good result.
+ * In those cases the function returns the verify error with rolled_back=false
+ * and calibrated_mask still set, so the caller can tell the two apart. */
+esp_err_t energy_meter_auto_calibrate_multi(const energy_meter_multi_calib_request_t *request,
+                                            energy_meter_multi_calib_result_t *result)
+{
+    ESP_RETURN_ON_FALSE(request != NULL && result != NULL,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid multi calibration request");
+    ESP_RETURN_ON_FALSE(request->phase_mask != 0 &&
+                        (request->phase_mask & ~(uint8_t)ENERGY_METER_PHASE_MASK_ALL) == 0,
+                        ESP_ERR_INVALID_ARG, TAG, "phase_mask must select 1..3 phases");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL,
+                        ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    memset(result, 0, sizeof(*result));
+
+    const uint32_t settle_ms = request->settle_ms ? request->settle_ms : ENERGY_METER_MEASUREMENT_SETTLE_MS;
+    const float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent : 0.2f;
+    const uint8_t mask = request->phase_mask;
+    const char *kind = request->current ? "I" : "U";
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    atm90e32as_calib_t original = s_applied_calib;
+    atm90e32as_calib_t working = original;
+    result->pga = original.pga_gain;   /* set before any early return */
+
+    /* Calibration needs a neutral, so block it entirely in 3P3W (both U and I).
+     * Phase gains are shared across wiring modes, so a 3P4W calibration is
+     * already correct for 3P3W — there is nothing to gain by calibrating there. */
+    if (original.wiring_mode == ATM90E32AS_WIRING_3P3W) {
+        xSemaphoreGive(s_meter_mutex);
+        ESP_LOGE(TAG, "%s calib rejected: wiring mode is 3P3W; switch to 3P4W "
+                      "(phase gains are shared across wiring modes)", kind);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+        if (!(mask & (1u << p))) continue;
+        result->phase[p].done = true;
+        result->phase[p].old_gain = request->current ? original.phase[p].current_gain
+                                                     : original.phase[p].voltage_gain;
+        result->phase[p].old_offset = request->current ? original.phase[p].current_offset
+                                                       : original.phase[p].voltage_offset;
+    }
+
+    /* Reference is needed only by the gain path (offset measures no-load with
+     * no reference), so resolve it lazily inside that branch. */
+    float ref[ATM90E32AS_PHASE_COUNT] = {0.0f, 0.0f, 0.0f};
+    float before[ATM90E32AS_PHASE_COUNT] = {0.0f, 0.0f, 0.0f};
+    esp_err_t ret = ESP_OK;
+    bool applied = false;   /* true once working has been written to the chip */
+
+    if (request->calibrate_offset) {
+        /* Offset calibration: zero every selected offset register first so the
+         * residual we read is the true bias, then store its negation. The
+         * reported reading is scaled (URMS/100, IRMS/1000); undo that scale to
+         * land back in the register's raw LSB domain. */
+        for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+            if (!(mask & (1u << p))) continue;
+            if (request->current) working.phase[p].current_offset = 0;
+            else working.phase[p].voltage_offset = 0;
+        }
+        applied = true;   /* about to write zeroed offsets; roll back if it fails */
+        ret = energy_meter_apply_locked(&working);
+        if (ret == ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(settle_ms));
+            ret = energy_meter_average_measurement_masked(request, mask, true, before);
+        }
+        if (ret == ESP_OK) {
+            /* Range-check every phase BEFORE writing any of them: all-or-nothing. */
+            const double scale = request->current ? 1000.0 : 100.0;
+            int16_t comp[ATM90E32AS_PHASE_COUNT] = {0, 0, 0};
+            for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+                if (!(mask & (1u << p))) continue;
+                int64_t raw = llround((double)before[p] * scale);
+                if (-raw < INT16_MIN || -raw > INT16_MAX) {
+                    ESP_LOGE(TAG, "offset-cal phase=%d out of int16 range (residual=%.6f raw=%lld)",
+                             p, before[p], (long long)raw);
+                    ret = ESP_ERR_INVALID_SIZE;
+                    break;
+                }
+                comp[p] = (int16_t)(-raw);
+            }
+            if (ret == ESP_OK) {
+                for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+                    if (!(mask & (1u << p))) continue;
+                    if (request->current) working.phase[p].current_offset = comp[p];
+                    else working.phase[p].voltage_offset = comp[p];
+                    result->phase[p].new_offset = comp[p];
+                    ESP_LOGI(TAG, "offset-cal phase=%d %s residual=%.6f offset=%d",
+                             p, kind, before[p], comp[p]);
+                }
+                ret = energy_meter_apply_locked(&working);
+            }
+        }
+    } else {
+        /* Gain calibration: new_gain = round(old_gain * reference / measured),
+         * the datasheet ratio, evaluated in integers inside the driver.
+         * Resolve the reference first (MANUAL or EXTERNAL per masked phase). */
+        ret = energy_meter_multi_reference_value(request, mask, ref);
+        if (ret == ESP_OK) {
+            for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+                if (mask & (1u << p)) result->phase[p].reference = ref[p];
+            }
+        }
+        if (ret == ESP_OK) {
+            if (request->settle_ms) vTaskDelay(pdMS_TO_TICKS(settle_ms));
+            ret = energy_meter_average_measurement_masked(request, mask, false, before);
+        }
+        if (ret == ESP_OK) {
+            for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+                if (!(mask & (1u << p))) continue;
+                ESP_LOGI(TAG, "%s calib inputs phase=%d ref=%.6f measured=%.6f old_gain=%u pga=x%d",
+                         kind, p, ref[p], before[p], result->phase[p].old_gain,
+                         1 << original.pga_gain);
+            }
+        }
+        /* Compute every gain before writing any of them, so a phase that cannot
+         * be calibrated leaves the whole set untouched. */
+        uint16_t calculated[ATM90E32AS_PHASE_COUNT] = {0, 0, 0};
+        for (int p = 0; p < ATM90E32AS_PHASE_COUNT && ret == ESP_OK; p++) {
+            if (!(mask & (1u << p))) continue;
+            esp_err_t gain_ret = atm90e32as_calculate_gain(result->phase[p].old_gain, ref[p],
+                                                           before[p], &calculated[p]);
+            if (gain_ret != ESP_OK) {
+                ESP_LOGW(TAG, "%s gain phase=%d failed (%s) ref=%.6f meas=%.6f pga=x%d%s",
+                         kind, p, esp_err_to_name(gain_ret), ref[p], before[p],
+                         1 << original.pga_gain,
+                         gain_ret == ESP_ERR_INVALID_SIZE && request->current
+                             ? "; set PGA via console (meter-cal set --field pga) then retry"
+                             : "; check divider / wiring / that this phase has a load");
+                ret = gain_ret;
+                break;
+            }
+        }
+        if (ret == ESP_OK) {
+            for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+                if (!(mask & (1u << p))) continue;
+                if (request->current) working.phase[p].current_gain = calculated[p];
+                else working.phase[p].voltage_gain = calculated[p];
+                result->phase[p].new_gain = calculated[p];
+            }
+            /* Never let a stale working copy change PGA/freq. */
+            working.pga_gain = original.pga_gain;
+            working.line_freq = original.line_freq;
+            applied = true;   /* chip write is about to happen (roll back on failure) */
+            ret = energy_meter_apply_locked(&working);
+        }
+    }
+
+    for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+        if (mask & (1u << p)) result->phase[p].measured_before = before[p];
+    }
+
+    /* Step: verify. Re-read purely to report the residual; a problem here never
+     * reverts a calibration that was already written successfully. */
+    bool committed = (ret == ESP_OK);
+    if (committed) {
+        vTaskDelay(pdMS_TO_TICKS(settle_ms));
+        float after[ATM90E32AS_PHASE_COUNT] = {0.0f, 0.0f, 0.0f};
+        esp_err_t verify_ret = energy_meter_average_measurement_masked(request, mask,
+                                                                      request->calibrate_offset,
+                                                                      after);
+        if (verify_ret != ESP_OK) {
+            ESP_LOGW(TAG, "%s calib written but verify read failed (%s) — NOT rolled back",
+                     kind, esp_err_to_name(verify_ret));
+            ret = verify_ret;
+        } else {
+            for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+                if (!(mask & (1u << p))) continue;
+                result->phase[p].measured_after = after[p];
+                if (!request->calibrate_offset && ref[p] > 0.0f) {
+                    float error_percent = fabsf(after[p] - ref[p]) * 100.0f / ref[p];
+                    result->phase[p].error_percent = error_percent;
+                    if (error_percent > tolerance_percent) {
+                        ESP_LOGW(TAG, "%s calib phase=%d residual %.3f%% exceeds tolerance %.3f%% "
+                                      "(ref=%.6f after=%.6f) — kept, re-run to refine",
+                                 kind, p, error_percent, tolerance_percent, ref[p], after[p]);
+                    } else {
+                        ESP_LOGI(TAG, "%s calib verified phase=%d after=%.6f error=%.3f%%",
+                                 kind, p, after[p], error_percent);
+                    }
+                } else {
+                    ESP_LOGI(TAG, "%s calib verified phase=%d residual_after=%.6f",
+                             kind, p, after[p]);
+                }
+            }
+        }
+        /* The values are on the chip regardless of how the verify read went. */
+        result->calibrated_mask = mask;
+        result->offset_calibrated = request->calibrate_offset;
+    }
+
+    if (!committed) {
+        /* Only restore the chip if a write actually happened. A pre-apply
+         * failure (reference/capture/compute) left the chip untouched, so
+         * re-writing `original` would be a pointless full image write. */
+        if (applied) {
+            esp_err_t rollback = energy_meter_apply_locked(&original);
+            result->rolled_back = true;
+            ESP_LOGE(TAG, "%s calib failed (%s), rollback=%s",
+                     kind, esp_err_to_name(ret), esp_err_to_name(rollback));
+        } else {
+            ESP_LOGE(TAG, "%s calib failed before any chip write (%s)",
+                     kind, esp_err_to_name(ret));
+        }
+    } else {
+        for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+            if (!(mask & (1u << p))) continue;
+            if (request->calibrate_offset) {
+                ESP_LOGI(TAG, "%s offset calibrated phase=%d offset=%d->%d",
+                         kind, p, result->phase[p].old_offset, result->phase[p].new_offset);
+            } else {
+                ESP_LOGI(TAG, "%s gain calibrated phase=%d ref=%.6f before=%.6f after=%.6f gain=%u->%u",
+                         kind, p, result->phase[p].reference, result->phase[p].measured_before,
+                         result->phase[p].measured_after, result->phase[p].old_gain,
+                         result->phase[p].new_gain);
+            }
+        }
+    }
+    xSemaphoreGive(s_meter_mutex);
+    return ret;
+}
+
+static esp_err_t energy_meter_average_power_raw(const energy_meter_power_offset_request_t *request,
+                                                int32_t *average)
+{
+    uint16_t samples = request->samples ? request->samples : 20;
+    double sum = 0.0;
+    for (uint16_t n = 0; n < samples; n++) {
+        int32_t raw = 0;
+        ESP_RETURN_ON_ERROR(atm90e32as_read_power_raw(s_meter, request->phase,
+                                                       request->type == ENERGY_METER_POWER_OFFSET_REACTIVE,
+                                                       &raw), TAG, "power offset sample failed");
+        sum += (double)raw;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    double mean = sum / (double)samples;
+    ESP_RETURN_ON_FALSE(mean >= (double)INT32_MIN && mean <= (double)INT32_MAX,
+                        ESP_ERR_INVALID_SIZE, TAG, "power offset average out of range");
+    *average = (int32_t)llround(mean);
+    return ESP_OK;
+}
+
+esp_err_t energy_meter_auto_calibrate_power_offset(
+    const energy_meter_power_offset_request_t *request,
+    energy_meter_power_offset_result_t *result)
+{
+    ESP_RETURN_ON_FALSE(request != NULL && result != NULL &&
+                        request->phase < ATM90E32AS_PHASE_COUNT &&
+                        request->type <= ENERGY_METER_POWER_OFFSET_REACTIVE,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid power offset request");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL,
+                        ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+    memset(result, 0, sizeof(*result));
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    atm90e32as_calib_t original = s_applied_calib;
+    atm90e32as_calib_t working = original;
+    int16_t *offset = request->type == ENERGY_METER_POWER_OFFSET_REACTIVE
+                          ? &working.phase[request->phase].reactive_power_offset
+                          : &working.phase[request->phase].active_power_offset;
+    result->old_offset = *offset;
+    *offset = 0;
+
+    esp_err_t ret = energy_meter_apply_locked(&working);
+    if (ret == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(request->settle_ms ? request->settle_ms : ENERGY_METER_MEASUREMENT_SETTLE_MS));
+        ret = energy_meter_average_power_raw(request, &result->average_before_counts);
+    }
+    if (ret == ESP_OK) {
+        int64_t correction = -(int64_t)result->average_before_counts;
+        if (correction < INT16_MIN || correction > INT16_MAX) {
+            ret = ESP_ERR_INVALID_SIZE;
+        } else {
+            *offset = (int16_t)correction;
+            result->new_offset = *offset;
+            ret = energy_meter_apply_locked(&working);
+        }
+    }
+    if (ret == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(request->settle_ms ? request->settle_ms : ENERGY_METER_MEASUREMENT_SETTLE_MS));
+        ret = energy_meter_average_power_raw(request, &result->average_after_counts);
+        if (ret == ESP_OK) {
+            int32_t tolerance = request->residual_tolerance_counts > 0
+                                    ? request->residual_tolerance_counts : 2;
+            if (llabs((long long)result->average_after_counts) > tolerance) {
+                ret = ESP_ERR_INVALID_RESPONSE;
+            }
+        }
+    }
+    if (ret != ESP_OK) {
+        (void)energy_meter_apply_locked(&original);
+        result->rolled_back = true;
+    } else {
+        result->offset_calibrated = true;
+    }
+    xSemaphoreGive(s_meter_mutex);
+    return ret;
+}
+
+/* Average active power for one phase, returned in integer milliwatts. Pmean is
+ * updated by the chip once every ~16 line cycles, so we sample every 100 ms to
+ * capture independent averages. Integer mW keeps the PQGain math deterministic
+ * and free of float rounding. */
+static esp_err_t energy_meter_average_active_power(atm90e32as_phase_t phase,
+                                                   uint16_t samples,
+                                                   int64_t *average_mw)
+{
+    if (samples == 0) samples = 1;
+    int64_t sum = 0;
+    for (uint16_t n = 0; n < samples; n++) {
+        atm90e32as_measurements_t measurement;
+        ESP_RETURN_ON_ERROR(atm90e32as_read_measurements(s_meter, &measurement), TAG,
+                            "active power sample failed");
+        float value = measurement.active_power[phase];
+        ESP_RETURN_ON_FALSE(isfinite(value), ESP_ERR_INVALID_RESPONSE, TAG,
+                            "invalid active power sample");
+        sum += llround((double)value * 1000.0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    /* Round-half-away-from-zero; safe for a negative sum too. */
+    int64_t q = sum / samples;
+    int64_t r = sum % samples;
+    if (2 * llabs(r) >= samples) q += (sum >= 0 ? 1 : -1);
+    *average_mw = q;
+    return ESP_OK;
+}
+
+esp_err_t energy_meter_auto_calibrate_pq_gain(const energy_meter_pq_gain_request_t *request,
+                                              energy_meter_pq_gain_result_t *result)
+{
+    ESP_RETURN_ON_FALSE(request != NULL && result != NULL &&
+                        request->phase < ATM90E32AS_PHASE_COUNT,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid PQ gain request");
+    ESP_RETURN_ON_FALSE(isfinite(request->reference_w) && request->reference_w > 0.0f &&
+                        request->reference_w <= 1000000.0f,
+                        ESP_ERR_INVALID_ARG, TAG, "P_ref must be > 0 and <= 1 MW");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL,
+                        ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    memset(result, 0, sizeof(*result));
+
+    uint16_t samples = request->samples ? request->samples : 3;
+    uint32_t settle_ms = request->settle_ms ? request->settle_ms : 700;
+    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent : 1.0f;
+
+    /* Step 1: collect every value needed for the gain calculation before any
+     * chip write, using integer milliwatts to avoid float arithmetic drift. */
+    int64_t pref_mw = llround((double)request->reference_w * 1000.0);
+    ESP_RETURN_ON_FALSE(pref_mw > 0 && pref_mw <= 1000000000LL,
+                        ESP_ERR_INVALID_ARG, TAG, "P_ref mW out of range");
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    atm90e32as_calib_t original = s_applied_calib;
+    atm90e32as_calib_t working = original;
+    int16_t old_pq = original.phase[request->phase].pq_gain;
+
+    int64_t pchip_mw = 0;
+    esp_err_t ret = energy_meter_average_active_power(request->phase, samples, &pchip_mw);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "PQ gain: failed to read P_chip");
+    } else if (pchip_mw <= 0) {
+        ESP_LOGE(TAG, "PQ gain: P_chip=%lld mW is not positive", (long long)pchip_mw);
+        ret = ESP_ERR_INVALID_RESPONSE;
+    }
+
+    result->reference = (float)pref_mw / 1000.0f;
+    result->measured_before = (float)pchip_mw / 1000.0f;
+    result->old_pq_gain = old_pq;
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "PQ gain inputs phase=%d P_ref=%lld mW P_chip=%lld mW old_pq_gain=%d tolerance=%.3f%% samples=%u",
+                 request->phase, (long long)pref_mw, (long long)pchip_mw, old_pq,
+                 tolerance_percent, (unsigned)samples);
+    }
+
+    /* Step 2: AN46103 composition formula in signed 16-bit LSB units:
+     * new_pq = round((32768 + old_pq) * P_ref_mW / P_chip_mW) - 32768.
+     * Numerator is non-negative because old_pq >= INT16_MIN and P_ref_mW > 0. */
+    int16_t new_pq = 0;
+    if (ret == ESP_OK) {
+        int64_t numerator = (32768LL + (int64_t)old_pq) * pref_mw;
+        int64_t quotient = numerator / pchip_mw;
+        int64_t remainder = numerator % pchip_mw;
+        if (2 * remainder >= pchip_mw) quotient++;
+
+        int64_t new_pq64 = quotient - 32768LL;
+        if (new_pq64 < INT16_MIN || new_pq64 > INT16_MAX) {
+            ESP_LOGE(TAG, "PQ gain: calculated %lld out of int16 range", (long long)new_pq64);
+            ret = ESP_ERR_INVALID_SIZE;
+        } else {
+            new_pq = (int16_t)new_pq64;
+            ESP_LOGI(TAG, "PQ gain calculated new_pq_gain=%d", new_pq);
+        }
+    }
+
+    /* Step 3: load only the selected phase's PQGain, then let the existing apply
+     * path write the calibration image and reload the metering DSP. */
+    if (ret == ESP_OK) {
+        working.phase[request->phase].pq_gain = new_pq;
+        result->new_pq_gain = new_pq;
+        ret = energy_meter_apply_locked(&working);
+    }
+
+    /* Step 4: verify against the same P_ref/tolerance supplied in step 1. */
+    if (ret == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(settle_ms));
+        int64_t after_mw = 0;
+        ret = energy_meter_average_active_power(request->phase, samples, &after_mw);
+        if (ret == ESP_OK) {
+            result->measured_after = (float)after_mw / 1000.0f;
+
+            int64_t error_x100 = llabs(after_mw - pref_mw) * 10000LL / pref_mw;
+            int64_t tolerance_x100 = llround((double)tolerance_percent * 100.0);
+            if (error_x100 > tolerance_x100) {
+                ESP_LOGE(TAG,
+                         "PQ gain: residual error %lld.%02lld%% exceeds tolerance %lld.%02lld%%",
+                         (long long)(error_x100 / 100), (long long)(error_x100 % 100),
+                         (long long)(tolerance_x100 / 100), (long long)(tolerance_x100 % 100));
+                ret = ESP_ERR_INVALID_RESPONSE;
+            } else {
+                ESP_LOGI(TAG,
+                         "PQ gain verified P_after=%lld mW error=%lld.%02lld%%",
+                         (long long)after_mw, (long long)(error_x100 / 100),
+                         (long long)(error_x100 % 100));
+            }
+        }
+    }
+
+    if (ret != ESP_OK) {
+        esp_err_t rollback = energy_meter_apply_locked(&original);
+        result->rolled_back = true;
+        ESP_LOGE(TAG, "PQ gain calibration failed (%s), rollback=%s",
+                 esp_err_to_name(ret), esp_err_to_name(rollback));
+    } else {
+        ESP_LOGI(TAG,
+                 "PQ gain calibrated phase=%d P_ref=%.3f W P_before=%.3f W P_after=%.3f W pq_gain=%d->%d",
+                 request->phase, result->reference, result->measured_before,
+                 result->measured_after, result->old_pq_gain, result->new_pq_gain);
+    }
+    xSemaphoreGive(s_meter_mutex);
+    return ret;
+}
+
+esp_err_t energy_meter_auto_calibrate_phase(const energy_meter_phase_calib_request_t *request,
+                                            energy_meter_phase_calib_result_t *result)
+{
+    ESP_RETURN_ON_FALSE(request != NULL && result != NULL &&
+                        request->phase < ATM90E32AS_PHASE_COUNT,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid phase calib request");
+    ESP_RETURN_ON_FALSE(isfinite(request->reference_w) && request->reference_w > 0.0f &&
+                        request->reference_w <= 1000000.0f,
+                        ESP_ERR_INVALID_ARG, TAG, "P_ref must be > 0 and <= 1 MW");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL,
+                        ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    memset(result, 0, sizeof(*result));
+
+    uint16_t samples = request->samples ? request->samples : 3;
+    uint32_t settle_ms = request->settle_ms ? request->settle_ms : 700;
+    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent : 1.0f;
+
+    int64_t pref_mw = llround((double)request->reference_w * 1000.0);
+    ESP_RETURN_ON_FALSE(pref_mw > 0 && pref_mw <= 1000000000LL,
+                        ESP_ERR_INVALID_ARG, TAG, "P_ref mW out of range");
+
+    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+    atm90e32as_calib_t original = s_applied_calib;
+    atm90e32as_calib_t working = original;
+
+    /* AN46103 phase formula assumes Phi=0 while eps_p is measured. Production
+     * calibrates once and writes Phi directly, so require the baseline first. */
+    int16_t old_phi = original.phase[request->phase].phase_comp;
+    if (old_phi != 0) {
+        ESP_LOGE(TAG,
+                 "phase calib: phase_comp=%d is not at baseline; run 'meter-cal default --field phi' then re-run auto-phi",
+                 old_phi);
+        xSemaphoreGive(s_meter_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    result->old_phase_comp = old_phi;
+
+    /* Step 1: collect every input before any chip write. Gphase is selected from
+     * the line frequency actually applied to the chip. */
+    uint32_t gphase_x1000 = (original.line_freq == ATM90E32AS_LINE_FREQ_60HZ) ? 3136449U : 3763739U;
+    result->gphase_x1000 = gphase_x1000;
+
+    int64_t pchip_mw = 0;
+    esp_err_t ret = energy_meter_average_active_power(request->phase, samples, &pchip_mw);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "phase calib: failed to read P_chip");
+    } else if (pchip_mw <= 0) {
+        ESP_LOGE(TAG, "phase calib: P_chip=%lld mW is not positive", (long long)pchip_mw);
+        ret = ESP_ERR_INVALID_RESPONSE;
+    }
+
+    result->reference = (float)pref_mw / 1000.0f;
+    result->measured_before = (float)pchip_mw / 1000.0f;
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "phase calib inputs phase=%d P_ref=%lld mW P_chip=%lld mW line_freq=%s Gphase=%u tolerance=%.3f%% samples=%u",
+                 request->phase, (long long)pref_mw, (long long)pchip_mw,
+                 (original.line_freq == ATM90E32AS_LINE_FREQ_60HZ) ? "60Hz" : "50Hz",
+                 (unsigned)gphase_x1000, tolerance_percent, (unsigned)samples);
+    }
+
+    /* Step 2: Phi = eps_p * Gphase, in signed 2.048MHz delay cycles.
+     *   eps_p = (P_chip - P_ref) / P_ref
+     *   Phi   = round( diff_mw * (Gphase*1000) / (pref_mw * 1000) )
+     * |num| <= 1e6*1000*3763739 ~ 3.8e15 < 2^63; den <= 1e12. */
+    int16_t new_phi = 0;
+    if (ret == ESP_OK) {
+        int64_t diff_mw = pchip_mw - pref_mw;
+        int64_t num = diff_mw * (int64_t)gphase_x1000;
+        int64_t den = pref_mw * 1000LL;          /* > 0 */
+        int64_t q = num / den;
+        int64_t r = num % den;
+        if (2 * llabs(r) >= den) q += (num >= 0 ? 1 : -1);   /* half away from zero */
+
+        if (q < -255 || q > 255) {
+            ESP_LOGE(TAG, "phase calib: computed Phi=%lld out of +/-255 cycle range", (long long)q);
+            ret = ESP_ERR_INVALID_SIZE;
+        } else {
+            new_phi = (int16_t)q;
+            ESP_LOGI(TAG, "phase calib computed new_phi=%d", new_phi);
+        }
+    }
+
+    /* Step 3: load only the selected phase's Phi, then let the existing apply
+     * path write the calibration image and reload the metering DSP. */
+    if (ret == ESP_OK) {
+        working.phase[request->phase].phase_comp = new_phi;
+        result->new_phase_comp = new_phi;
+        ret = energy_meter_apply_locked(&working);
+    }
+
+    /* Step 4: verify residual active-power error at PF=0.5L. PAngle is read for a
+     * sanity log only; it never gates PASS/FAIL. */
+    if (ret == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(settle_ms));
+        int64_t after_mw = 0;
+        ret = energy_meter_average_active_power(request->phase, samples, &after_mw);
+        if (ret == ESP_OK) {
+            result->measured_after = (float)after_mw / 1000.0f;
+
+            atm90e32as_measurements_t measurement;
+            if (atm90e32as_read_measurements(s_meter, &measurement) == ESP_OK &&
+                isfinite(measurement.phase_angle[request->phase])) {
+                result->phase_angle_after = measurement.phase_angle[request->phase];
+                ESP_LOGI(TAG, "phase calib PAngle=%.1f deg (expect ~60.0 at PF=0.5L)",
+                         result->phase_angle_after);
+            }
+
+            int64_t error_x100 = llabs(after_mw - pref_mw) * 10000LL / pref_mw;
+            int64_t tolerance_x100 = llround((double)tolerance_percent * 100.0);
+            if (error_x100 > tolerance_x100) {
+                ESP_LOGE(TAG,
+                         "phase calib: residual error %lld.%02lld%% exceeds tolerance %lld.%02lld%%",
+                         (long long)(error_x100 / 100), (long long)(error_x100 % 100),
+                         (long long)(tolerance_x100 / 100), (long long)(tolerance_x100 % 100));
+                ret = ESP_ERR_INVALID_RESPONSE;
+            } else {
+                ESP_LOGI(TAG,
+                         "phase calib verified P_after=%lld mW error=%lld.%02lld%%",
+                         (long long)after_mw, (long long)(error_x100 / 100),
+                         (long long)(error_x100 % 100));
+            }
+        }
+    }
+
+    if (ret != ESP_OK) {
+        esp_err_t rollback = energy_meter_apply_locked(&original);
+        result->rolled_back = true;
+        ESP_LOGE(TAG, "phase calibration failed (%s), rollback=%s",
+                 esp_err_to_name(ret), esp_err_to_name(rollback));
+    } else {
+        ESP_LOGI(TAG,
+                 "phase calibrated phase=%d P_ref=%.3f W P_before=%.3f W P_after=%.3f W phi=%d->%d PAngle=%.1f deg",
+                 request->phase, result->reference, result->measured_before,
+                 result->measured_after, result->old_phase_comp, result->new_phase_comp,
+                 result->phase_angle_after);
+    }
+    xSemaphoreGive(s_meter_mutex);
+    return ret;
+}
+
+/* Single-phase auto calibration is now a thin wrapper over the multi-phase core:
+ * it builds a one-bit mask, runs the shared single-shot path, and maps the result
+ * back into the legacy struct. Callers (console_task, web_portal) are unchanged.
+ * The 3P3W rejection for voltage-phase-B is subsumed by multi's global 3P3W gate. */
+esp_err_t energy_meter_auto_calibrate(const energy_meter_auto_calib_request_t *request,
+                                      energy_meter_auto_calib_result_t *result)
+{
+    ESP_RETURN_ON_FALSE(request != NULL && result != NULL && request->phase < ATM90E32AS_PHASE_COUNT,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid auto calibration request");
+    ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
+
+    memset(result, 0, sizeof(*result));
+
+    energy_meter_multi_calib_request_t multi_req = {
+        .phase_mask = (uint8_t)(1u << request->phase),
+        .current = request->current,
+        .calibrate_offset = request->calibrate_offset,
+        .source = request->source,
+        .manual_reference = request->manual_reference,
+        .samples = request->samples,
+        .settle_ms = request->settle_ms,
+        .tolerance_percent = request->tolerance_percent,
+    };
+    energy_meter_multi_calib_result_t multi;
+    memset(&multi, 0, sizeof(multi));   /* don't rely on multi's internal init order */
+    esp_err_t ret = energy_meter_auto_calibrate_multi(&multi_req, &multi);
+
+    const energy_meter_multi_phase_result_t *ph = &multi.phase[request->phase];
+    result->reference = ph->reference;
+    result->measured_before = ph->measured_before;
+    result->measured_after = ph->measured_after;
+    result->old_gain = ph->old_gain;
+    result->new_gain = ph->new_gain;
+    result->old_offset = ph->old_offset;
+    result->new_offset = ph->new_offset;
+    result->offset_calibrated = multi.offset_calibrated;
+    result->old_pga = multi.pga;
+    result->new_pga = multi.pga;
+    result->iterations = 1;
+    result->rolled_back = multi.rolled_back;
+    result->pga_increased = false;
     return ret;
 }
 

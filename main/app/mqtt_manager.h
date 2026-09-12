@@ -10,10 +10,12 @@ extern "C" {
 /*
  * MQTT manager: telemetry + remote-control client for the power meter.
  *
- * Owns the esp-mqtt client, its lifecycle, and reconnection. Reads the active
- * broker profile from config_store (NVS) and connects once the network has an
- * IP. TLS is per-profile (plain / IDF cert bundle / custom CA). The client ID
- * is generated at runtime from the device name plus a MAC suffix.
+ * Owns the esp-mqtt client, its lifecycle, runtime recreation and reconnection.
+ * Reads the active broker profile from Configuration Manager. TLS is selected
+ * by the active profile and its certificate paths; PEM files are loaded by the
+ * runtime rather than stored in configuration RAM. The client ID and topic
+ * bases may come from the profile, with the existing device-derived defaults
+ * retained when those fields are empty.
  *
  * Design: docs/ESP32_MQTT_Design.md
  *
@@ -25,14 +27,22 @@ extern "C" {
  * is lost, or TLS fails, the metering and Modbus RTU paths keep running. Nothing
  * here may block or crash the measurement core.
  *
- * Status: SKELETON (step 3). Connects, sets LWT, publishes online/offline
- * status, and subscribes to nothing yet. Telemetry publishing (step 4) and relay
- * command handling (step 5) are added later.
+ * Runtime state: connects, publishes the existing telemetry/status topics,
+ * subscribes to relay commands, and can destroy/recreate its client on Apply.
  */
 
 /* Start the MQTT manager task. Reads the active profile; if MQTT is disabled or
- * the profile has no URI, the task idles until reconfigured. Idempotent. */
+ * the profile has no URI, the task remains idle and ready for a later Apply.
+ * Idempotent. */
 esp_err_t mqtt_manager_start(void);
+
+/* Apply the current active MQTT profile at runtime.
+ *
+ * The existing manager task synchronously stops and destroys its current
+ * esp-mqtt client, reads the active profile again from Configuration Manager,
+ * then creates and starts a fresh client. Nothing is saved to or reloaded from
+ * NVS. Returns only after that lifecycle attempt has completed. */
+esp_err_t mqtt_manager_apply(void);
 
 /* True if the client currently has a live broker session. */
 bool mqtt_manager_is_connected(void);

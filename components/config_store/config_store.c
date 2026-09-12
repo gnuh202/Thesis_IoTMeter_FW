@@ -28,6 +28,7 @@
 #define NET_VERSION 1
 #define MQTT_VERSION 2
 #define SYS_VERSION 1
+#define EXT_METER_VERSION 1
 
 #define NET_NAMESPACE "netcfg"
 #define NET_KEY "net_v1"
@@ -35,6 +36,10 @@
 #define MQTT_KEY "mqtt_v2"
 #define SYS_NAMESPACE "syscfg"
 #define SYS_KEY "sys_v1"
+#define EXT_METER_NAMESPACE "extmtr"
+#define EXT_METER_KEY "ext_v1"
+#define SNAPSHOT_NAMESPACE "cfgsnap"
+#define SNAPSHOT_KEY "snapshot"
 
 static const char *TAG = "config_store";
 
@@ -58,6 +63,13 @@ typedef struct {
     uint16_t reserved;
     config_system_t data;
 } sys_blob_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    config_ext_meter_t data;
+} ext_meter_blob_t;
 
 esp_err_t config_store_init(void)
 {
@@ -110,6 +122,30 @@ void config_store_default_system(config_system_t *out)
     memset(out, 0, sizeof(*out));
     strlcpy(out->device_name, "Power Meter", sizeof(out->device_name));
     strlcpy(out->hostname, "power-meter", sizeof(out->hostname));
+}
+
+void config_store_default_ext_meter(config_ext_meter_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    /* No default downstream device: slots are added via Web Portal / LCD.
+     * Keep bus parameters only (poll period, baud/parity). slave_addr=0 and
+     * device=0 mean "no legacy single-device slot to synthesize". */
+    out->device = 0;
+    out->slave_addr = 0;
+    out->baud_code = 0;    /* 9600 */
+    out->parity_code = 0;  /* none */
+#ifdef CONFIG_APP_MB_MASTER_POLL_PERIOD_MS_DEFAULT
+    out->poll_period_ms = CONFIG_APP_MB_MASTER_POLL_PERIOD_MS_DEFAULT;
+#else
+    out->poll_period_ms = 2000;
+#endif
+    /* Factory default: bus OFF. The master task is built and reports status,
+     * but stops polling until the operator enables the bus via LCD / Web Portal
+     * / console (and adds at least one meter slot). */
+    out->enabled = false;
 }
 
 /*
@@ -245,12 +281,93 @@ esp_err_t config_store_set_system(const config_system_t *in)
     return write_blob(SYS_NAMESPACE, SYS_KEY, &blob, sizeof(blob));
 }
 
+esp_err_t config_store_get_ext_meter(config_ext_meter_t *out)
+{
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
+
+    ext_meter_blob_t blob;
+    esp_err_t ret = read_blob(EXT_METER_NAMESPACE, EXT_METER_KEY, &blob, sizeof(blob), CONFIG_STORE_MAGIC, EXT_METER_VERSION);
+    if (ret == ESP_OK) {
+        *out = blob.data;
+        return ESP_OK;
+    }
+    config_store_default_ext_meter(out);
+    return ret;
+}
+
+esp_err_t config_store_set_ext_meter(const config_ext_meter_t *in)
+{
+    ESP_RETURN_ON_FALSE(in != NULL, ESP_ERR_INVALID_ARG, TAG, "in is NULL");
+    ext_meter_blob_t blob = {.magic = CONFIG_STORE_MAGIC, .version = EXT_METER_VERSION, .reserved = 0, .data = *in};
+    return write_blob(EXT_METER_NAMESPACE, EXT_METER_KEY, &blob, sizeof(blob));
+}
+
+esp_err_t config_store_get_snapshot_sized(void *out, size_t size, size_t *stored_size_out)
+{
+    ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "snapshot out is NULL");
+    ESP_RETURN_ON_FALSE(size > 0, ESP_ERR_INVALID_SIZE, TAG, "snapshot size is zero");
+    ESP_RETURN_ON_FALSE(stored_size_out != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "snapshot stored size is NULL");
+
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(SNAPSHOT_NAMESPACE, NVS_READONLY, &nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    ESP_RETURN_ON_ERROR(ret, TAG, "open snapshot failed");
+
+    size_t stored_size = 0;
+    ret = nvs_get_blob(nvs, SNAPSHOT_KEY, NULL, &stored_size);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(nvs);
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (ret != ESP_OK) {
+        nvs_close(nvs);
+        ESP_LOGE(TAG, "query snapshot size failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    if (stored_size > size) {
+        nvs_close(nvs);
+        ESP_LOGW(TAG, "snapshot exceeds read buffer (%u vs %u)",
+                 (unsigned)stored_size, (unsigned)size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    memset(out, 0, size);
+    size_t read_size = stored_size;
+    ret = nvs_get_blob(nvs, SNAPSHOT_KEY, out, &read_size);
+    nvs_close(nvs);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "read snapshot failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    *stored_size_out = read_size;
+    return ESP_OK;
+}
+
+esp_err_t config_store_get_snapshot(void *out, size_t size)
+{
+    size_t stored_size = 0;
+    return config_store_get_snapshot_sized(out, size, &stored_size);
+}
+
+esp_err_t config_store_set_snapshot(const void *data, size_t size)
+{
+    ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "snapshot data is NULL");
+    ESP_RETURN_ON_FALSE(size > 0, ESP_ERR_INVALID_SIZE, TAG, "snapshot size is zero");
+    return write_blob(SNAPSHOT_NAMESPACE, SNAPSHOT_KEY, data, size);
+}
+
 esp_err_t config_store_factory_reset(void)
 {
     esp_err_t final_ret = ESP_OK;
-    const char *namespaces[] = {NET_NAMESPACE, MQTT_NAMESPACE, SYS_NAMESPACE};
+    const char *namespaces[] = {
+        NET_NAMESPACE, MQTT_NAMESPACE, SYS_NAMESPACE, EXT_METER_NAMESPACE,
+        SNAPSHOT_NAMESPACE,
+    };
 
-    for (int i = 0; i < 3; i++) {
+    for (size_t i = 0; i < sizeof(namespaces) / sizeof(namespaces[0]); i++) {
         nvs_handle_t nvs;
         esp_err_t ret = nvs_open(namespaces[i], NVS_READWRITE, &nvs);
         if (ret == ESP_ERR_NVS_NOT_FOUND) {

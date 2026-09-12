@@ -169,6 +169,19 @@ static esp_err_t set_bool_value(lcd_menu_t *menu, const lcd_menu_item_t *item, b
     return ESP_OK;
 }
 
+/* Fill buf with the dynamic right-hand value of a VALUE item. */
+static void value_get_text(lcd_menu_t *menu, const lcd_menu_item_t *item, char *buf, size_t buf_size)
+{
+    if (buf_size == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    if (item != NULL && item->value_get != NULL) {
+        item->value_get(menu, item, buf, buf_size, menu->config.user_ctx);
+        buf[buf_size - 1] = '\0';
+    }
+}
+
 static esp_err_t render_item_line(lcd_menu_t *menu, uint8_t row, const lcd_menu_item_t *item, bool selected, bool has_above, bool has_below)
 {
     char line[LCD_MENU_MAX_WIDTH + 1];
@@ -181,21 +194,52 @@ static esp_err_t render_item_line(lcd_menu_t *menu, uint8_t row, const lcd_menu_
     }
 
     char label[LCD_MENU_MAX_WIDTH + 1];
+    char value[LCD_MENU_MAX_WIDTH + 1];
+    bool has_value = false;
     if (item == NULL) {
         label[0] = '\0';
     } else if (item->type == LCD_MENU_ITEM_BOOL) {
         snprintf(label, sizeof(label), "%s: %s", item->label != NULL ? item->label : "", get_bool_value(menu, item) ? "On" : "Off");
+    } else if (item->type == LCD_MENU_ITEM_VALUE && item->value_get != NULL) {
+        snprintf(label, sizeof(label), "%s", item->label != NULL ? item->label : "");
+        value_get_text(menu, item, value, sizeof(value));
+        has_value = true;
     } else {
         snprintf(label, sizeof(label), "%s", item->label != NULL ? item->label : "");
     }
 
     size_t copy_len = strlen(label);
     uint8_t label_start = width > 2 ? 2 : width;
-    if (copy_len > width - label_start) {
-        copy_len = width - label_start;
+    /* Reserve room for the right-aligned value so label and value never overlap. */
+    uint8_t label_area = width > label_start ? (uint8_t)(width - label_start) : 0;
+    if (has_value) {
+        size_t value_len = strlen(value);
+        uint8_t value_area = (uint8_t)((value_len < label_area) ? value_len + 1 : label_area);
+        if (label_area > value_area) {
+            label_area = (uint8_t)(label_area - value_area);
+        } else {
+            label_area = 0;
+        }
+    }
+    if (copy_len > label_area) {
+        copy_len = label_area;
     }
     if (label_start < width) {
         memcpy(&line[label_start], label, copy_len);
+    }
+
+    if (has_value) {
+        size_t value_len = strlen(value);
+        if (value_len > width) {
+            value_len = width;
+        }
+        uint8_t value_start = (uint8_t)(width - value_len);
+        if (value_start < label_start + copy_len) {
+            value_start = (uint8_t)(label_start + copy_len);
+        }
+        if (value_start + value_len <= width) {
+            memcpy(&line[value_start], value, value_len);
+        }
     }
 
     if (menu->config.show_scroll_markers && width > 0) {
@@ -238,6 +282,46 @@ esp_err_t lcd_menu_init(lcd_menu_t *menu, const lcd_menu_config_t *config, const
     return ESP_OK;
 }
 
+static esp_err_t render_title_line(lcd_menu_t *menu, const char *title)
+{
+    uint8_t width = menu_width(menu);
+    const char *text = title != NULL ? title : "Menu";
+    size_t text_len = strlen(text);
+    if (text_len > width) {
+        text_len = width;
+    }
+
+    /* Position counter badge in the top-right corner, e.g. "2/4". */
+    char badge[8];
+    size_t badge_len = 0;
+    if (menu->config.show_position_counter) {
+        const lcd_menu_screen_t *screen = current_screen(menu);
+        if (screen != NULL && screen->item_count > 0) {
+            badge_len = (size_t)snprintf(badge, sizeof(badge), "%u/%u",
+                                         (unsigned)(current_selected(menu) + 1),
+                                         (unsigned)screen->item_count);
+        }
+    }
+
+    if (badge_len == 0 || badge_len >= width) {
+        return write_centered_line(menu, 0, text);
+    }
+
+    /* Reserve the badge (plus one space of separation) on the right; the title
+     * is centred within the remaining left area and truncated if needed. */
+    uint8_t title_area = (uint8_t)(width - badge_len - 1);
+    if (text_len > title_area) {
+        text_len = title_area;
+    }
+    uint8_t pad = (uint8_t)((title_area - text_len) / 2);
+
+    char line[LCD_MENU_MAX_WIDTH + 1];
+    make_blank_line(menu, line, sizeof(line));
+    memcpy(&line[pad], text, text_len);
+    memcpy(&line[width - badge_len], badge, badge_len);
+    return menu->config.write_line(menu->config.user_ctx, 0, line);
+}
+
 esp_err_t lcd_menu_render(lcd_menu_t *menu)
 {
     ESP_RETURN_ON_FALSE(menu != NULL, ESP_ERR_INVALID_ARG, TAG, "menu is NULL");
@@ -250,7 +334,7 @@ esp_err_t lcd_menu_render(lcd_menu_t *menu)
     ESP_RETURN_ON_FALSE(screen != NULL, ESP_ERR_INVALID_STATE, TAG, "screen is NULL");
 
     normalize_cursor(menu);
-    ESP_RETURN_ON_ERROR(write_centered_line(menu, 0, screen->title != NULL ? screen->title : "Menu"), TAG, "write title failed");
+    ESP_RETURN_ON_ERROR(render_title_line(menu, screen->title), TAG, "write title failed");
 
     uint8_t rows = visible_rows(menu);
     uint8_t top = current_top(menu);
@@ -350,20 +434,10 @@ esp_err_t lcd_menu_handle_key(lcd_menu_t *menu, lcd_menu_key_t key)
     case LCD_MENU_KEY_LEFT:
         ESP_RETURN_ON_ERROR(request_exit_or_back(menu), TAG, "back failed");
         break;
-    case LCD_MENU_KEY_RIGHT: {
-        /* RIGHT is drill-in only: enter a submenu if the selected item is one,
-         * otherwise do nothing. Toggling/activating is reserved for OK so the
-         * two keys never overlap. */
-        if (screen->item_count == 0) {
-            break;
-        }
-        normalize_cursor(menu);
-        const lcd_menu_item_t *item = &screen->items[current_selected(menu)];
-        if (item->type == LCD_MENU_ITEM_SUBMENU) {
-            ESP_RETURN_ON_ERROR(push_screen(menu, item->submenu), TAG, "push submenu failed");
-        }
+    case LCD_MENU_KEY_RIGHT:
+        /* Reserved for future use. Submenus are opened exclusively with OK so
+         * navigation has one consistent activation key. */
         break;
-    }
     case LCD_MENU_KEY_OK: {
         if (screen->item_count == 0) {
             break;
@@ -375,6 +449,7 @@ esp_err_t lcd_menu_handle_key(lcd_menu_t *menu, lcd_menu_key_t key)
             ESP_RETURN_ON_ERROR(push_screen(menu, item->submenu), TAG, "push submenu failed");
             break;
         case LCD_MENU_ITEM_ACTION:
+        case LCD_MENU_ITEM_VALUE:
             if (item->action != NULL) {
                 ESP_RETURN_ON_ERROR(item->action(menu, item, menu->config.user_ctx), TAG, "action failed");
             }

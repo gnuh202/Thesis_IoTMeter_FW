@@ -3,6 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-# "Trim" the build. Include the minimal set of components, main, and anything it depends on.
+# Trim unused IDF components. Anything main (or a dep) REQUIRES is still pulled in —
+# e.g. esp_psram for N16R8 OPI PSRAM, app_update for dual-OTA.
 idf_build_set_property(MINIMAL_BUILD ON)
 project(luanvan_firmware)

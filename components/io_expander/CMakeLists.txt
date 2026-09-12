@@ -1,3 +1,3 @@
 idf_component_register(SRCS "io_expander.c"
-                    REQUIRES esp_driver_gpio i2c_bus pcf8574 freertos gpio_isr_service
+                    REQUIRES esp_driver_gpio i2c_bus pcf8574 freertos gpio_isr_service esp_timer
                     INCLUDE_DIRS "include")

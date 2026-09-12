@@ -4,68 +4,149 @@ menu "Application Configuration"
 
     menu "Modbus"
 
-        config APP_MB_SLAVE_ADDR
-            hex "Modbus slave address"
-            range 0x01 0xF7
-            default 0xAB
+        menu "RTU Slave"
             help
-                RTU slave address of this energy meter.
+                This meter as an RS485 Modbus RTU slave (upstream SCADA/PLC).
 
-        config APP_MB_SLAVE_UART_PORT
-            int "Modbus slave UART port"
-            range 0 2
-            default 1
-            help
-                UART port used for the RS485 Modbus slave.
+            config APP_MB_SLAVE_ADDR
+                hex "Slave unit ID"
+                range 0x01 0xF7
+                default 0x0A
+                help
+                    RTU unit ID of this energy meter (common factory default 0x0A).
 
-        config APP_MB_SLAVE_RXD_GPIO
-            int "Modbus slave RXD GPIO"
-            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
-            default 13
-            help
-                RS485 RX GPIO for Modbus slave.
+            config APP_MB_SLAVE_UART_PORT
+                int "UART port"
+                range 0 2
+                default 1
+                help
+                    UART port used for the RS485 Modbus slave.
 
-        config APP_MB_SLAVE_TXD_GPIO
-            int "Modbus slave TXD GPIO"
-            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
-            default 14
-            help
-                RS485 TX GPIO for Modbus slave.
+            config APP_MB_SLAVE_RXD_GPIO
+                int "RXD GPIO"
+                range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+                default 13
+                help
+                    RS485 RX GPIO for Modbus slave.
 
-        config APP_MB_SLAVE_TASK_STACK_SIZE
-            int "Modbus slave task stack size"
-            range 3072 16384
-            default 4096
-            help
-                Stack size for Modbus slave event task.
+            config APP_MB_SLAVE_TXD_GPIO
+                int "TXD GPIO"
+                range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+                default 14
+                help
+                    RS485 TX GPIO for Modbus slave.
 
-        config APP_MB_SLAVE_TASK_PRIORITY
-            int "Modbus slave task priority"
-            range 1 20
-            default 7
-            help
-                Priority for Modbus slave event task.
+            config APP_MB_SLAVE_TASK_STACK_SIZE
+                int "Task stack size"
+                range 3072 16384
+                default 4096
+                help
+                    Stack size for Modbus slave event task.
 
-        config APP_MB_MASTER_UART_PORT
-            int "Modbus master UART port"
-            range 0 2
-            default 2
-            help
-                UART port reserved for future Modbus master.
+            config APP_MB_SLAVE_TASK_PRIORITY
+                int "Task priority"
+                range 1 20
+                default 7
+                help
+                    Priority for Modbus slave event task.
+        endmenu
 
-        config APP_MB_MASTER_RXD_GPIO
-            int "Modbus master RXD GPIO"
-            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
-            default 11
+        menu "RTU Master"
             help
-                RX GPIO reserved for future Modbus master.
+                Downstream RS485 master (poll PM710 / EM-07K). The master task is
+                always built; whether it actually polls the bus is controlled by
+                the bus-enable flag in NVS (LCD / Web Portal / console):
+                  - NVS mb_enabled = off  → task idle, no polling
+                  - NVS mb_enabled = on   → polls every configured slot
 
-        config APP_MB_MASTER_TXD_GPIO
-            int "Modbus master TXD GPIO"
-            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
-            default 12
+            config APP_MB_MASTER_UART_PORT
+                int "UART port"
+                range 0 2
+                default 2
+                help
+                    UART port for the Modbus RTU master RS485 bus.
+
+            config APP_MB_MASTER_RXD_GPIO
+                int "RXD GPIO"
+                range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+                default 11
+                help
+                    RS485 RX GPIO for Modbus master.
+
+            config APP_MB_MASTER_TXD_GPIO
+                int "TXD GPIO"
+                range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+                default 12
+                help
+                    RS485 TX GPIO for Modbus master.
+
+            config APP_MB_MASTER_POLL_PERIOD_MS_DEFAULT
+                int "Default poll period (ms)"
+                range 200 60000
+                default 2000
+                help
+                    Full poll-cycle period on first boot / factory default.
+                    Runtime configurable (NVS / LCD / Web Portal).
+
+            config APP_MB_MASTER_TASK_STACK_SIZE
+                int "Task stack size"
+                range 3072 16384
+                default 4096
+                help
+                    Stack size for the Modbus master poll task.
+
+            config APP_MB_MASTER_TASK_PRIORITY
+                int "Task priority"
+                range 1 20
+                default 6
+                help
+                    Priority for the Modbus master poll task.
+        endmenu
+
+        menu "TCP Server"
             help
-                TX GPIO reserved for future Modbus master.
+                Modbus TCP server (this meter on Ethernet/Wi-Fi). Service is
+                not implemented yet — options reserve defaults for later.
+
+            config APP_MB_TCP_ENABLE
+                bool "Enable Modbus TCP server (future)"
+                default n
+                help
+                    Placeholder. When the TCP server is implemented this builds
+                    and starts it. Keep off until the backend exists.
+
+            config APP_MB_TCP_UNIT_ID
+                hex "TCP unit ID"
+                range 0x01 0xF7
+                default 0x0A
+                depends on APP_MB_TCP_ENABLE
+                help
+                    Modbus unit identifier on TCP (often matches RTU slave ID).
+
+            config APP_MB_TCP_PORT
+                int "TCP listen port"
+                range 1 65535
+                default 502
+                depends on APP_MB_TCP_ENABLE
+                help
+                    Standard Modbus TCP port is 502.
+
+            config APP_MB_TCP_TASK_STACK_SIZE
+                int "Task stack size"
+                range 3072 16384
+                default 4096
+                depends on APP_MB_TCP_ENABLE
+                help
+                    Reserved stack size for the future TCP server task.
+
+            config APP_MB_TCP_TASK_PRIORITY
+                int "Task priority"
+                range 1 20
+                default 5
+                depends on APP_MB_TCP_ENABLE
+                help
+                    Reserved priority for the future TCP server task.
+        endmenu
 
     endmenu
 
@@ -81,14 +162,14 @@ menu "Application Configuration"
         config APP_I2C_SDA_IO
             int "I2C SDA GPIO"
             range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
-            default 8
+            default 1
             help
                 GPIO number for I2C SDA.
 
         config APP_I2C_SCL_IO
             int "I2C SCL GPIO"
             range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
-            default 9
+            default 2
             help
                 GPIO number for I2C SCL.
 
@@ -116,6 +197,53 @@ menu "Application Configuration"
             default 10
             help
                 ESP32 GPIO connected to PCF8574 INT pin.
+
+        config APP_PCF8574_W5500_RST_PIN
+            int "PCF8574 pin driving W5500 RESETn"
+            range 0 7
+            default 0
+            help
+                PCF8574 port bit wired to the W5500 RESETn net. Must match the
+                schematic: if RESETn is on another bit, the reset pulse is
+                issued on the wrong pin and W5500 probing fails intermittently.
+
+        config APP_PCF8574_IN0_PIN
+            int "PCF8574 pin for digital input 0"
+            range 0 7
+            default 5
+            help
+                PCF8574 port bit wired to digital input 0.
+
+        config APP_PCF8574_IN1_PIN
+            int "PCF8574 pin for digital input 1"
+            range 0 7
+            default 2
+            help
+                PCF8574 port bit wired to digital input 1.
+
+        config APP_PCF8574_OUT0_PIN
+            int "PCF8574 pin for digital output 0"
+            range 0 7
+            default 7
+            help
+                PCF8574 port bit wired to digital/relay output 0.
+
+        config APP_PCF8574_OUT1_PIN
+            int "PCF8574 pin for digital output 1"
+            range 0 7
+            default 6
+            help
+                PCF8574 port bit wired to digital/relay output 1.
+
+        config APP_IO_EXPANDER_DEBUG
+            bool "Verbose IO expander / W5500 reset diagnostics"
+            default n
+            help
+                Logs a hardware port readback and the measured RESETn rise time
+                around every W5500 reset pulse. Off by default now that the reset
+                path is confirmed; the pulse itself is identical either way. The
+                "ioexp" console command works regardless of this setting, so
+                enable this only when a boot-time trace is needed.
 
         config APP_IO_EXPANDER_TASK_STACK_SIZE
             int "IO expander task stack size"
@@ -184,9 +312,17 @@ menu "Application Configuration"
 
         config APP_HMI_LED_ACTIVE_HIGH
             bool "HMI LEDs are active-high"
+            default n
+            help
+                Select if PCF8575 output high turns an LED on. Leave disabled for
+                active-low LEDs (PCF8575 output low turns an LED on).
+
+        config APP_HMI_BUZZER_ACTIVE_HIGH
+            bool "HMI buzzer is active-high"
             default y
             help
-                Select if PCF8575 output high turns an LED on.
+                Select if PCF8575 output high drives the buzzer. Leave disabled for
+                an active-low buzzer (PCF8575 output low sounds the buzzer).
 
     endmenu
 
@@ -265,13 +401,78 @@ menu "Application Configuration"
                 (meter-cal set --field wiring ... / save), the NVS value overrides
                 this default on every subsequent boot.
 
-        config APP_ATM90E32AS_DEFAULT_LINE_FREQ_60HZ
-            bool "Default grid frequency: 60 Hz"
-            default n
-            help
-                Initial line frequency used only on first boot when no calibration
-                is saved in NVS. Disabled means 50 Hz. A saved calibration in NVS
-                overrides this default.
+        menu "ATM90E32AS Parameters"
+            comment "Build-time defaults for first boot / factory calib (NVS overrides when present)"
+
+            choice APP_ATM90E32AS_DEFAULT_PGA
+                prompt "Fallback current PGA (no CT config)"
+                default APP_ATM90E32AS_DEFAULT_PGA_1X
+                help
+                    Used only when CT-based PGA auto-select cannot run (e.g. missing
+                    CT params). Normal path: Current CT Apply recomputes PGA from
+                    NCT / I Rated / I Expected and R_BURDEN. A saved NVS calib still
+                    restores its stored PGA on boot until the next CT Apply.
+
+                config APP_ATM90E32AS_DEFAULT_PGA_1X
+                    bool "x1"
+                config APP_ATM90E32AS_DEFAULT_PGA_2X
+                    bool "x2"
+                config APP_ATM90E32AS_DEFAULT_PGA_4X
+                    bool "x4"
+            endchoice
+
+            choice APP_ATM90E32AS_DEFAULT_LINE_FREQ
+                prompt "Default grid frequency"
+                default APP_ATM90E32AS_DEFAULT_LINE_FREQ_50HZ
+                help
+                    Line frequency used when no calibration is saved in NVS.
+                    A saved calibration overrides this on later boots.
+
+                config APP_ATM90E32AS_DEFAULT_LINE_FREQ_50HZ
+                    bool "50 Hz"
+                config APP_ATM90E32AS_DEFAULT_LINE_FREQ_60HZ
+                    bool "60 Hz"
+            endchoice
+
+            comment "Current transformer (CT) — factory U/I gain is IC default 0x8000"
+
+            config APP_ATM90E32AS_R_BURDEN_MOHM
+                int "CT burden resistance (mohm)"
+                range 100 50000
+                default 4400
+                help
+                    Fixed board burden resistor in milliohms (4400 = 4.4 ohm).
+                    Build-time only — not stored in NVS. Used with VADC limit
+                    720 mVrms for PGA auto-select: Ilim = 0.72 * NCT / (R * PGA).
+
+            config APP_ATM90E32AS_CT_RATIO
+                int "Default CT ratio NCT (primary:1)"
+                range 1000 6000
+                default 2000
+                help
+                    Default CT turns ratio NCT (primary amps : 1 A secondary).
+                    Allowed range 1000..6000 in steps of 100 (LCD edit).
+                    Example 2000:1. Persisted in config_manager; operator can
+                    change via LCD Current CT.
+
+            config APP_ATM90E32AS_I_RATED_A
+                int "Default CT rated primary current (A)"
+                range 1 10000
+                default 100
+                help
+                    CT nameplate primary current (A). Used when selecting PGA so
+                    rated current stays inside the ADC window.
+
+            config APP_ATM90E32AS_I_EXPECTED_A
+                int "Default expected max primary current (A)"
+                range 1 10000
+                default 75
+                help
+                    Operator expected maximum primary current (A). After CT Apply
+                    this becomes the true measurement range (0..I_Expected), and
+                    may be clamped down to Ilim of the selected PGA.
+
+        endmenu
 
         config APP_ATM90E32AS_SPI_CLOCK_HZ
             int "ATM90E32AS SPI clock Hz"
@@ -279,20 +480,6 @@ menu "Application Configuration"
             default 200000
             help
                 ATM90E32AS SPI clock. Use low speed during bring-up.
-
-        config APP_SD_CS_GPIO
-            int "SD card CS GPIO"
-            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
-            default 8
-            help
-                SD card chip select GPIO on shared SPI bus.
-
-        config APP_SD_DET_GPIO
-            int "SD card detect GPIO"
-            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
-            default 15
-            help
-                SD card detect input GPIO with pull-up.
 
         config APP_ENERGY_METER_TASK_STACK_SIZE
             int "Energy meter task stack size"
@@ -323,19 +510,48 @@ menu "Application Configuration"
 
     endmenu
 
-    menu "Console Calibration"
+    menu "SD Card"
+        comment "SD shares the ATM90 SPI bus (host/MISO/SCLK/MOSI under ATM90E32AS Energy Meter)"
 
-        config APP_CONSOLE_ENABLE
-            bool "Enable calibration console"
+        config APP_SD_CS_GPIO
+            int "SD card CS GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_OUT_RANGE_MAX
+            default 8
+            help
+                SD card chip select GPIO on shared SPI bus.
+
+        config APP_SD_DET_GPIO
+            int "SD card detect GPIO"
+            range ENV_GPIO_RANGE_MIN ENV_GPIO_IN_RANGE_MAX
+            default 15
+            help
+                SD card detect input GPIO with pull-up.
+
+        config APP_SD_ENABLE_LFN
+            bool "Enable long filename support for SD card"
             default y
             help
-                Start esp_console REPL for ATM90E32AS calibration commands.
+                Enable FatFS long filename (LFN) support for SD card operations.
+                When enabled, allows filenames longer than 8.3 format (e.g.,
+                "calib_001.dat" instead of just "cal_001.bin"). Uses ~512 bytes
+                of heap per concurrent file operation. Disable only if RAM is
+                critically constrained and all filenames follow strict 8.3 format.
+
+    endmenu
+
+    menu "Console / Debug"
+
+        config APP_CONSOLE_ENABLE
+            bool "Enable developer console"
+            default y
+            help
+                Start esp_console REPL for calibration, config, and debug commands.
 
         config APP_CONSOLE_PROMPT
             string "Console prompt"
-            default "meter>"
+            default "dev@meter:~$ "
             help
-                Prompt string for the calibration console.
+                Prompt string for the developer console (e.g. "dev@meter:~$ ").
 
         config APP_CONSOLE_MAX_CMDLINE_LENGTH
             int "Console max command line length"
@@ -348,7 +564,7 @@ menu "Application Configuration"
             bool "Require login for the console"
             default y
             help
-                Gate the calibration console behind a username/password prompt.
+                Gate the developer console behind a username/password prompt.
                 This is a developer tool, so login is enabled by default to keep
                 end users out. Authentication is cleartext over the serial link;
                 it deters casual access, it is not a cryptographic safeguard.
@@ -358,14 +574,14 @@ menu "Application Configuration"
             depends on APP_CONSOLE_AUTH_ENABLE
             default "admin"
             help
-                Username required to unlock the calibration console.
+                Username required to unlock the developer console.
 
         config APP_CONSOLE_AUTH_PASSWORD
             string "Console login password"
             depends on APP_CONSOLE_AUTH_ENABLE
-            default "meter-admin"
+            default "admin"
             help
-                Password required to unlock the calibration console. Change this
+                Password required to unlock the developer console. Change this
                 before shipping devices.
 
         config APP_CONSOLE_AUTH_MAX_ATTEMPTS
@@ -376,6 +592,33 @@ menu "Application Configuration"
             help
                 Number of failed login attempts allowed before the console
                 blocks further attempts until reboot.
+
+        menu "Temporary debug aids"
+            comment "Leave off for release builds"
+
+            config APP_STATUS_DEBUG
+                bool "System status debug (temporary)"
+                default n
+                help
+                    Temporary debug aid for testing the System Status Manager. When on,
+                    system_status_set() logs a line on every real state transition
+                    (OLD -> NEW) and system_status_dump() prints the full table. Leave
+                    off for release builds: no logs, no dump, no effect.
+
+            config APP_DP_DEBUG
+                bool "Data Point Layer debug console command (temporary)"
+                default n
+                help
+                    Temporary test harness for the Data Point Layer. When on, the
+                    developer console gains a "dp" command that calls
+                    data_point_read()/data_point_write() directly so the CFG_* mapping
+                    can be exercised before any protocol is wired to it.
+
+                    This is measurement scaffolding, not a product feature. It can print
+                    configured passwords (CFG_WIFI_PASS / CFG_MQTT_PASS) in cleartext on
+                    the serial console. Leave off for release builds.
+
+        endmenu
 
     endmenu
 
@@ -512,19 +755,63 @@ menu "Application Configuration"
             help
                 GPIO number for W5500 interrupt.
 
-        config APP_W5500_RESET_PCF8574_PIN
-            int "W5500 reset PCF8574 pin"
-            range 0 7
-            default 0
+        config APP_W5500_RESET_ACTIVE_LOW
+            bool "W5500 RESETn is active low"
+            default y
             help
-                PCF8574 pin used to reset W5500.
+                Level driven on the PCF8574 reset bit to assert reset. Enabled
+                means reset is asserted by driving the bit low, which matches a
+                W5500 wired directly to the expander. Disable only if an
+                inverting buffer sits between the expander and the W5500.
+
+        config APP_W5500_RESET_ASSERT_MS
+            int "W5500 reset assert duration in milliseconds"
+            range 1 1000
+            default 10
+            help
+                How long RESETn is held asserted. The W5500's documented minimum
+                RSTn pulse width is well under 1ms, so 10ms is an order of
+                magnitude of margin and saves 90ms of boot time versus the old
+                100ms. Do not shorten below 2ms: the expander's weak pull-up
+                needs about 2ms just to move the line on this board, so a
+                shorter assert risks a pulse the W5500 never sees.
+
+        config APP_W5500_RESET_SETTLE_MS
+            int "W5500 post-reset settle time in milliseconds"
+            range 1 2000
+            default 60
+            help
+                Delay after releasing RESETn before the first SPI access. Must
+                cover the roughly 2ms the PCF8574's weak pull-up takes to raise
+                RESETn on this board, plus the W5500's internal startup and PLL
+                lock. 60ms is generous for both while cutting 190ms off boot
+                versus the old 250ms. The real safety net for a slow-starting
+                chip is APP_W5500_SW_RESET_TIMEOUT_MS below, not this delay.
 
         config APP_W5500_SPI_CLOCK_MHZ
             int "W5500 SPI clock MHz"
             range 1 40
             default 20
             help
-                SPI clock for W5500 in MHz.
+                SPI clock for W5500 in MHz. 20 is far above what 100Mbps needs and
+                leaves plenty of timing margin for headers and longer traces. On
+                ESP32-S3 the GPIO matrix behaves the same as IOMUX at these
+                frequencies, so running the W5500 on SPI3 is not a penalty. 40 also
+                divides exactly from the 80MHz APB clock if you want to try it, but
+                it was measured to make no difference to boot reliability here.
+
+        config APP_W5500_SW_RESET_TIMEOUT_MS
+            int "W5500 software reset / version poll timeout in milliseconds"
+            range 100 3000
+            default 1000
+            help
+                Window the esp_eth W5500 MAC uses to poll both the MR reset bit
+                and VERSIONR. ESP-IDF's own driver notes that some W5500 units
+                return version 0x00 when read right after reset, and the default
+                of 100ms allows only 10 attempts before giving up with
+                ESP_ERR_INVALID_VERSION. 1000ms gives 100 attempts. This costs
+                nothing on a healthy boot because the loop exits on the first
+                successful read.
 
         config APP_NETWORK_COMM_TASK_STACK_SIZE
             int "Network communication task stack size"
@@ -563,6 +850,18 @@ menu "Application Configuration"
                 How long to wait for an Ethernet IP after link-up before
                 treating it as a failure.
 
+        config APP_NET_ETH_DHCP_WARN_S
+            int "Ethernet no-IP warning after link up (s)"
+            range 3 120
+            default 15
+            help
+                After the Ethernet link comes up, if no IP has been obtained
+                within this many seconds, ethernet_driver logs the DHCP client
+                state. This tells apart "DISCOVER was sent and nothing replied"
+                (network/router side) from "the DHCP client never started"
+                (firmware side). 15s covers lwIP's first few DISCOVER retries,
+                which back off at roughly 2s, 4s, 8s.
+
         config APP_NET_ETH_DOWN_DEBOUNCE_MS
             int "Ethernet link-down debounce ms"
             range 0 30000
@@ -587,6 +886,15 @@ menu "Application Configuration"
                 After auto-AP recovery has started, how long to keep the SoftAP up
                 once a data path (Ethernet or STA) returns, before stopping the AP
                 and switching back. Gives a user time to finish configuring over AP.
+
+        config APP_NET_AP_IDLE_TIMEOUT_MS
+            int "Config portal AP idle auto-stop ms"
+            range 5000 600000
+            default 60000
+            help
+                After the user-launched config portal SoftAP has been up without any
+                station associated, stop it automatically and reconnect the STA.
+                No effect on the legacy auto-AP recovery path.
 
     endmenu
 
@@ -624,6 +932,27 @@ menu "Application Configuration"
             default 5
             help
                 FreeRTOS priority of the MQTT manager task.
+
+    endmenu
+
+    menu "Web Portal"
+
+        config APP_WEB_CALIB_ENABLE
+            bool "Expose meter calibration in the config portal"
+            default n
+            help
+                Adds the Calibration section and the /api/calib/profile and
+                /api/calib/auto endpoints to the config portal.
+
+                Leave OFF for production builds. Calibration writes gain and
+                offset registers on the metering chip, so it is a developer
+                function: with this disabled the endpoints are not compiled in
+                and cannot be reached by anyone who opens the portal, which is a
+                stronger guarantee than hiding a link. Console calibration
+                (meter-cal ...) is unaffected and always available.
+
+                Turn ON only for an engineering build, or when the calibration
+                UI is moved behind the engineering-mode portal.
 
     endmenu
 

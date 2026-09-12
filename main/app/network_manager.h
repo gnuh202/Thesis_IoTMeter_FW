@@ -72,8 +72,9 @@ esp_err_t network_manager_start(void);
 esp_err_t network_manager_get_status(network_status_t *out);
 
 /*
- * Request the config portal SoftAP (on-demand). Coexists with an active
- * ETH/STA data-path; does not tear the data-path down.
+ * Request the config portal SoftAP (on-demand). Drops the STA so AP/STA never
+ * coexist; the STA returns when the portal closes (auto-stop idle timer or
+ * explicit stop). Ethernet is unaffected.
  */
 esp_err_t network_manager_start_config_portal(void);
 esp_err_t network_manager_stop_config_portal(void);

@@ -1,5 +1,7 @@
 #include "atm90e32as.h"
 
+#include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include "driver/spi_master.h"
@@ -12,6 +14,13 @@
 #define ATM90E32AS_SPI_READ_BIT 0x8000
 #define ATM90E32AS_SPI_TIMEOUT_MS 100
 #define ATM90E32AS_POWER_LSB 0.00032f
+#define ATM90E32AS_CFG_UNLOCK 0x55AAU
+#define ATM90E32AS_MMODE0_3P4W_50HZ 0x0087U
+#define ATM90E32AS_MMODE0_3P3W_50HZ 0x0185U
+#define ATM90E32AS_MMODE0_FREQ_60HZ (1U << 12)
+#define ATM90E32AS_MMODE1_PGA_IA_SHIFT 0U
+#define ATM90E32AS_MMODE1_PGA_IB_SHIFT 2U
+#define ATM90E32AS_MMODE1_PGA_IC_SHIFT 4U
 
 #define REG_METER_EN 0x00
 #define REG_SAG_PEAK_DET_CFG 0x05
@@ -153,6 +162,54 @@ static esp_err_t atm90e32as_transfer16(atm90e32as_handle_t handle, uint16_t addr
     return ESP_OK;
 }
 
+esp_err_t atm90e32as_validate_calibration(const atm90e32as_calib_t *calib)
+{
+    ESP_RETURN_ON_FALSE(calib != NULL, ESP_ERR_INVALID_ARG, TAG, "calibration is NULL");
+    ESP_RETURN_ON_FALSE(calib->line_freq == ATM90E32AS_LINE_FREQ_50HZ ||
+                        calib->line_freq == ATM90E32AS_LINE_FREQ_60HZ,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid line frequency");
+    ESP_RETURN_ON_FALSE(calib->wiring_mode == ATM90E32AS_WIRING_3P4W ||
+                        calib->wiring_mode == ATM90E32AS_WIRING_3P3W,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid wiring mode");
+    ESP_RETURN_ON_FALSE(calib->pga_gain >= ATM90E32AS_PGA_GAIN_1X &&
+                        calib->pga_gain <= ATM90E32AS_PGA_GAIN_4X,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid PGA gain");
+    for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+        ESP_RETURN_ON_FALSE(calib->phase[i].voltage_gain != 0 &&
+                            calib->phase[i].current_gain != 0,
+                            ESP_ERR_INVALID_ARG, TAG, "phase %d has zero gain", i);
+    }
+    return ESP_OK;
+}
+
+esp_err_t atm90e32as_calculate_gain(uint16_t old_gain, float reference, float measured,
+                                    uint16_t *new_gain)
+{
+    ESP_RETURN_ON_FALSE(new_gain != NULL, ESP_ERR_INVALID_ARG, TAG, "new_gain is NULL");
+    ESP_RETURN_ON_FALSE(old_gain != 0 && isfinite(reference) && reference > 0.0f &&
+                        isfinite(measured) && measured > 0.0f,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid gain calculation input");
+
+    /* new_gain = round(old_gain * reference / measured), evaluated in integers.
+     * Both operands are scaled to micro-units so the scale cancels in the ratio;
+     * ESP32-S3 has no double FPU, so this keeps the calibration deterministic and
+     * off the software double-precision path. num <= 65535 * ~5e8 < 2^63. */
+    int64_t ref_u = llround((double)reference * 1000000.0);
+    int64_t meas_u = llround((double)measured * 1000000.0);
+    ESP_RETURN_ON_FALSE(ref_u > 0 && meas_u > 0, ESP_ERR_INVALID_ARG, TAG,
+                        "gain calculation input too small to scale");
+
+    int64_t numerator = (int64_t)old_gain * ref_u;
+    int64_t quotient = numerator / meas_u;
+    int64_t remainder = numerator % meas_u;
+    if (2 * remainder >= meas_u) quotient++;   /* numerator >= 0: round half-up */
+
+    ESP_RETURN_ON_FALSE(quotient >= 1 && quotient <= UINT16_MAX,
+                        ESP_ERR_INVALID_SIZE, TAG, "calculated gain is out of range");
+    *new_gain = (uint16_t)quotient;
+    return ESP_OK;
+}
+
 void atm90e32as_get_default_calib(atm90e32as_calib_t *calib)
 {
     if (calib == NULL) {
@@ -164,11 +221,13 @@ void atm90e32as_get_default_calib(atm90e32as_calib_t *calib)
     calib->wiring_mode = ATM90E32AS_WIRING_3P4W;
     calib->pga_gain = ATM90E32AS_PGA_GAIN_1X;
 
+    /* UGAIN/IGAIN power-on defaults are 0x8000. PQGain and fundamental
+     * energy gain are signed correction registers; zero means no correction. */
     for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
-        calib->phase[i].voltage_gain = 7305;
-        calib->phase[i].current_gain = 27961;
-        calib->phase[i].reference_voltage = 220.0f;
-        calib->phase[i].reference_current = 5.0f;
+        calib->phase[i].voltage_gain = 0x8000U;
+        calib->phase[i].current_gain = 0x8000U;
+        calib->phase[i].pq_gain = 0;
+        calib->phase[i].fundamental_power_gain = 0;
     }
 }
 
@@ -233,20 +292,55 @@ static esp_err_t atm90e32as_read_s32(atm90e32as_handle_t handle, uint16_t reg_hi
 
 static uint16_t atm90e32as_build_mmode0(const atm90e32as_calib_t *calib)
 {
-    uint16_t mmode0 = 0x0087;
+    uint16_t mmode0 = calib->wiring_mode == ATM90E32AS_WIRING_3P3W
+                          ? ATM90E32AS_MMODE0_3P3W_50HZ
+                          : ATM90E32AS_MMODE0_3P4W_50HZ;
     if (calib->line_freq == ATM90E32AS_LINE_FREQ_60HZ) {
-        mmode0 |= (1U << 12);
-    }
-    if (calib->wiring_mode == ATM90E32AS_WIRING_3P3W) {
-        mmode0 |= (1U << 8);
-        mmode0 &= (uint16_t)~(1U << 1);
+        mmode0 |= ATM90E32AS_MMODE0_FREQ_60HZ;
     }
     return mmode0;
 }
 
-static esp_err_t atm90e32as_write_calibration_registers(atm90e32as_handle_t handle)
+static uint16_t atm90e32as_build_mmode1(atm90e32as_pga_gain_t gain)
 {
-    const atm90e32as_calib_t *c = &handle->config.calib;
+    uint16_t field = (uint16_t)gain;
+    return (uint16_t)((field << ATM90E32AS_MMODE1_PGA_IA_SHIFT) |
+                      (field << ATM90E32AS_MMODE1_PGA_IB_SHIFT) |
+                      (field << ATM90E32AS_MMODE1_PGA_IC_SHIFT));
+}
+
+static void atm90e32as_frequency_thresholds(atm90e32as_line_freq_t frequency,
+                                            uint16_t *low, uint16_t *high)
+{
+    if (frequency == ATM90E32AS_LINE_FREQ_60HZ) {
+        *low = 5700;
+        *high = 6300;
+    } else {
+        *low = 4700;
+        *high = 5300;
+    }
+}
+
+static uint16_t atm90e32as_encode_phi(int16_t phase_comp)
+{
+    int32_t magnitude = phase_comp < 0 ? -(int32_t)phase_comp : phase_comp;
+    if (magnitude > 0xFF) {
+        return 0xFFFFU;
+    }
+    return (uint16_t)magnitude | (phase_comp < 0 ? 0x8000U : 0U);
+}
+
+static esp_err_t atm90e32as_validate_phase_comp(int16_t phase_comp)
+{
+    int32_t magnitude = phase_comp < 0 ? -(int32_t)phase_comp : phase_comp;
+    ESP_RETURN_ON_FALSE(magnitude <= 0xFF, ESP_ERR_INVALID_ARG, TAG,
+                        "phase compensation exceeds 8-bit delay range");
+    return ESP_OK;
+}
+
+static esp_err_t atm90e32as_write_calibration_registers(atm90e32as_handle_t handle,
+                                                         const atm90e32as_calib_t *c)
+{
     const uint16_t ugain[3] = {REG_U_GAIN_A, REG_U_GAIN_B, REG_U_GAIN_C};
     const uint16_t igain[3] = {REG_I_GAIN_A, REG_I_GAIN_B, REG_I_GAIN_C};
     const uint16_t uoffs[3] = {REG_U_OFFSET_A, REG_U_OFFSET_B, REG_U_OFFSET_C};
@@ -264,19 +358,48 @@ static esp_err_t atm90e32as_write_calibration_registers(atm90e32as_handle_t hand
         ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, ioffs[i], (uint16_t)c->phase[i].current_offset), TAG, "write Ioffset failed");
         ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, poffs[i], (uint16_t)c->phase[i].active_power_offset), TAG, "write Poffset failed");
         ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, qoffs[i], (uint16_t)c->phase[i].reactive_power_offset), TAG, "write Qoffset failed");
-        ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, pqgain[i], c->phase[i].pq_gain), TAG, "write PQ gain failed");
-        ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, phi[i], (uint16_t)c->phase[i].phase_comp), TAG, "write phase comp failed");
+        ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, pqgain[i], (uint16_t)c->phase[i].pq_gain), TAG, "write PQ gain failed");
+        ESP_RETURN_ON_ERROR(atm90e32as_validate_phase_comp(c->phase[i].phase_comp), TAG, "invalid phase compensation");
+        ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, phi[i], atm90e32as_encode_phi(c->phase[i].phase_comp)), TAG, "write phase comp failed");
         ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, pgainf[i], c->phase[i].fundamental_power_gain), TAG, "write fundamental gain failed");
     }
 
     return ESP_OK;
 }
 
+static esp_err_t atm90e32as_verify_calibration_registers(atm90e32as_handle_t handle,
+                                                           const atm90e32as_calib_t *c)
+{
+    const uint16_t regs[3][9] = {
+        {REG_U_GAIN_A, REG_I_GAIN_A, REG_U_OFFSET_A, REG_I_OFFSET_A, REG_P_OFFSET_A, REG_Q_OFFSET_A, REG_PQ_GAIN_A, REG_PHI_A, REG_P_GAIN_AF},
+        {REG_U_GAIN_B, REG_I_GAIN_B, REG_U_OFFSET_B, REG_I_OFFSET_B, REG_P_OFFSET_B, REG_Q_OFFSET_B, REG_PQ_GAIN_B, REG_PHI_B, REG_P_GAIN_BF},
+        {REG_U_GAIN_C, REG_I_GAIN_C, REG_U_OFFSET_C, REG_I_OFFSET_C, REG_P_OFFSET_C, REG_Q_OFFSET_C, REG_PQ_GAIN_C, REG_PHI_C, REG_P_GAIN_CF},
+    };
+    for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+        const uint16_t expected[9] = {
+            c->phase[i].voltage_gain, c->phase[i].current_gain,
+            (uint16_t)c->phase[i].voltage_offset, (uint16_t)c->phase[i].current_offset,
+            (uint16_t)c->phase[i].active_power_offset, (uint16_t)c->phase[i].reactive_power_offset,
+            (uint16_t)c->phase[i].pq_gain, atm90e32as_encode_phi(c->phase[i].phase_comp),
+            (uint16_t)c->phase[i].fundamental_power_gain,
+        };
+        for (int j = 0; j < 9; j++) {
+            uint16_t actual = 0;
+            ESP_RETURN_ON_ERROR(atm90e32as_read_register(handle, regs[i][j], &actual), TAG,
+                                "readback calibration register failed");
+            if (actual != expected[j]) {
+                ESP_LOGE(TAG, "calibration readback mismatch phase=%d reg=0x%02X expected=0x%04X actual=0x%04X",
+                         i, regs[i][j], expected[j], actual);
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+        }
+    }
+    return ESP_OK;
+}
 esp_err_t atm90e32as_get_calibration(atm90e32as_handle_t handle, atm90e32as_calib_t *calib)
 {
     ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
     ESP_RETURN_ON_FALSE(calib != NULL, ESP_ERR_INVALID_ARG, TAG, "calib is NULL");
-
     *calib = handle->config.calib;
     return ESP_OK;
 }
@@ -284,15 +407,38 @@ esp_err_t atm90e32as_get_calibration(atm90e32as_handle_t handle, atm90e32as_cali
 esp_err_t atm90e32as_apply_calibration(atm90e32as_handle_t handle, const atm90e32as_calib_t *calib)
 {
     ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
-    ESP_RETURN_ON_FALSE(calib != NULL, ESP_ERR_INVALID_ARG, TAG, "calib is NULL");
+    ESP_RETURN_ON_ERROR(atm90e32as_validate_calibration(calib), TAG, "invalid calibration");
 
-    handle->config.calib = *calib;
-    ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_CFG_REG_ACC_EN, 0x55AA), TAG, "enable config failed");
-    ESP_RETURN_ON_ERROR(atm90e32as_write_calibration_registers(handle), TAG, "write calibration registers failed");
-    ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_MMODE0, atm90e32as_build_mmode0(calib)), TAG, "write mmode0 failed");
-    ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_MMODE1, calib->pga_gain), TAG, "write mmode1 failed");
-    ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_CFG_REG_ACC_EN, 0x0000), TAG, "disable config failed");
-    return ESP_OK;
+    esp_err_t ret = atm90e32as_write_register(handle, REG_CFG_REG_ACC_EN, ATM90E32AS_CFG_UNLOCK);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    uint16_t freq_low = 0;
+    uint16_t freq_high = 0;
+    atm90e32as_frequency_thresholds(calib->line_freq, &freq_low, &freq_high);
+
+    ret = atm90e32as_write_calibration_registers(handle, calib);
+    if (ret == ESP_OK) ret = atm90e32as_write_register(handle, REG_MMODE0, atm90e32as_build_mmode0(calib));
+    if (ret == ESP_OK) ret = atm90e32as_write_register(handle, REG_MMODE1, atm90e32as_build_mmode1(calib->pga_gain));
+    if (ret == ESP_OK) ret = atm90e32as_write_register(handle, REG_FREQ_LO_TH, freq_low);
+    if (ret == ESP_OK) ret = atm90e32as_write_register(handle, REG_FREQ_HI_TH, freq_high);
+
+    /* Re-enable meter to force DSP to reload calibration parameters.
+     * Without this, PQGain/PGainF changes are written to registers but the
+     * DSP pipeline continues using stale values until next soft reset. */
+    if (ret == ESP_OK) ret = atm90e32as_write_register(handle, REG_METER_EN, 0x0001);
+
+    if (ret == ESP_OK) {
+        ret = atm90e32as_verify_calibration_registers(handle, calib);
+    }
+
+    esp_err_t lock_ret = atm90e32as_write_register(handle, REG_CFG_REG_ACC_EN, 0x0000);
+    if (ret == ESP_OK) ret = lock_ret;
+    if (ret == ESP_OK) {
+        handle->config.calib = *calib;
+    }
+    return ret;
 }
 
 esp_err_t atm90e32as_set_calibration(atm90e32as_handle_t handle, const atm90e32as_calib_t *calib, bool apply)
@@ -313,8 +459,10 @@ esp_err_t atm90e32as_init(atm90e32as_handle_t handle)
     ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
 
     const atm90e32as_calib_t *calib = &handle->config.calib;
-    uint16_t freq_hi = calib->line_freq == ATM90E32AS_LINE_FREQ_60HZ ? 6300 : 5300;
-    uint16_t freq_lo = calib->line_freq == ATM90E32AS_LINE_FREQ_60HZ ? 5700 : 4700;
+    ESP_RETURN_ON_ERROR(atm90e32as_validate_calibration(calib), TAG, "invalid calibration");
+    uint16_t freq_hi = 0;
+    uint16_t freq_lo = 0;
+    atm90e32as_frequency_thresholds(calib->line_freq, &freq_lo, &freq_hi);
 
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_SOFT_RESET, 0x789A), TAG, "soft reset failed");
     vTaskDelay(pdMS_TO_TICKS(6));
@@ -334,7 +482,7 @@ esp_err_t atm90e32as_init(atm90e32as_handle_t handle)
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_PL_CONST_H, 0x0861), TAG, "write PL high failed");
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_PL_CONST_L, 0xC468), TAG, "write PL low failed");
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_MMODE0, atm90e32as_build_mmode0(calib)), TAG, "write mmode0 failed");
-    ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_MMODE1, calib->pga_gain), TAG, "write mmode1 failed");
+    ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_MMODE1, atm90e32as_build_mmode1(calib->pga_gain)), TAG, "write mmode1 failed");
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_P_START_TH, 0x1D4C), TAG, "write P start failed");
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_Q_START_TH, 0x1D4C), TAG, "write Q start failed");
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_S_START_TH, 0x1D4C), TAG, "write S start failed");
@@ -345,7 +493,7 @@ esp_err_t atm90e32as_init(atm90e32as_handle_t handle)
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_P_OFFSET_BF, 0x0000), TAG, "write P offset BF failed");
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_P_OFFSET_CF, 0x0000), TAG, "write P offset CF failed");
 
-    ESP_RETURN_ON_ERROR(atm90e32as_write_calibration_registers(handle), TAG, "apply calibration failed");
+    ESP_RETURN_ON_ERROR(atm90e32as_write_calibration_registers(handle, calib), TAG, "apply calibration failed");
     ESP_RETURN_ON_ERROR(atm90e32as_write_register(handle, REG_CFG_REG_ACC_EN, 0x0000), TAG, "disable config failed");
 
     return ESP_OK;
@@ -366,6 +514,21 @@ esp_err_t atm90e32as_read_measurements(atm90e32as_handle_t handle, atm90e32as_me
     ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
     ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
     memset(out, 0, sizeof(*out));
+
+    out->wiring_mode = handle->config.calib.wiring_mode;
+    if (out->wiring_mode == ATM90E32AS_WIRING_3P3W) {
+        out->voltage_valid[0] = true;
+        out->voltage_valid[1] = false;
+        out->voltage_valid[2] = true;
+        out->voltage_semantic[0] = ATM90E32AS_VOLTAGE_UAB;
+        out->voltage_semantic[1] = ATM90E32AS_VOLTAGE_UBN;
+        out->voltage_semantic[2] = ATM90E32AS_VOLTAGE_UCB;
+    } else {
+        for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) out->voltage_valid[i] = true;
+        out->voltage_semantic[0] = ATM90E32AS_VOLTAGE_UAN;
+        out->voltage_semantic[1] = ATM90E32AS_VOLTAGE_UBN;
+        out->voltage_semantic[2] = ATM90E32AS_VOLTAGE_UCN;
+    }
 
     const uint16_t urms[3] = {REG_URMS_A, REG_URMS_B, REG_URMS_C};
     const uint16_t irms[3] = {REG_IRMS_A, REG_IRMS_B, REG_IRMS_C};
@@ -434,9 +597,21 @@ esp_err_t atm90e32as_read_measurements(atm90e32as_handle_t handle, atm90e32as_me
     return ESP_OK;
 }
 
-esp_err_t atm90e32as_read_energy_counts(atm90e32as_handle_t handle, atm90e32as_energy_counts_t *out)
+esp_err_t atm90e32as_read_power_raw(atm90e32as_handle_t handle, atm90e32as_phase_t phase,
+                                    bool reactive, int32_t *value)
 {
-    ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
+    ESP_RETURN_ON_FALSE(handle != NULL && value != NULL && phase < ATM90E32AS_PHASE_COUNT,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid power raw request");
+    const uint16_t p_hi[3] = {REG_PMEAN_A, REG_PMEAN_B, REG_PMEAN_C};
+    const uint16_t p_lo[3] = {REG_PMEAN_A_LSB, REG_PMEAN_B_LSB, REG_PMEAN_C_LSB};
+    const uint16_t q_hi[3] = {REG_QMEAN_A, REG_QMEAN_B, REG_QMEAN_C};
+    const uint16_t q_lo[3] = {REG_QMEAN_A_LSB, REG_QMEAN_B_LSB, REG_QMEAN_C_LSB};
+    return atm90e32as_read_s32(handle, reactive ? q_hi[phase] : p_hi[phase],
+                               reactive ? q_lo[phase] : p_lo[phase], value);
+}
+esp_err_t atm90e32as_read_energy_counts(atm90e32as_handle_t handle,
+                                          atm90e32as_energy_counts_t *out)
+{
     ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
 
     /* These total-energy registers are read-to-clear; each read returns the

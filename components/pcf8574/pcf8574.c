@@ -127,6 +127,18 @@ esp_err_t pcf8574_get_latch(pcf8574_handle_t handle, uint8_t *value)
     return ESP_OK;
 }
 
+esp_err_t pcf8574_get_input_mask(pcf8574_handle_t handle, uint8_t *mask)
+{
+    ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
+    ESP_RETURN_ON_FALSE(mask != NULL, ESP_ERR_INVALID_ARG, TAG, "mask is NULL");
+
+    xSemaphoreTake(handle->mutex, portMAX_DELAY);
+    *mask = handle->input_mask;
+    xSemaphoreGive(handle->mutex);
+
+    return ESP_OK;
+}
+
 esp_err_t pcf8574_write_port(pcf8574_handle_t handle, uint8_t value)
 {
     ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
@@ -174,6 +186,16 @@ esp_err_t pcf8574_write_pin(pcf8574_handle_t handle, uint8_t pin, bool level)
     xSemaphoreGive(handle->mutex);
 
     return ret;
+}
+
+esp_err_t pcf8574_write_pin_verify(pcf8574_handle_t handle, uint8_t pin, bool level, uint8_t *port_after)
+{
+    ESP_RETURN_ON_ERROR(pcf8574_write_pin(handle, pin, level), TAG, "write pin failed");
+
+    if (port_after == NULL) {
+        return ESP_OK;
+    }
+    return pcf8574_read_port(handle, port_after);
 }
 
 esp_err_t pcf8574_read_pin(pcf8574_handle_t handle, uint8_t pin, bool *level)

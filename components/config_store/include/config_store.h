@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -11,10 +12,11 @@ extern "C" {
 /*
  * Persistent configuration store for the network stack.
  *
- * Three independent NVS blobs (network / MQTT / system), each guarded by a
- * magic + version header. On a missing or mismatched blob, the getter fills
- * the struct with compile-time defaults instead of failing, so the caller can
- * always proceed. This mirrors the ATM90E32AS calibration store pattern.
+ * Legacy domain blobs (network / MQTT / system / external meter) are guarded by
+ * a magic + version header. Feature 15 additionally stores one opaque full
+ * configuration snapshot whose schema is owned by Configuration Manager. On a
+ * missing or mismatched legacy blob, its getter fills the struct with compile-
+ * time defaults instead of failing, so migration can always proceed.
  *
  * Strings are fixed-size, always NUL-terminated. Sizes are generous enough for
  * real SSIDs, broker URIs, and passwords without dynamic allocation.
@@ -78,6 +80,21 @@ typedef struct {
     char hostname[CONFIG_STORE_NAME_LEN];
 } config_system_t;
 
+/*
+ * Downstream Modbus RTU master configuration: which commercial meter to poll
+ * (PM710 / EM-07K) and the RTU comm parameters. The register maps themselves
+ * live in the modbus_meters component; this struct only picks the device and
+ * how to talk to it. Changed at runtime (console/LCD) and live-applied.
+ */
+typedef struct {
+    uint8_t  device;          /* meter_device_t: 0=PM710, 1=EM-07K */
+    uint8_t  slave_addr;      /* RTU slave address of the downstream meter */
+    uint8_t  baud_code;       /* 0=9600,1=19200,2=38400,3=57600,4=115200 */
+    uint8_t  parity_code;     /* 0=none, 1=even, 2=odd */
+    uint32_t poll_period_ms;  /* polling period */
+    bool     enabled;         /* master on/off */
+} config_ext_meter_t;
+
 /* Initialize NVS (with erase/retry fallback). Safe to call more than once. */
 esp_err_t config_store_init(void);
 
@@ -89,17 +106,29 @@ esp_err_t config_store_init(void);
 esp_err_t config_store_get_network(config_network_t *out);
 esp_err_t config_store_get_mqtt(config_mqtt_t *out);
 esp_err_t config_store_get_system(config_system_t *out);
+esp_err_t config_store_get_ext_meter(config_ext_meter_t *out);
 
 esp_err_t config_store_set_network(const config_network_t *in);
 esp_err_t config_store_set_mqtt(const config_mqtt_t *in);
 esp_err_t config_store_set_system(const config_system_t *in);
+esp_err_t config_store_set_ext_meter(const config_ext_meter_t *in);
+
+/* Opaque full-snapshot persistence used by Configuration Manager. Config Store
+ * owns only the NVS namespace/key and byte transport; the payload schema,
+ * version and validation remain entirely with Configuration Manager. Get maps
+ * an absent namespace/key to ESP_ERR_NOT_FOUND, zero-fills any unused tail of
+ * the caller's buffer, and rejects a persisted blob larger than that buffer. */
+esp_err_t config_store_get_snapshot(void *out, size_t size);
+esp_err_t config_store_get_snapshot_sized(void *out, size_t size, size_t *stored_size);
+esp_err_t config_store_set_snapshot(const void *data, size_t size);
 
 /* Fill a struct with compile-time defaults without touching NVS. */
 void config_store_default_network(config_network_t *out);
 void config_store_default_mqtt(config_mqtt_t *out);
 void config_store_default_system(config_system_t *out);
+void config_store_default_ext_meter(config_ext_meter_t *out);
 
-/* Erase all three blobs (factory reset for network configuration). */
+/* Erase legacy domains and the opaque full snapshot. */
 esp_err_t config_store_factory_reset(void);
 
 #ifdef __cplusplus

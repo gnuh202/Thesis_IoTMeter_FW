@@ -1,5 +1,6 @@
 #include "network_manager.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include "esp_check.h"
 #include "esp_event.h"
@@ -11,6 +12,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "config_manager.h"
 #include "config_store.h"
 #include "ethernet_driver.h"
 #include "web_portal.h"
@@ -86,6 +88,9 @@ esp_err_t network_manager_get_status(network_status_t *out)
 #endif
 #ifndef CONFIG_APP_NET_AP_RECOVERY_GRACE_MS
 #define CONFIG_APP_NET_AP_RECOVERY_GRACE_MS 60000
+#endif
+#ifndef CONFIG_APP_NET_AP_IDLE_TIMEOUT_MS
+#define CONFIG_APP_NET_AP_IDLE_TIMEOUT_MS 60000
 #endif
 
 #define NET_POLL_PERIOD_MS 500
@@ -177,43 +182,48 @@ static void network_manager_task(void *arg)
 {
     set_state(NETWORK_STATE_LOAD_CONFIG);
 
-    config_network_t net;
-    esp_err_t ret = config_store_get_network(&net);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "network config loaded (mode=%d)", (int)net.mode);
+    /* config_manager_t is ~2.2 KB — heap, not this task's stack. */
+    config_manager_t *cfg = malloc(sizeof(config_manager_t));
+    if (cfg == NULL) {
+        ESP_LOGE(TAG, "out of memory reading network config; STA credentials not primed");
     } else {
-        ESP_LOGW(TAG, "network config defaults in use: %s", esp_err_to_name(ret));
-    }
-
-    bool have_sta_creds = strlen(net.wifi_ssid) > 0;
-    if (have_sta_creds) {
-        esp_err_t cred_ret = wifi_manager_sta_set_credentials(net.wifi_ssid, net.wifi_pass);
-        if (cred_ret == ESP_OK) {
-            ESP_LOGI(TAG, "STA credentials primed from NVS (ssid=\"%s\")", net.wifi_ssid);
+        esp_err_t ret = config_manager_get(cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "config_manager not ready (%s); STA credentials not primed",
+                     esp_err_to_name(ret));
+        } else if (strlen(cfg->wifi_ssid) > 0) {
+            esp_err_t cred_ret = wifi_manager_sta_set_credentials(cfg->wifi_ssid, cfg->wifi_pass);
+            if (cred_ret == ESP_OK) {
+                ESP_LOGI(TAG, "STA credentials primed from config (ssid=\"%s\")", cfg->wifi_ssid);
+            } else {
+                ESP_LOGW(TAG, "prime STA credentials failed: %s", esp_err_to_name(cred_ret));
+            }
         } else {
-            ESP_LOGW(TAG, "prime STA credentials failed: %s", esp_err_to_name(cred_ret));
-            have_sta_creds = false;
+            ESP_LOGI(TAG, "no STA SSID stored; WiFi failover unavailable until credentials are set");
         }
-    } else {
-        ESP_LOGI(TAG, "no STA SSID stored; WiFi failover unavailable until net-cfg sta is set");
+        free(cfg);
     }
 
     int64_t eth_down_since_us = 0;   /* 0 = ETH not currently in a down window */
     bool sta_requested = false;      /* have we asked the STA to come up? */
     network_iface_t default_iface = NETWORK_IFACE_NONE; /* last netif we made default */
-    bool ap_recovery = false;        /* auto-AP raised because all data paths were lost */
-    int64_t recovery_ok_since_us = 0; /* when a data path returned while the recovery AP is up */
+    int64_t ap_idle_since_us = 0;    /* 0 = AP idle timer not running */
+    bool offline_no_sta_logged = false; /* throttle the "staying offline" line */
 
     set_state(NETWORK_STATE_CHECK_ETH);
 
     while (1) {
         bool eth_ip = ethernet_driver_has_ip();
         bool sta_ip = wifi_manager_sta_has_ip();
-        bool have_datapath = eth_ip || sta_ip;
+        bool ap_active = wifi_manager_ap_is_active();
 
+        /* AP and STA are mutually exclusive. While the config portal is up, skip
+         * the failover logic so the task does not race to re-connect the STA.
+         * Ethernet is unaffected and still reported as the data path. */
         if (eth_ip) {
             /* Ethernet is the preferred data path. Drop STA if we had raised it. */
             eth_down_since_us = 0;
+            offline_no_sta_logged = false;
             if (sta_requested) {
                 ESP_LOGI(TAG, "Ethernet restored; dropping WiFi STA failover");
                 wifi_manager_sta_disconnect();
@@ -238,10 +248,12 @@ static void network_manager_task(void *arg)
             set_state(NETWORK_STATE_CHECK_ETH);
             publish_iface(NETWORK_IFACE_NONE, false, NULL);
 
-            if (ethernet_driver_link_is_up()) {
-                /* Link is up, just waiting for DHCP — reset the down window. */
+            if (!ap_active && ethernet_driver_link_is_up()) {
+                /* Link is up, just waiting for DHCP — reset the down window and
+                 * the one-shot log so a fresh ETH drop can log again. */
                 eth_down_since_us = 0;
-            } else {
+                offline_no_sta_logged = false;
+            } else if (!ap_active) {
                 int64_t now = esp_timer_get_time();
                 if (eth_down_since_us == 0) {
                     eth_down_since_us = now;
@@ -249,7 +261,11 @@ static void network_manager_task(void *arg)
                 int64_t down_ms = (now - eth_down_since_us) / 1000;
 
                 if (down_ms >= CONFIG_APP_NET_ETH_DOWN_DEBOUNCE_MS) {
-                    if (have_sta_creds) {
+                    /* No auto-AP fallback. With Ethernet down and no STA
+                     * credentials, the device is simply offline — the operator
+                     * raises the portal manually from the LCD menu. Log once;
+                     * repeat only if the link or credential state changes. */
+                    if (wifi_manager_sta_has_credentials()) {
                         ESP_LOGW(TAG, "Ethernet link down %lld ms; failing over to WiFi STA", (long long)down_ms);
                         if (wifi_manager_sta_connect() == ESP_OK) {
                             sta_requested = true;
@@ -257,15 +273,10 @@ static void network_manager_task(void *arg)
                         } else {
                             ESP_LOGE(TAG, "STA connect request failed; will retry");
                         }
-                    } else if (!ap_recovery) {
-                        /* No STA credentials to fail over to: with Ethernet down
-                         * this is a total network loss. Raise the recovery AP so
-                         * the device stays reachable for reconfiguration. */
-                        ESP_LOGW(TAG, "Ethernet down and no STA credentials; starting recovery AP");
-                        if (start_ap_with_portal() == ESP_OK) {
-                            ap_recovery = true;
-                            set_state(NETWORK_STATE_AP_MODE);
-                        }
+                        offline_no_sta_logged = false;
+                    } else if (!offline_no_sta_logged) {
+                        ESP_LOGI(TAG, "Ethernet down and no STA credentials; staying offline (raise portal from LCD)");
+                        offline_no_sta_logged = true;
                     }
                 }
             }
@@ -286,47 +297,34 @@ static void network_manager_task(void *arg)
                 publish_iface(NETWORK_IFACE_WIFI_STA, true, ip_str);
                 set_state(NETWORK_STATE_WIFI_ACTIVE);
             } else {
-                /* STA is trying but has no IP. If it has failed to associate too
-                 * many times, both data paths are effectively gone: raise the
-                 * recovery AP. Stop STA retries first so the SoftAP stays on a
-                 * stable channel and remains discoverable for local config. */
-                if (!ap_recovery && wifi_manager_sta_fail_count() >= CONFIG_APP_NET_STA_RETRY_MAX) {
-                    ESP_LOGW(TAG, "WiFi STA failed %u times; starting recovery AP",
-                             (unsigned)wifi_manager_sta_fail_count());
-                    wifi_manager_sta_disconnect();
-                    if (start_ap_with_portal() == ESP_OK) {
-                        ap_recovery = true;
-                        set_state(NETWORK_STATE_AP_MODE);
-                    }
-                } else if (!ap_recovery) {
-                    set_state(NETWORK_STATE_WIFI_CONNECTING);
-                }
+                /* STA is trying but has no IP. No auto-AP fallback — the operator
+                 * raises the portal manually from the LCD menu if needed. */
+                set_state(NETWORK_STATE_WIFI_CONNECTING);
                 publish_iface(NETWORK_IFACE_NONE, false, NULL);
             }
         }
 
         /*
-         * Recovery-AP lifecycle. Once the auto-AP is up, keep it until a data path
-         * has been healthy for a grace period, so a user mid-configuration is not
-         * cut off the instant the network flickers back. Losing the data path
-         * again during the grace window resets the timer.
+         * Config-portal AP idle timer. The user launches the SoftAP from the LCD
+         * menu; if no station associates within the Kconfig window, stop the AP
+         * automatically and reconnect the STA so the device returns to normal
+         * operation. Any associated station resets the timer.
          */
-        if (ap_recovery) {
-            if (have_datapath) {
-                int64_t now = esp_timer_get_time();
-                if (recovery_ok_since_us == 0) {
-                    recovery_ok_since_us = now;
-                    ESP_LOGI(TAG, "data path restored; recovery AP will close after grace period");
-                } else if ((now - recovery_ok_since_us) / 1000 >= CONFIG_APP_NET_AP_RECOVERY_GRACE_MS) {
-                    ESP_LOGI(TAG, "grace period elapsed; stopping recovery AP");
-                    stop_ap_with_portal();
-                    ap_recovery = false;
-                    recovery_ok_since_us = 0;
-                }
-            } else {
-                /* Still no data path — keep the AP and reset the grace timer. */
-                recovery_ok_since_us = 0;
+        if (wifi_manager_ap_is_active()) {
+            if (wifi_manager_ap_sta_count() > 0) {
+                ap_idle_since_us = 0;
+            } else if (ap_idle_since_us == 0) {
+                ap_idle_since_us = esp_timer_get_time();
+                ESP_LOGI(TAG, "config portal AP up, no station yet; idle timeout %d ms",
+                         CONFIG_APP_NET_AP_IDLE_TIMEOUT_MS);
+            } else if ((esp_timer_get_time() - ap_idle_since_us) / 1000 >= CONFIG_APP_NET_AP_IDLE_TIMEOUT_MS) {
+                ESP_LOGI(TAG, "config portal AP idle for %d ms; stopping",
+                         CONFIG_APP_NET_AP_IDLE_TIMEOUT_MS);
+                stop_ap_with_portal();
+                ap_idle_since_us = 0;
             }
+        } else {
+            ap_idle_since_us = 0;
         }
 
         vTaskDelay(pdMS_TO_TICKS(NET_POLL_PERIOD_MS));
@@ -388,8 +386,9 @@ esp_err_t network_manager_start(void)
  */
 esp_err_t network_manager_start_config_portal(void)
 {
-    /* Bring up the SoftAP on demand. It coexists with the active ETH/STA data
-     * path, so telemetry is not interrupted while the portal is open. */
+    /* Bring up the SoftAP on demand. AP and STA are mutually exclusive, so the
+     * STA is dropped for the duration of the portal and reconnected when the
+     * portal closes (idle auto-stop or explicit stop). Ethernet is unaffected. */
     return start_ap_with_portal();
 }
 

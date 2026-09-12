@@ -18,6 +18,10 @@ extern "C" {
 
 esp_err_t hmi_bsp_init(void);
 esp_err_t hmi_bsp_lcd_print_line(uint8_t row, const char *text);
+
+/* Turn the LCD backlight on/off. The display content is untouched — the
+ * controller keeps its DDRAM, so switching back on restores the same screen. */
+esp_err_t hmi_bsp_lcd_backlight(bool on);
 esp_err_t hmi_bsp_read_buttons(uint8_t *pressed_mask);
 esp_err_t hmi_bsp_set_leds(uint8_t led_mask);
 esp_err_t hmi_bsp_set_led(uint8_t index, bool on);

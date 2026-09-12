@@ -1,15 +1,22 @@
-# Project defaults for ESP32-S3 N16R2 (16 MB flash, 2 MB PSRAM).
-# These are applied when sdkconfig is (re)generated, so the flash/partition
-# setup survives a clean or an sdkconfig delete.
+# Project defaults for ESP32-S3 N16R8 (16 MB flash, 8 MB OPI PSRAM).
+# Applied when sdkconfig is (re)generated so flash/partition setup survives
+# a clean or an sdkconfig delete.
 
-# --- Flash: N16R2 has 16 MB ---
+# --- Flash: N16R8 has 16 MB ---
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
-# --- Partition table: custom, 3 MB app + FAT storage ---
+# --- Partition table: dual-OTA (ota_0/ota_1 4 MB) + NVS 64 KB + cert FAT 1 MB ---
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# --- PSRAM: N16R8 = 8 MB octal (OPI), 80 MHz ---
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
 # --- TLS: bundled root CAs for MQTT broker verification (no per-broker cert needed) ---
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
@@ -18,3 +25,27 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 # --- Logging: compile debug-level logs in so the 'log' console command can
 #     raise verbosity at runtime (default stays INFO). ---
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+
+# --- ATM90E32AS factory/first-boot wiring: 3P4W (not 3P3W) ---
+# CONFIG_APP_ATM90E32AS_DEFAULT_MODE_3P3W is not set
+
+# --- Board identity (N16R8 with a single native-USB connector): pin the two
+#     settings that IDF defaults do NOT reproduce, so a lost/regenerated
+#     sdkconfig can never break the board again. ---
+# Console REPL must live on the USB-Serial-JTAG controller: the dev port is
+# native USJ (reset cause USB_UART_CHIP_RESET), not UART0. UART0 REPL = logs
+# appear but typing does nothing.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# This board's PCF8575-driven buzzer sounds on output HIGH.
+CONFIG_APP_HMI_BUZZER_ACTIVE_HIGH=y
+
+# --- Ethernet: W5500 SPI MAC+PHY driver (ethernet_driver.c). Without this the
+#     esp_eth headers hide eth_w5500_config_t and the build fails; it was only
+#     ever set in the local sdkconfig, so pin it here for clean regenerations. ---
+CONFIG_ETH_USE_SPI_ETHERNET=y
+CONFIG_ETH_SPI_ETHERNET_W5500=y
+CONFIG_ETH_SPI_ETHERNET_KSZ8851SNL=n
+CONFIG_ETH_SPI_ETHERNET_DM9051=n
+
+# --- main_task stack: config_manager_t ~2.6KB; keep headroom for boot init ---
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

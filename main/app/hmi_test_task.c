@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hmi_bsp.h"
+#include "home_screen.h"
 #include "lcd_menu.h"
 #include "sdkconfig.h"
 #include "wifi_manager.h"
@@ -16,18 +17,18 @@
 #define HMI_MENU_LCD_REFRESH_MS 500
 #define HMI_MENU_LCD_WIDTH 20
 #define HMI_MENU_LCD_HEIGHT 4
-#define HMI_MENU_LED_COUNT HMI_BSP_LED_COUNT
 
+/* Developer-only menu, reached by holding LEFT + RIGHT at boot (engineering
+ * mode). It replaces the old HMI bring-up test menu (LED / button / LCD /
+ * ext-meter checks), which is no longer needed now that those peripherals are
+ * covered by the production home screen and console. What remains is the
+ * functionality that must stay out of the end-user menu: calibration, plus AP
+ * mode for field provisioning. */
 static const char *TAG = "hmi_menu";
 static bool s_started;
 
 typedef struct {
     lcd_menu_t menu;
-    bool led_on[HMI_MENU_LED_COUNT];
-    uint8_t saved_led_mask;
-    uint8_t current_buttons;
-    uint8_t last_pressed;
-    uint32_t press_count;
     uint32_t ap_mode_start_count;
 } hmi_menu_app_t;
 
@@ -37,112 +38,9 @@ static esp_err_t menu_write_line(void *user_ctx, uint8_t row, const char *text)
     return hmi_bsp_lcd_print_line(row, text);
 }
 
-static uint8_t led_bool_to_mask(const hmi_menu_app_t *app)
-{
-    uint8_t mask = 0;
-    for (uint8_t i = 0; i < HMI_MENU_LED_COUNT; i++) {
-        if (app->led_on[i]) {
-            mask |= (1U << i);
-        }
-    }
-    return mask;
-}
-
-static void led_mask_to_bool(hmi_menu_app_t *app, uint8_t mask)
-{
-    for (uint8_t i = 0; i < HMI_MENU_LED_COUNT; i++) {
-        app->led_on[i] = (mask & (1U << i)) != 0;
-    }
-}
-
-static esp_err_t apply_leds(hmi_menu_app_t *app)
-{
-    return hmi_bsp_set_leds(led_bool_to_mask(app));
-}
-
-static esp_err_t on_bool_changed(lcd_menu_t *menu, const lcd_menu_item_t *item, bool value, void *user_ctx)
-{
-    (void)menu;
-    hmi_menu_app_t *app = (hmi_menu_app_t *)user_ctx;
-    ESP_LOGI(TAG, "%s = %s", item->label, value ? "On" : "Off");
-    return apply_leds(app);
-}
-
-static esp_err_t on_save(lcd_menu_t *menu, void *user_ctx)
-{
-    hmi_menu_app_t *app = (hmi_menu_app_t *)user_ctx;
-    app->saved_led_mask = led_bool_to_mask(app);
-    lcd_menu_set_dirty(menu, false);
-    ESP_LOGI(TAG, "HMI settings saved, LED mask=0x%02X", app->saved_led_mask);
-    return ESP_OK;
-}
-
-static esp_err_t on_discard(lcd_menu_t *menu, void *user_ctx)
-{
-    hmi_menu_app_t *app = (hmi_menu_app_t *)user_ctx;
-    led_mask_to_bool(app, app->saved_led_mask);
-    ESP_RETURN_ON_ERROR(apply_leds(app), TAG, "restore LED state failed");
-    lcd_menu_set_dirty(menu, false);
-    ESP_LOGI(TAG, "HMI settings discarded, LED mask=0x%02X", app->saved_led_mask);
-    return ESP_OK;
-}
-
-static const char *button_name(uint8_t mask)
-{
-    if (mask & HMI_BSP_BUTTON_RIGHT) {
-        return "RIGHT";
-    }
-    if (mask & HMI_BSP_BUTTON_BOTTOM) {
-        return "DOWN";
-    }
-    if (mask & HMI_BSP_BUTTON_CENTER) {
-        return "CENTER";
-    }
-    if (mask & HMI_BSP_BUTTON_LEFT) {
-        return "LEFT";
-    }
-    if (mask & HMI_BSP_BUTTON_TOP) {
-        return "UP";
-    }
-    return "NONE";
-}
-
-static esp_err_t show_button_test(lcd_menu_t *menu, const lcd_menu_item_t *item, void *user_ctx)
-{
-    (void)menu;
-    (void)item;
-    hmi_menu_app_t *app = (hmi_menu_app_t *)user_ctx;
-    ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(0, "== BUTTON TEST ===="), TAG, "write LCD failed");
-
-    char line[21];
-    snprintf(line, sizeof(line), "Now : %-12s", button_name(app->current_buttons));
-    ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(1, line), TAG, "write LCD failed");
-    snprintf(line, sizeof(line), "Last: %-12s", button_name(app->last_pressed));
-    ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(2, line), TAG, "write LCD failed");
-    snprintf(line, sizeof(line), "Mask:%02X Count:%lu", app->current_buttons, (unsigned long)app->press_count);
-    ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(3, line), TAG, "write LCD failed");
-    ESP_LOGI(TAG, "Button test: now=%s last=%s count=%lu", button_name(app->current_buttons), button_name(app->last_pressed), (unsigned long)app->press_count);
-    vTaskDelay(pdMS_TO_TICKS(1200));
-    return ESP_OK;
-}
-
-static esp_err_t show_lcd_info(lcd_menu_t *menu, const lcd_menu_item_t *item, void *user_ctx)
-{
-    (void)menu;
-    (void)item;
-    hmi_menu_app_t *app = (hmi_menu_app_t *)user_ctx;
-
-    char line[21];
-    ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(0, "== LCD INFO ======="), TAG, "write LCD failed");
-    snprintf(line, sizeof(line), "%u cols x %u rows", HMI_MENU_LCD_WIDTH, HMI_MENU_LCD_HEIGHT);
-    ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(1, line), TAG, "write LCD failed");
-    snprintf(line, sizeof(line), "LED mask: 0x%02X", led_bool_to_mask(app));
-    ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(2, line), TAG, "write LCD failed");
-    ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(3, "Auto back soon..."), TAG, "write LCD failed");
-    vTaskDelay(pdMS_TO_TICKS(1200));
-    return ESP_OK;
-}
-
+/* Start SoftAP for field provisioning. Kept as an ACTION with an explicit
+ * status screen: unlike the removed test items this changes device state, so a
+ * one-shot confirmation of the result is worth the screen. */
 static esp_err_t start_ap_mode(lcd_menu_t *menu, const lcd_menu_item_t *item, void *user_ctx)
 {
     (void)menu;
@@ -151,48 +49,31 @@ static esp_err_t start_ap_mode(lcd_menu_t *menu, const lcd_menu_item_t *item, vo
     app->ap_mode_start_count++;
 
     esp_err_t ret = wifi_manager_start_ap();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "AP mode start failed: %s", esp_err_to_name(ret));
-    }
 
-    char line[21];
+    char line[HMI_MENU_LCD_WIDTH + 1];
     ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(0, "== WIFI AP MODE =="), TAG, "write LCD failed");
     ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(1, ret == ESP_OK ? "AP start requested" : "AP start failed"), TAG, "write LCD failed");
     snprintf(line, sizeof(line), "Request count: %lu", (unsigned long)app->ap_mode_start_count);
     ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(2, line), TAG, "write LCD failed");
     ESP_RETURN_ON_ERROR(hmi_bsp_lcd_print_line(3, wifi_manager_ap_is_active() ? "AP is active" : "Check WiFi logs"), TAG, "write LCD failed");
-    ESP_LOGI(TAG, "AP mode action requested, count=%lu, ret=%s, active=%d", (unsigned long)app->ap_mode_start_count, esp_err_to_name(ret), wifi_manager_ap_is_active());
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "AP mode start failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "AP mode requested, count=%lu active=%d",
+                 (unsigned long)app->ap_mode_start_count, wifi_manager_ap_is_active());
+    }
     vTaskDelay(pdMS_TO_TICKS(1200));
     return ESP_OK;
 }
 
-static lcd_menu_screen_t s_led_screen;
-static lcd_menu_screen_t s_root_screen;
-
-static lcd_menu_item_t s_led_items[] = {
-    {.label = "LED 1", .type = LCD_MENU_ITEM_BOOL},
-    {.label = "LED 2", .type = LCD_MENU_ITEM_BOOL},
-    {.label = "LED 3", .type = LCD_MENU_ITEM_BOOL},
-    {.label = "LED 4", .type = LCD_MENU_ITEM_BOOL},
-    {.label = "LED 5", .type = LCD_MENU_ITEM_BOOL},
-    {.label = "Save", .type = LCD_MENU_ITEM_SAVE},
-};
-
 static const lcd_menu_item_t s_root_items[] = {
-    {.label = "LED Control", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_led_screen},
+    {.label = "Calibration", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &home_screen_calibration_screen},
     {.label = "Start AP Mode", .type = LCD_MENU_ITEM_ACTION, .action = start_ap_mode},
-    {.label = "Button Test", .type = LCD_MENU_ITEM_ACTION, .action = show_button_test},
-    {.label = "LCD Info", .type = LCD_MENU_ITEM_ACTION, .action = show_lcd_info},
 };
 
-static lcd_menu_screen_t s_led_screen = {
-    .title = "LED CONTROL",
-    .items = s_led_items,
-    .item_count = sizeof(s_led_items) / sizeof(s_led_items[0]),
-};
-
-static lcd_menu_screen_t s_root_screen = {
-    .title = "HMI MAIN MENU",
+static const lcd_menu_screen_t s_root_screen = {
+    .title = "DEVELOPER",
     .items = s_root_items,
     .item_count = sizeof(s_root_items) / sizeof(s_root_items[0]),
 };
@@ -217,13 +98,6 @@ static lcd_menu_key_t button_to_key(uint8_t button)
     return LCD_MENU_KEY_NONE;
 }
 
-static void bind_led_items(hmi_menu_app_t *app)
-{
-    for (uint8_t i = 0; i < HMI_MENU_LED_COUNT; i++) {
-        s_led_items[i].bool_value = &app->led_on[i];
-    }
-}
-
 static void hmi_menu_task(void *arg)
 {
     (void)arg;
@@ -236,12 +110,17 @@ static void hmi_menu_task(void *arg)
         return;
     }
 
-    bind_led_items(&app);
-    app.saved_led_mask = 0;
-    led_mask_to_bool(&app, app.saved_led_mask);
+    /* The calibration callbacks live in home_screen.c and gate their button
+     * feedback on the buzzer preference loaded by home_screen_load_buzzer_pref().
+     * home_screen_task does not run in engineering mode, so load it here —
+     * otherwise those clicks are silently disabled. */
+    home_screen_load_buzzer_pref();
 
     hmi_bsp_buzzer_set(false);
-    ESP_ERROR_CHECK_WITHOUT_ABORT(apply_leds(&app));
+    /* Clear whatever LED pattern the boot screen left behind. From here the LEDs
+     * follow the production status pattern driven by update_leds() inside the
+     * calibration modal helpers. */
+    hmi_bsp_set_leds(0);
 
     lcd_menu_config_t menu_config = {
         .width = HMI_MENU_LCD_WIDTH,
@@ -249,13 +128,13 @@ static void hmi_menu_task(void *arg)
         .pointer_char = '>',
         .wrap_cursor = false,
         .show_scroll_markers = true,
-        .ask_save_on_exit = true,
-        .save_prompt_title = "Save changes?",
+        /* Nothing in this menu toggles a BOOL item, so no edit is ever left
+         * unsaved and the save-on-exit prompt would be unreachable. Each action
+         * persists its own change (calibration writes to SD / NVS directly). */
+        .ask_save_on_exit = false,
+        .show_position_counter = true,
         .user_ctx = &app,
         .write_line = menu_write_line,
-        .bool_changed = on_bool_changed,
-        .save = on_save,
-        .discard = on_discard,
     };
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_menu_init(&app.menu, &menu_config, &s_root_screen));
@@ -264,25 +143,26 @@ static void hmi_menu_task(void *arg)
     uint8_t last_buttons = 0;
     uint32_t refresh_elapsed_ms = HMI_MENU_LCD_REFRESH_MS;
 
-    ESP_LOGI(TAG, "Reusable LCD menu started: UP/DOWN=move, RIGHT=enter submenu, CENTER=OK/activate, LEFT=Back");
+    ESP_LOGI(TAG, "Developer menu started: UP/DOWN=move, CENTER=OK/enter, LEFT=Back, RIGHT=reserved");
 
     while (1) {
-        ret = hmi_bsp_read_buttons(&app.current_buttons);
+        uint8_t buttons = 0;
+        ret = hmi_bsp_read_buttons(&buttons);
         if (ret == ESP_OK) {
-            uint8_t press_edges = app.current_buttons & ~last_buttons;
-            if (press_edges != 0) {
-                app.last_pressed = press_edges;
-                app.press_count++;
+            uint8_t press_edges = buttons & ~last_buttons;
+            last_buttons = buttons;
 
+            if (press_edges != 0) {
                 lcd_menu_key_t key = button_to_key(press_edges);
                 if (key != LCD_MENU_KEY_NONE) {
-                    ESP_LOGI(TAG, "Button: %s key=%d", button_name(press_edges), key);
+                    /* Same feedback path as production: gated by the user's
+                     * buzzer preference, 50 ms click. */
+                    home_screen_button_click();
                     ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_menu_handle_key(&app.menu, key));
                     ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_menu_render(&app.menu));
                     refresh_elapsed_ms = 0;
                 }
             }
-            last_buttons = app.current_buttons;
         } else {
             ESP_LOGW(TAG, "read buttons failed: %s", esp_err_to_name(ret));
         }
