@@ -42,34 +42,56 @@ meter-reg write 0x61 0x1C89
 ## 3. `meter-cal` — hiệu chỉnh ATM90E32AS
 
 ```
-meter-cal <show|default|apply|save|load|set|guide> [tùy chọn]
+meter-cal <show|default|apply|save|load|auto|auto-pq-gain|auto-power-offset|set|guide> [tùy chọn]
 ```
 
 | Subcommand | Việc |
 |---|---|
 | `show` | in cấu hình calib hiện tại |
-| `default` | nạp giá trị calib mặc định (chưa ghi NVS) |
+| `default` | nạp giá trị calib mặc định (không `--field`: toàn image, cần `--apply`; `--field <f>`: reset chọn lọc, áp ngay) |
 | `apply` | áp calib hiện tại xuống chip |
 | `save` | lưu calib vào NVS |
 | `load` | đọc calib từ NVS |
 | `set` | đặt một trường calib (xem bên dưới) |
 | `guide` | in hướng dẫn quy trình calib |
+| `auto` | auto-cal voltage/current gain hoặc offset (một pha hoặc cả 3 pha) |
+| `auto-pq-gain` | auto-cal active power gain (PQGain) |
+| `auto-power-offset` | auto-cal active/reactive power offset |
 
-Tham số cho `set`:
+Tham số cho `set` / `auto`:
 
 | Cờ | Ý nghĩa |
 |---|---|
-| `--field <f>` | `gain\|offset\|power-offset\|phase\|ref\|pga\|wiring\|freq` |
-| `--phase <a\|b\|c>` | pha đích (với trường theo pha) |
+| `--field <f>` | `set`: `uigain\|uioffset\|gain\|offset\|power-offset\|phase\|pq-gain\|fundamental-power-gain\|pga\|wiring\|freq`; `auto`: `u\|i`; `default --field`: `phi\|pqgain\|uigain\|uioffset\|power-offset\|fundamental\|all` |
+| `--phase <a\|b\|c\|all>` | pha đích. `auto`: bỏ trống hoặc `all` = calib cả 3 pha cùng một reference chung. `set`/`default`: chỉ `a\|b\|c` (bỏ trống = cả 3 với `default --field`) |
 | `--u <n>` | giá trị liên quan điện áp |
 | `--i <n>` | giá trị liên quan dòng |
 | `--p <n>` | offset công suất tác dụng |
 | `--q <n>` | offset công suất phản kháng |
 | `--phi <n>` | bù pha |
-| `--value <v>` | giá trị chip-wide: `pga 1\|2\|4`, `wiring 3p4w\|3p3w`, `freq 50\|60` |
-| `--apply` | áp ngay xuống chip |
+| `--value <v>` | `auto`: reference (`<số>\|external\|offset`); `set`: chip-wide `pga 1\|2\|4`, `wiring 3p4w\|3p3w`, `freq 50\|60` |
+| `--apply` | **Bắt buộc** với chip-wide `pga\|wiring\|freq` và `default` không `--field`. Với calib per-phase (`auto`, `set <field per-phase>`, `default --field`) giá trị **tự áp xuống chip ngay**, `--apply` là no-op |
 
 Chi tiết quy trình calib: xem [atm90e32as_console_calib.md](atm90e32as_console_calib.md). Bắt đầu nhanh: `meter-cal guide`.
+
+Ví dụ auto-cal U/I gain cả 3 pha cùng một reference (một nguồn AC + trung tính cho 3 kênh áp; hoặc 3 CT trên cùng một tải):
+
+```text
+meter-cal auto --field u --value 220            # U gain cả 3 pha
+meter-cal auto --field i --value 5             # I gain cả 3 pha
+meter-cal auto --field i --phase a --value 5   # chỉ pha A
+meter-cal auto --field u --value offset        # U offset cả 3 pha (không tải)
+```
+
+All-or-nothing: nếu một pha không đo được (CT hở, giá trị ≤ 0), cả lệnh fail và **không ghi gì**; chip giữ nguyên calib cũ. Chỉ calib ở **3P4W** (3P3W trả lỗi vì cần trung tính; gain dùng chung giữa 2 mode).
+
+Ví dụ auto-cal PQGain (phải đã calib U/I, tải PF≈1, dòng Ib):
+
+```text
+meter-cal auto-pq-gain --phase a --value 123.4
+```
+
+Lệnh lấy mẫu nhanh (3 mẫu × 100 ms ≈ 300 ms) để giảm sai lệch do tải thay đổi. Có thể chạy lại nhiều lần để tinh chỉnh; firmware tự động hiệu chỉnh tăng dần từ PQGain hiện tại. Giữ tải ổn định trong ~1 giây từ lúc nhập lệnh.
 
 ---
 
@@ -177,7 +199,7 @@ log energy_meter info      # bật lại log mặc định cho một task
 | `modbus_slave` | Modbus RTU slave | vừa |
 | `modbus_master` | Modbus RTU master | vừa |
 | `net_mgr` | network manager (state machine, failover) | vừa |
-| `network_comm` | task ping | **nhiều** (mỗi ping) |
+| `network_comm` | bootstrap mạng (gọi `ethernet_driver_init`) | ít |
 | `ethernet_driver` | driver W5500 | vừa (link/IP event) |
 | `wifi_manager` | WiFi STA/AP | vừa |
 | `mqtt_mgr` | MQTT client | **nhiều** (mỗi publish/connect) |
@@ -192,6 +214,41 @@ log energy_meter info      # bật lại log mặc định cho một task
 | `pcf8574` | driver GPIO expander |
 | `sd_card` | thẻ SD |
 | `spi_bus_shared` | SPI bus dùng chung |
+
+---
+
+## 7. `ping` — kiểm tra kết nối ICMP từ chính thiết bị
+
+```
+ping <ip> [--count <1..100>] [--interval <ms>] [--timeout <ms>]
+```
+
+| Tham số | Mặc định | Ý nghĩa |
+|---|---|---|
+| `<ip>` | — | **địa chỉ IP số** (IPv4/IPv6). Không có phân giải tên miền — muốn test DNS thì trỏ tới thẳng IP |
+| `--count` | 4 | số gói gửi, 1..100 |
+| `--interval` | 1000 | nhịp gửi tính bằng ms (tối thiểu 100) |
+| `--timeout` | 2000 | thời gian chờ trả lời cho mỗi gói, ms (tối thiểu 100) |
+
+Lệnh chạy **block console** tới khi hết vòng ping rồi in tổng kết; trong lúc đó lệnh khác không gõ được.
+
+```
+ping 192.168.1.1
+PING 192.168.1.1 64 data bytes, interval=1000ms timeout=2000ms
+64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=2 ms
+64 bytes from 192.168.1.1: icmp_seq=2 ttl=64 time=1 ms
+--- 192.168.1.1 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss
+rtt min/avg/max = 1/1/2 ms
+```
+
+| Hiện tượng | Nguyên nhân |
+|---|---|
+| `is not a numeric IP address` | gõ hostname — `ping` không resolve DNS |
+| mọi gói `timed out`, `100% packet loss` | ETH/WiFi chưa lên hoặc sai mạng; kiểm tra `net-cfg show` + log `net_mgr` |
+| `did not end in time; stopping` | phiên ping bất thường (lệnh đã chờ quá `count*(interval+timeout) + 3s`); vẫn in tổng kết tới thời điểm đó |
+
+Mã thoát: `0` nếu nhận được ít nhất một gói trả lời, `1` nếu mất toàn bộ.
 
 ---
 

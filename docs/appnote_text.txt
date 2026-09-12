@@ -1,0 +1,2143 @@
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+APPLICATION OUTLINE
+This document describes system applicatio n issues when using the M90E32AS (poly-
+phase energy metering ICs) to design poly-phase energy meters.
+The M90E32AS is applicable in class 0.5S or class 1 poly-phase meter design and also
+supports Three-Phase Four-Wire (3P4W, Y0) or Three-Phase Three-Wire (3P3W, Y or Δ)
+connection modes.
+The M90E32AS uses 3.3V single power supply. In a typical 3P4W design, there are three
+transformers&regulators to provide power supply. The AC power supply outputs 3.3V to
+chip digital power supply DVDD after rectifier and voltage regulation. The analog power
+supply AVDD should be connected directly to digital power supply DVDD.
+The M90E32AS has on-chip power-on-reset circuit. The RESET pin should be connected to
+DVDD through a 10kΩ resistor and a 0.1μF filter capacitor to ground. The M90E32AS has
+highly stable on-chip reference power supply. The Vref pin should be decoupled with a
+4.7μF capacitor and a 0.1μF ceramic capacitor.
+The M90E32AS employs 16.384MHz as the system frequency. The M90E32AS has built-
+in crystal oscillator circuit an d 10pF matching capacitance. Users only need to connect a
+16.384MHz crystal between OSCI and OSCO pins in application.
+The M90E32AS provides ADC sampling on three voltage channels (V1, V2 and V3) and
+three current channels (I1, I2 and I3). Th ese 6 ADC channels can be flexibly mapped in
+different PCB design.
+The M90E32AS provides a 4-wire SPI interface ( CS, SCLK, SDI and SDO) for external
+MCU connection. MCU can perform chip conf iguration and register reading/writing
+through SPI.
+The M90E32AS provides four energy pulse output pins: active energy pulse CF1, reactive
+energy pulse CF2 (can also be configured as apparent energy pulse), fundamental energy
+pulse CF3 and harmonic energy pulse CF4. They can be used for energy metering cali-
+bration and can also be connected to MCU for energy accumulation.
+The M90E32AS provides three zero-crossing pins ZX0, ZX1 and ZX2 which can select
+different phase’s voltage or current as zero-crossing judgement.
+The M90E32AS provides three output pins IRQ0, IRQ1 and WarnOut to generate interrupt
+and warn out signals at different levels.
+The default application in this document is 3P4W, otherwise it will be specially indicated.
+Application Note
+Poly-Phase Energy Metering IC
+M90E32AS
+2M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+1 HARDWARE REFERENCE DESIGN ........................................................................................... 4
+1.1 3P4W Application ...................................................................................................................  4
+1.1.1 Schematics (Current Transformer (CT)) ...................................................................................4
+1.1.2 BOM (CT) ................................................................................................................. ................5
+1.1.3 Schematics (Rogowski) .................................................................................................... ........6
+1.1.4 BOM (Rogowski) ........................................................................................................... ............7
+1.1.5 Circuit Description ...................................................................................................... ...............7
+1.2 3P3W Application ...................................................................................................................  9
+1.2.1 Schematics ............................................................................................................... ................9
+1.2.2 BOM ...................................................................................................................... ..................10
+1.2.3 Circuit Description ...................................................................................................... .............10
+2 INTERFACE ............. ................................................................................................................... 11
+3 POWER MODES .......... .............................................................................................................. 13
+3.1 Normal Mode ........................................................................................................................  13
+3.2 Partial Measurement Mode.. .................................................................................................  13
+3.3 Detection Mode............. ........................................................................................................  14
+3.4 Idle Mode................. .............................................................................................................  14
+3.5 Transition And Application of Power Modes.........................................................................  14
+4 CALIBRATION ........... ................................................................................................................ 17
+4.1 Calibration Method........ ........................................................................................................  17
+4.2 Calibration in Normal Mode ..................................................................................................  17
+4.2.1 Metering Enable and CRC Calibration ....................................................................................18
+4.2.2 PL Constant Configuration (PL_Constant) .............................................................................19
+4.2.3 Metering Method Configuration (MMode0) .............................................................................20
+4.2.4 PGA Gain Configuration (MMode1) ........................................................................................21
+4.2.5 Offset Calibration of Voltage/ Current/ Power .........................................................................21
+4.2.6 Voltage/ Current Measurement Calibration ............................................................................22
+4.2.7 Energy Metering Calibration .............................................................................................. .....24
+4.2.8 Fundamental Energy Metering Calibration .............................................................................25
+4.3 Calibration in Partial Measurement Mode.............................................................................  26
+4.4 Calibration in Detection Mode....... ........................................................................................  26
+4.4.1 Current Detection Module C onfiguration ................................................................................26
+4.4.2 Current Detection Threshold Calibration ................................................................................27
+5 FUNCTION REGISTERS CONFIGURATION ............................................................................ 28
+5.1 Startup Current Configuration...............................................................................................  28
+5.2 Sag Function.......... ...............................................................................................................  29
+6 COMPENSATION METHOD ...... ................................................................................................ 30
+6.1 Current Segment Compensation Descriprion .......................................................................  30
+6.2 GainIrms Segment Compensation Example.........................................................................  32
+6.3 PhiIrms Segment Compensation Example ...........................................................................  33
+Table of Contents
+3M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+6.4 Frequency-Phase Compensation (PhiFreqComp)................................................................  34
+7 TEMPERATURE COMPENSATION .......... ................................................................................ 35
+7.1 On-chip Temperature Sensor Configuration.........................................................................  35
+7.2 Temperature Compensation Based on Ugaint Example ......................................................  36
+7.3 Temperature Compensation Based on Reference Voltage..................................................  37
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+4
+1 HARDWARE REFERENCE DESIGN
+1.1 3P4W Application
+1.1.1 Schematics (Current Transformer (CT))
+1
+1
+2
+2
+3
+3
+4
+4
+5
+5
+6
+6
+7
+7
+8
+8
+D D
+C C
+B B
+A A
+Atmel China
+File:Project: ATM90E32AS_3P4W_CT.SchDoc*
+Revision:
+Page:
+of
+1.0
+11Document Number:
+Date: 3/19/2014 11:24:59
+Title:
+DrawnBy:
+Size: A3
+Poly Phase Metering AFE ATM90E32AS (3P4W with CT)
+*
+Felix Yao
+*
+*
+CheckedBy:
+ApprovedBy:
+SMART ENERGY
+ZX0
+ZX1
+ZX2
+CF1
+CF2
+CF3
+CF4
+WarnOut
+IRQ0
+IRQ1
+PM0
+PM1
+GND
+SDI
+SDO
+SCLK
+CS
+R41
+1K C14
+18nF
+X1
+16.384MHz
+C9
+4.7uF
+C10
+0.1uF
+GND
+C4
+0.1uF
+C2
+10uF
+GND
+C1
+0.1uF R2
+10K
+DVDD33
+R11
+10K
+R12
+10K
+R13
+10K
+R14
+10K
+C5
+0.1uF
+C7
+0.1uF
+GND
+AVDD33
+DVDD33
+R10
+1K C3
+18nF
+GND
+R23
+1K C6
+18nF
+GND
+R32
+1K
+C8
+18nF
+GND
+IA+
+IA-
+R35
+1K
+R46
+1K
+R38
+2.4
+R44
+2.4
+C11
+18nF
+C16
+18nF
+GND
+IC+
+IC-
+R36
+1K
+R47
+1K
+R39
+2.4
+R45
+2.4
+C12
+18nF
+C17
+18nF
+GND
+IB+
+IB-
+R49
+1K
+R55
+1K
+R51
+2.4
+R53
+2.4
+C18
+18nF
+C20
+18nF
+GND
+D1 CF4
+D2 CF3
+D3 CF2
+D4 CF1
+R34
+510
+R37
+510
+R42
+510
+R48
+510
+GND
+U4 PS2501
+R33
+510
+GND
+U3 PS2501
+R24
+510
+GND
+U2 PS2501
+R15
+510
+GND
+U1 PS2501
+R1
+510
+GND
+CF1
+CF2
+CF3
+CF4
+CF1
+CF2
+CF3
+CF4
+CF1
+CF2
+CF3
+CF4
+VAP
+VBP
+VCP
+IAP
+IAN
+IBP
+IBN
+ICP
+ICN
+VAP
+VBP
+VCP
+IAP
+IAN
+IBP
+IBN
+ICP
+ICN
+R9
+240K
+R22
+240K
+R31
+240K
+11
+22
+33
+44
+55
+JP1
+CON-5
+R43
+1K
+C15
+18nF
+GND
+R40
+1K
+C13
+18nF
+R4
+240K
+R5
+240K
+R6
+240K
+R7
+240K
+R8
+240K
+R3
+240K
+UA
+R17
+240K
+R18
+240K
+R19
+240K
+R20
+240K
+R21
+240K
+R16
+240K
+UB
+R26
+240K
+R27
+240K
+R28
+240K
+R29
+240K
+R30
+240K
+R25
+240K
+UC
+Voltage Sampling
+Current Sampling (with CT)
+Connect to MCU
+UN
+GND
+PM0 33PM1 34
+RESET41
+DGND47 DVDD48
+AVDD1
+AGND2
+V1N 14
+I3P7
+I3N8
+V2N 16
+IC9
+IC10
+DGND19
+V1P 13
+V2P 15
+V3P 17
+V3N 18
+I1P3
+I1N4
+NC46
+I2P5
+Vref11
+WarnOut 29IRQ0 30IRQ1 31
+CF1 25CF2 26CF3 27CF4 28
+ZX0 22
+ZX1 23
+ZX2 24
+OSCI 20
+OSCO21
+CS37 SCLK38 SDO39 SDI40
+IC 36
+AGND12
+VDD1843 DGND44
+I2N6
+NC 35
+TEST 32
+NC45
+VDD1842
+U5
+ATM90E32AS
+GND
+GND
+Energy Pulse Output Indicate
+Energy Pulse Output (Isolated with Optocoupler)
+Poly Phase Metering AFE Chip (ATM90E32AS)
+5M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+1.1.2 BOM (CT)
+Table-1 3P4W BOM (CT)
+Component T ype Designator Q uantity Parameter To l e r a nce
+SMT Capacitor
+C3 C6 C8 C11 C12 C13 C14
+C15 C16 C17 C18 C20 12 18nF ±5%  NP0
+(anti-aliasing filter capacitor)
+C1 C4 C5 C7 C10 5 0.1 μF ±10%  X7R
+C9 1 4.7 μF ±10%  X7R
+C2 1 10 μF ±10%  X7R
+SMT Resistor
+R38 R39 R44 R45 R51 R53 6 2.4 Ω ±1% 1/8W 25ppm
+R1 R15 R24 R33 R34 R37
+R42 R48 8 510 Ω ±5% 1/8W 100ppm
+R10 R23 R32 R35 R36 R40
+R41 R43 R46 R47 R49 R55 12 1k Ω ±1% 1/8W 25ppm
+(anti-aliasing filter resistor)
+R2 R11 R12 R13 R14 5 10k Ω ±5% 1/8W 100ppm
+R3~R9, R16~R22,
+R25~R31 21 240k Ω ±1% 1/8W 25ppm
+LED D1 D2 D3 D4 4 - -
+SMT Optocoupler U1 U2 U3 U4 4 PS 2501 -
+Crystal X1 1 16.384MHz ±20ppm
+IC U5 1 M90E32AS -
+Connector JP1 1 CON-5 -
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+6
+1.1.3 Schematics (Rogowski)
+1
+1
+2
+2
+3
+3
+4
+4
+5
+5
+6
+6
+7
+7
+8
+8
+D D
+C C
+B B
+A A
+Atmel China
+File:Project: ATM90E32AS_3P4W_Coil.SchDoc*
+Revision:
+Page:
+of
+1.0
+11Document Number:
+Date: 3/19/2014 11:25:09
+Title:
+DrawnBy:
+Size: A3
+Poly Phase Metering AFE ATM90E32AS (3P4W with Rogowski Coil)
+*
+Felix Yao
+*
+*
+CheckedBy:
+ApprovedBy:
+SMART ENERGY
+ZX0
+ZX1
+ZX2
+CF1
+CF2
+CF3
+CF4
+WarnOut
+IRQ0
+IRQ1
+PM0
+PM1
+GND
+SDI
+SDO
+SCLK
+CS
+R41
+1K C14
+18nF
+X1
+16.384MHz
+C9
+4.7uF
+C10
+0.1uFGND
+C4
+0.1uF
+C2
+10uF
+GND
+C1
+0.1uF R2
+10K
+DVDD33
+R11
+10K
+R12
+10K
+R13
+10K
+R14
+10K
+C5
+0.1uF
+C7
+0.1uF
+GND
+AVDD33
+DVDD33
+R10
+1K C3
+18nF
+GND
+R23
+1K C6
+18nF
+GND
+R32
+1K
+C8
+18nF
+GND
+IA+
+IA-
+R35
+1K
+R46
+1K
+R38
+1K
+R44
+1K
+C11
+18nF
+C16
+18nF
+GND
+IC+
+IC-
+R36
+1K
+R47
+1K
+R39
+1K
+R45
+1K
+C12
+18nF
+C17
+18nF
+GND
+IB+
+IB-
+R49
+1K
+R55
+1K
+R51
+1K
+R53
+1k
+C18
+18nF
+C20
+18nF
+GND
+D1 CF4
+D2 CF3
+D3 CF2
+D4 CF1
+R34
+510
+R37
+510
+R42
+510
+R48
+510
+GND
+U4 PS2501
+R33
+510
+GND
+U3 PS2501
+R24
+510
+GND
+U2 PS2501
+R15
+510
+GND
+U1 PS2501
+R1
+510
+GND
+CF1
+CF2
+CF3
+CF4
+CF1
+CF2
+CF3
+CF4
+CF1
+CF2
+CF3
+CF4
+VAP
+VBP
+VCP
+IAP
+IAN
+IBP
+IBN
+ICP
+ICN
+VAP
+VBP
+VCP
+IAP
+IAN
+IBP
+IBN
+ICP
+ICN
+R9
+240K
+R22
+240K
+R31
+240K
+11
+22
+33
+44
+55
+JP1
+CON-5
+R43
+1K
+C15
+18nF
+GND
+R40
+1K
+C13
+18nF
+R4
+240K
+R5
+240K
+R6
+240K
+R7
+240K
+R8
+240K
+R3
+240K
+UA
+R17
+240K
+R18
+240K
+R19
+240K
+R20
+240K
+R21
+240K
+R16
+240K
+UB
+R26
+240K
+R27
+240K
+R28
+240K
+R29
+240K
+R30
+240K
+R25
+240K
+UC
+Voltage Sampling
+Current Sampling (with Rogowski Coil)
+Connect to MCU
+UN
+GND
+C22
+18nF
+C24
+18nF
+C23
+18nF
+C25
+18nF
+C26
+18nF
+C28
+18nF
+PM0 33PM1 34
+RESET41
+DGND47 DVDD48
+AVDD1
+AGND2
+V1N 14
+I3P7
+I3N8
+V2N 16
+IC9
+IC10
+DGND19
+V1P 13
+V2P 15
+V3P 17
+V3N 18
+I1P3
+I1N4
+NC46
+I2P5
+Vref11
+WarnOut 29IRQ0 30IRQ1 31
+CF1 25CF2 26CF3 27CF4 28
+ZX0 22
+ZX1 23
+ZX2 24
+OSCI 20
+OSCO21
+CS37 SCLK38 SDO39 SDI40
+IC 36
+AGND12
+VDD1843 DGND44
+I2N6
+NC 35
+TEST 32
+NC45
+VDD1842
+U5
+ATM90E32AS
+GND
+GND
+Energy Pulse Output Indicate
+Energy Pulse Output (Isolated with Optocoupler)
+Poly Phase Metering AFE Chip (ATM90E32AS)
+7M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+1.1.4 BOM (Rogowski)
+1.1.5 Circuit Description
+The recommended circuit for the M90E32AS three-phas e four-wire (3P4W) application is as shown in 1.1.1 Schematics
+(Current Transformer (CT)). The M90E32AS can use CT and Rogowski coil in current sampling. The recommended circuit
+for 3P4W application with Rogowski coil is as shown in 1.1.3 Schematics (Rogowski).
+It is recommended to use two-order filtering when sampling with Rogowski coil. The other parts are same with the CT appli-
+cation circuit. It is recommended to refer to the circuit of 1.2.1 Schematics when using Rogowski coil in 3P3W design, only
+need to change CT to Rogowski coil. The recommended type of Rogowski coil is: PA3202NL (Pulse Electronics).
+Poly-phase voltage is sampled over resistor divider network with recommended ratio of 240K Ω x 7:1KΩ. The anti-aliasing
+filter capacitor is recommended to be 18nF. Poly-phase cu rrent and N line current are sampled over current transformer
+(CT). The CT ratio and load resistance should be selected based on the actual metering range. The anti-aliasing filter resis-
+tance/capacitor is suggested to be 1KΩ/18nF for the current sampling circuit.
+The CF1~CF4 pins are provided with driving capacity of 8m A which can drive LED and opto coupler parallelly. The other
+digital pins are provided with driving capacity of 5mA which can drive optocoupler directly.
+Table-2 3P4W BOM (Rogowski)
+Component Type Designator Quantity Parameter Tolerance
+SMT Capacitor
+C3 C6 C8 C11 C12 C13 
+C14 C15 C16 C17 C18 C19 
+C20 C21 C22 C23 C24 C25 
+C26 C27 C28 
+21 18nF ±5% NP0
+(anti-aliasing filter capacitor)
+C1 C4 C5 C7 C10 5 0.1 μF ±10%   X7R
+C9 1 4.7 μF ±10%   X7R
+C2 1 10 μF ±10%   X7R
+SMT Resistor
+R1 R15 R24 R33 R34 R37 
+R42 R48
+8 510 Ω ±5% 1/8W  100ppm
+R10 R23 R32 R35 R36 R38 
+R39 R40 R41 R43 R44 R45 
+R46 R47 R49 R51 R53 R55
+18 1k Ω ±1% 1/8W  25ppm
+(anti-aliasing filter resistor)
+R2 R11 R12 R13 R14 5 10k Ω ±5% 1/8W  100ppm
+R3~R9, R16~R22, 
+R25~R31
+21 240k Ω ±1% 1/8W  25ppm
+LED D1 D2 D3 D4 4 - -
+SMT Optocoupler U1 U2 U3 U4 4 PS2501 -
+Crystal X1 1 16.384MHz ±20ppm
+IC U5 1 M90E32AS -
+Connector JP1 1 CON-5 -
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+8
+Application note: how to select CT and CT load resistance
+Condition:
+        M90E32AS ADC input voltage range is 120μVrms ~ 720mVrms
+        M90E32AS ADC input gain PGA_GAIN = 1, 2, 4
+Assume:
+        Metering range of the energy meter is Imin ~ Imax
+        CT current output ratio is N:1
+        CT load resistance is R
+CT
+So the parameters meet the formula as below:
+ 
+ N
+I R PGA_GAIN   Vrms 120 minCT ××<μ
+720mVrms  N
+I  R  PGA_GAIN maxCT <××
+9M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+1.2 3P3W Application
+1.2.1 Schematics
+1
+1
+2
+2
+3
+3
+4
+4
+5
+5
+6
+6
+7
+7
+8
+8
+D D
+C C
+B B
+A A
+Atmel China
+File:Project: ATM90E32AS_3P3W_CT.SchDoc*
+Revision:
+Page:
+of
+1.0
+11Document Number:
+Date: 3/19/2014 11:24:48
+Title:
+DrawnBy:
+Size: A3
+Poly Phase Metering AFE ATM90E32AS (3P3W with CT)
+*
+Felix Yao
+*
+*
+CheckedBy:
+ApprovedBy:
+SMART ENERGY
+ZX0
+ZX1
+ZX2
+CF1
+CF2
+CF3
+CF4
+WarnOut
+IRQ0
+IRQ1
+PM0
+PM1
+GND
+SDI
+SDO
+SCLK
+CS
+X1
+16.384MHz
+C9
+4.7uF
+C10
+0.1uF
+GND
+C4
+0.1uF
+C2
+10uF
+GND
+C1
+0.1uF R2
+10K
+DVDD33
+R11
+10K
+R12
+10K
+R13
+10K
+R14
+10K
+C5
+0.1uF
+C7
+0.1uF
+GND
+AVDD33
+DVDD33
+R10
+1K C3
+18nF
+GND
+R32
+1K
+C8
+18nF
+GND
+IA+
+IA-
+R35
+1K
+R46
+1K
+R38
+2.4
+R44
+2.4
+C11
+18nF
+C16
+18nF
+GND
+IC+
+IC-
+R36
+1K
+R47
+1K
+R39
+2.4
+R45
+2.4
+C12
+18nF
+C17
+18nF
+GND
+D1 CF4
+D2 CF3
+D3 CF2
+D4 CF1
+R34
+510
+R37
+510
+R42
+510
+R48
+510
+GND
+U4 PS2501
+R33
+510
+GND
+U3 PS2501
+R24
+510
+GND
+U2 PS2501
+R15
+510
+GND
+U1 PS2501
+R1
+510
+GND
+CF1
+CF2
+CF3
+CF4
+CF1
+CF2
+CF3
+CF4
+CF1
+CF2
+CF3
+CF4
+VAP
+VCP
+IAP
+IAN
+ICP
+ICN
+VAP
+VCP
+IAP
+IAN
+ICP
+ICN
+R9
+240K
+R31
+240K
+11
+22
+33
+44
+55
+JP1
+CON-5
+R43
+1K
+C15
+18nF
+GND
+R40
+1K
+C13
+18nF
+R4
+240K
+R5
+240K
+R6
+240K
+R7
+240K
+R8
+240K
+R3
+240K
+UA
+UB
+R26
+240K
+R27
+240K
+R28
+240K
+R29
+240K
+R30
+240K
+R25
+240K
+UC
+Voltage Sampling
+Current Sampling (with CT)
+Connect to MCU
+GND
+GND
+PM0 33PM1 34
+RESET41
+DGND47 DVDD48
+AVDD1
+AGND2
+V1N 14
+I3P7
+I3N8
+V2N 16
+IC9
+IC10
+DGND19
+V1P 13
+V2P 15
+V3P 17
+V3N 18
+I1P3
+I1N4
+NC46
+I2P5
+Vref11
+WarnOut 29IRQ0 30IRQ1 31
+CF1 25CF2 26CF3 27CF4 28
+ZX0 22
+ZX1 23
+ZX2 24
+OSCI 20
+OSCO21
+CS37 SCLK38 SDO39 SDI40
+IC 36
+AGND12
+VDD1843 DGND44
+I2N6
+NC 35
+TEST 32
+NC45
+VDD1842
+U5
+ATM90E32AS
+GND
+Poly Phase Metering AFE Chip (ATM90E32AS)
+Energy Pulse Output Indicate
+Energy Pulse Output (Isolated with Optocoupler)
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+10
+1.2.2 BOM
+Table-3 3P3W BOM
+1.2.3 Circuit Description
+This circuit is the recommended circuit for the M90E32AS three-phase three-wire (3P3W) application.
+Phase B is the reference ground in 3P3W application. In 3P3W system, Uab stands for Ua, Ucb stands for Uc and there is
+no Ub.
+Phase B voltage, phase B current and N line sampling current are not needed in 3P3W application. Pin 5, 6, 15 and 16
+should be connected to GND. All NC pins should be left open.
+The other parts of 3P3W application circuit are similar to 3P4W and can be treated in the same way.
+Component T ype Designator Q uantity Parameter Tol e r ance
+SMT Capacitor
+C3 C8 C11 C12 C13 
+C15 C16 C17
+8 18nF ±5% NP0
+(anti-aliasing filter capacitor)
+C1 C4 C5 C7 C10 5 0.1 μF ±10%   X7R
+C9 1 4.7 μF ±10%   X7R
+C2 1 10 μF ±10%   X7R
+SMT Resistor
+R38 R39 R44 R45 4 2.4 Ω ±1% 1/8W  25ppm
+R1 R15 R24 R33 R34 
+R37 R42 R48
+85 1 0 Ω ±5% 1/8W  100ppm
+R10 R32 R35 R36 R40  
+R43 R46 R47
+81 k Ω ±1% 1/8W  25ppm
+(anti-aliasing filter resistor)
+R2 R11 R12 R13 R14 5 10k Ω ±5% 1/8W  100ppm
+R3~R9, R25~R31 14 240k Ω ±1% 1/8W  25ppm
+LED D1 D2 D3 D4 4 - -
+SMT Optocoupler U1 U2 U3 U4 4 PS2501 -
+Crystal X1 1 16.384MHz ±20ppm
+IC U5 1 M90E32AS -
+Connector JP1 1 CON-5 -
+11M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+2 INTERFACE
+The M90E32AS provides a four-wire SPI interface (CS, SCLK, SDI and SDO).
+The SPI interface in Slave mode is mainly used for register read/write operation. A complete SPI read/write operation is of
+32 bits, which contains 16-bit address and 16-bit data. In the 16-bit address, bit0 ~ bit9 correspond to valid register address
+A0 ~ A9, and bit10 ~ bit14 are reserved (these bits are don’t-care). Bit15 indicates the SPI operation is read or write.
+The transmission of address and data bits is from high to low, which means MSB first and LSB last. Note that the
+M90E32AS read/write only supports single address operation, rather than continuous read or write.
+The M90E32AS has a special register LastSPIData [78H] for reco rding the last SPI read/write data. This register can be
+used for data check for SPI read/write operation. When the system is in strong interference situation, the disturbance signal
+may cause SPI communication disorder and re sult in SPI read/write error. In this case, LastSPIData can be used to check
+the correctness of SPI read/write and strengthen system robustness. For read-clear registers, if the read data is different
+from the LastSPIData data, the actual data can be obtained by reading the LastSPIData register repeatedly.
+LastSPIData application is as shown in Figure-1 and Figure-2:
+Figure-1   LastSPIData Application (Read)
+SPI Operation D escription Highest Bit (Bit15)
+Read Read register data 1
+Write Write data to register 0
+SPI Read Buffer
+Read LastSPIData
+LastSPIData == Buffer ?
+N
+Y
+Buffer=LastSPIData
+LastSPIData == Buffer ?
+Y
+N
+End
+Read LastSPIData
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+12
+Figure-2   LastSPIData Application (Write)
+SPI Write Data 
+Buffer
+Read LastSPIData
+LastSPIData == Buffer ?
+N
+Y
+End
+13M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+3P O W E R  M O D E S
+Four power modes are supported which correspond to four kinds of power consumption. The power mode is configured by
+PM1/PM0 pins.
+3.1 Normal Mode
+In Normal mode, all function blocks are active except for the current detector block. All registers can be accessed.
+3.2 Partial Measurement Mode
+In Partial Measurement mode, the active measurement modu les in Partial Measurement mode are the same as Normal
+mode.
+In this mode, all the measurements are through the same hardware that does the measurement in the normal mode. To
+save power, the energy accumulation block and a portion of the DSP computation code will not be running in this mode.
+In this mode, There are configuration bits in the PMPwrCtrl (0EH) register to get lower power if the application allows:
+1.PMPwrDownVch: In Partial Measurement Mode the V0/V1/ V2 analog channel can be powered off to save power
+0: Power on
+1: Power off (default)
+2.ACTRL_CLK_GATE: Power off the clock of analog control block to save power.
+0: Power on
+1: Power off (default)
+3.DSP_CLK_GATE: Power off the clock of DSP register to save power.
+0: Power on
+1: Power off (default)
+4.MTMS_CLK_GATE: Power off the metering and measuring block to save power.
+0: Power on
+1: Power off (default)
+5.PMClkLow: In Partial Measurement Mode the main clock can be reduced to 8.192MHz to save power.
+0: 16.384MHz
+1: 8.192MHz (default)
+PM1
+PM0 Power Modes Power Consumption
+1 1 Normal mode
+High
+↓
+Low
+1 0 Partial Measurement mode
+0 1 Detection mode
+0 0 Idle mode
+Address Name Bit15 ~ 
+Bit0
+0EH PMPwrCtrl
+Bit15 Bit14 Bit13 Bit12 Bit11 Bit10 Bit9 Bit8
+-- - - - - - PMPwrDown-
+Vch
+Bit7 Bit6 Bit5 Bit4 Bit3 Bit2 Bit1 Bit0
+-- - - ACTRL_CLK_
+GATE
+DSP_CLK_
+GATE
+MTMS_CLK_
+GATE PMClkLow
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+14
+3.3 Detection Mode
+In Detection mode, only the current detector is active and al l the registers can not be acce ssed by external MCU. In this
+mode, each I/O is in specific state (for details refer to datasheet) and SPI is disabled. So the control and threshold registers
+for Detection mode need to be programmed in Normal mode before entering Detection mode. Once these related registers
+are written, there is no need to re-configure them when switch ing between different power modes. Detection mode related
+registers are listed as below:
+Current detection is achieved with low power comparators.  Two comparators are supplied for each phase on detecting
+positive and negative current. When any single-phase curren t or multiple-phase current exceeds the configured threshold,
+the IRQ0 pin is asserted high. When all three phase currents  exceed the configured threshol d, the IRQ1 pin is asserted
+high. The IRQ0/IRQ1 state is cleared when entering or exiting Detection mode.
+The all three phase currents are considered as the currents of three current channels I1~I3. As there is no phase B current
+in 3P3W application, IRQ1 will not be asserted high ev en if both phase A and phase C current exceed the configured
+threshold.
+Current detection module can be enabled in Normal mode through configuring the DEtectCtrl(10H) register to facilitate the
+current detection threshold calibration.
+3.4 Idle Mode
+In Idle mode, all the modules are disabled and all the registers can not be accessed. In this mode, each I/O is in a specific
+state (for details refer to datasheet) and SPI is disabled. All register values are lost except for current detection related
+registers.
+3.5 Transition And Application of Power Modes
+The four power modes are controlled by the PM0 and PM1 pins . In application, any power mode transition goes through
+Idle mode to avoid register value confusion or system stat us uncertainty in mode transition. All function modules are
+disabled in Idle mode while the related modules will be enabl ed after switching from Idle  mode to other mode, which is
+equivalent to reset to the function modules, thus ensuring normal operation of the function modules.
+It needs to reload registers to ensure normal operation when switching from Idle mode to Normal mode or Partial Measure-
+ment mode, while no need to reload registers when switchin g from Idle mode to Detection mode. Power mode transition is
+shown as Figure-3:
+Address Name
+10H DetectCtrl
+11H DetectThA
+12H DetectThB
+13H DetectThC
+15M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+Figure-3   Power Mode Transition
+Note: For description convenience, the intermediary Idle mode will be omitted when refering to power mode transition.
+The most typical application of power mode transition is no-voltage detection for power meter.
+The so-called no-voltage state is when all phase voltages are less than the voltage threshold but the load current is greater
+than the configured current value (such as 5% of rated curr ent). In no-voltage state, the power meter usually uses backup
+battery for power supply. The system needs to enter low power mode and perform measurement and recording for no-
+voltage state periodically.
+The recommended flow for power meter with the M90E32AS is as below:
+1.Set the current detection threshold to be the minimum load current (such as 5% of rated current) required in no-voltage
+state.
+2.When no-voltage happens, th e system enters Idle mode;
+3.The system enters Detection mode every once in a while (such as 5s);
+4.Once the load current is greater than the configured value, the system enters Partial Measurement mode to measure
+and record the load current;
+5.The system returns to Idle mode after measurement and recording are completed;
+6.The system enters Partial Measurement mode every once in a while (such as 60s) to measure and record the load
+current.
+Idle Mode
+PM1:PM0 = 00
+Normal Mode
+PM1:PM0 = 11
+Detection Mode
+PM1:PM0 = 01
+Partial Measurement 
+Mode
+PM1:PM0 = 10
+Need to reload all 
+register values
+Need to reload Partial 
+Measurement related registers
+All the register 
+values will be lost 
+except for the 
+Detection Mode 
+related registers
+Detection Mode related 
+register value will be kept
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+16
+Figure-4   Application of Detection Mode and Partial Measurement Mode
+Application note: Design principle for current detection threshold
+It is recommended to do system design based on current detection threshold of 1.5mVrms.
+Example:
+Assume:
+The requirement is that the minimum load current detected is 2.5% of rated current. Current specification is
+5(60)A;
+The minimum load current is Id, which corresponds to a 1.5mVrms ADC input signal.
+The parameters meet the following relations:
+Enter Idle mode
+Delay 5s
+Enter Detection 
+mode
+IRQ0/IRQ1 output high 
+level?
+Enter Partial 
+Measurement mode
+Record current 
+value
+(No-voltage event)
+N
+Y
+System voltage sag
+Enter Idle mode
+Delay 60s
+Measure 
+current>Minimum load 
+current?
+Y
+N
+Minimum Detection Load Current Id Related Current  In Maximum Current Imax
+ratio to rated current 2.5% In In 12In
+corresponding A/D input signal 3mVrms 60mVrms 720mVrms
+actual current 250mA 5A 60A
+17M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+4 CALIBRATION
+4.1 Calibration Method
+Normally voltage, current, mean power, phase angle, frequency and so on are regarded as measurement values, while
+active energy, reactive energy and so on are regarded as metering values.
+Measurement and metering function both need calibration before normal use as shown in below table. 
+In typical application of three-phase power meter, voltage, current and full-wave energy must be calibrated. The others can
+be calibrated according to actual application, no need to calibrate if no use.
+The calibration flow follows the sequence of measurement firs t then metering. Metering calibration is realized by first cali-
+brating gain and then calibrating phase angle compensation, only single-point calibration is needed over the entire dynamic
+range. Reactive does not need to be calibrated since it is guaranteed by chip design.
+Frequency, phase angle and power factor do not need calibration, since their accuracy is guaranteed by chip design.
+4.2 Calibration in Normal Mode
+The basic functions, such as measurement, metering, harmonic analysis and so on are only active in Normal mode. So
+calibration in Normal mode is basic and a must. The related registers need to be configured before calibration. Calibration
+flow is as shown in Figure-5.
+Power Mode Parameter Need Cali bration Calibration Method
+Normal mode
+voltage/current √ offset/gain calibration
+power/frequency/phase angle/ power factor X -
+full-wave energy metering √ offset/gain/phase angle calibration
+fundamental energy metering √ offset/gain calibration
+harmonic energy metering X -
+Partial Measurement mode voltage/ current/ power X -
+Detection mode current detection √ threshold calibration
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+18
+Figure-5   Active Energy Metering Calibration Flow in Normal Mode
+4.2.1 Metering Enable and CRC Calibration
+The device can automatically monitor the CRC changes versus a golden CRC which is latched after the first time the CRC
+computation is done. The latching event is triggered by no ne "0x55AA" value written to the CfgRegAccEn register (which
+means configuration done), fo llowed by a new C C result available even t. Once golden CRC is latched, the CRC_CMP
+signal is enabled. Subsequent CRC result  will be compared with the la tched CRC to generate t he CRC error status. CRC
+error status can be read, and if configured, can goes to WARN or IRQ0 pins to alert the MCU in the case of CRC error.
+Voltage/Current 
+Offset Calibration
+Voltage/Current 
+Gain Calibration
+Power Offset 
+Calibration
+Energy Gain 
+Calibration
+Phase Angle 
+Calibration
+Calibration 
+Initialize
+End
+19M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+4.2.2 PL Constant Configuration (PL_Constant)
+Energy accumulation and metering are usually referenced by  energy unit, such as kWh. However, within the M90E32AS,
+energy calculation or accumulation are based on energy pu lse (CF). kWh and CF are conn ected by Meter Constant (MC,
+such as 3200 imp/kWh, which means each kWh corresponds to 3200 energy pulses). The chip’s PL_Constant is a param-
+eter related to MC. One PL_Constant corresponds to 0.01CF. PL_Constant should be configured according to different MC
+in application.
+The M90E32AS provides four energy pulse outputs: active e nergy pulse CF1, reactive en ergy pulse or apparent energy
+pulse CF2, fundamental energy pulse CF3 and harmonic energy pulse CF4. Their Meter Constants are all set by
+PL_Constant in union rather than separately.
+The PL_Constant registers consist of the PLconstH[31H] and PLconstL[32H] registers, corresponding to high word and low
+word of PL_Constant respectively.
+PL_Constant is calculated as below:
+PL_constant  =  450,000,000,000 / MC
+450,000,000,000: Constant
+MC: Meter Constant, unit is imp/KWh, imp/Kvarh or imp/KVA
+Example: Calculation of PL_constant
+Assume:
+    Meter Constant MC = 3200
+Thus:
+    PL_constant = 450,000,000,000 / 3200= 140,625,000 (Hex is 8614C68H)
+so the registers are set as below:
+    PLconstH[31H] = 0861H
+    PLconstL[32H] = 4C68H
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+20
+4.2.3 Metering Method Configuration (MMode0)
+The M90E32AS can be used in difference systems and metering modes, which can be configured by the MMode0[33H]
+register.
+1.Freq60Hz: grid operating line reference frequency
+0: 50Hz (default)
+1: 60Hz
+The M90E32AS is applicable in 50 Hz or 60 Hz power grid. The M90E32AS uses different calculation parameters in 
+data processing according to different grid frequency. To improve the accuracy of measurement and metering, 
+please set this control bit according to the real power grid frequency.
+2.HPFOff: HPF enable control bit
+0: enable HPF (default)
+1: disable HPF
+Besides measuring the voltage/current RMS in 50Hz or 60Hz (AC) power grid, the M90E32AS can also measure the 
+mean current value of DC condition. HPF should be disabled when using DC measurement functions.
+3.didtEn: enable integrator for didt current sensor
+0: disable integrator for didt current sensor; use CT sampling for current channel (default)
+1: enable integrator for didt current sensor; use Rogowski coil sampling for current channel
+The M90E32AS supports sampling over CT or Rogowski coil. Please set this control bit according to the real current 
+sampling means. Note that different sampling circuit should be adopted when using Rogowski coil.
+4.3P3W: connection type for three-phase energy meter
+0: 3P4W connection (default)
+1: 3P3W connection
+The M90E32AS uses different phase sequence judgment for different connection. Please set this control bit accord-
+ing to the real connection type.
+5.CF2varh: CF2 pin source configuration
+0: apparent energy
+1: reactive energy (default)
+6.ABSEnQ: configure the calculatio n method of total (all-phase-sum) reactive energy and power
+0: total reactive energy equals to all-phase reactive energy arithmetic sum (default)
+1: total reactive energy equals to all-phase reactive energy absolute sum
+7.ABSEnP: configure the calculatio n method of total (all-phase-sum) active energy and power
+0: total active energy equals to all-phase active energy arithmetic sum (default)
+1: total active energy equals to all-phase active energy absolute sum
+8.EnPA: this bit configures whether Phase A is counted into the all-phase sum energy/power (P/Q/S)
+0: Corresponding Phase A not counted into the all-phase sum energy/power (P/Q/S)
+1: Corresponding Phase A to be counted into the all-phase sum energy/power (P/Q/S) (default)
+9.EnPB: this bit configures whether Phase B is co unted into the all-phase sum energy/power (P/Q/S)
+0: Corresponding Phase B not counted into the all-phase sum energy/power (P/Q/S)
+1: Corresponding Phase B to be counted into the all-phase sum energy/power (P/Q/S) (default)
+10.EnPC: this bit configures whether Phase C is counted into the all-phase sum energy/power (P/Q/S)
+0: Corresponding Phase C not counted into the all-phase sum energy/power (P/Q/S)
+1: Corresponding Phase C to be counted into the all-phase sum energy/power (P/Q/S) (default)
+Address Name Bit15 ~ Bit0
+33H MMode0
+Bit15 Bit14 Bit13 Bit12 Bit11 Bit10 Bit9 Bit8
+- - - Freq60Hz HPFOff didtEn - 3P3W
+Bit7 Bit6 Bit5 Bit4 Bit3 Bit2 Bit1 Bit0
+CF2varh - - ABSEnQ ABSEnP EnPA EnPB EnPC
+Application note: Common configuration of MMode0
+1.3P4W, grid frequency 50Hz, MMode0 = 0087H
+2.3P3W, grid frequency 50Hz, MMode0 = 0185H
+21M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+4.2.4 PGA Gain Configuration (MMode1)
+The MMode1 register is used to configure PGA gain of ADC sampling channel, making chips applicable to meter designs of
+different current specifications.
+PGA_GAIN (V1~V3, I1~I4): analog PGA gain for seven ADC channels
+    00: 1X (default)
+    01: 2X
+    10: 4X
+    11: N/A
+4.2.5 Offset Calibration of Voltage/ Current/ Power
+In application, the input signal is oft en influenced by the interfer ence signal. This interferen ce will enter data processing
+module through ADC and high-pass filter, not only producing errors to the voltage/current RMS and power calculation, but
+also affecting accuracy of the energy metering. The M90E32AS provides offset calibration function to voltage, current and
+power, reducing the influence of the interference signal to measurement/metering accuracy.
+Every phase’s voltage/current offset calibration should be proceeded individually. Take phase A for example, the signal
+source is: Ub=Uc=Un, Ua=0, Ia=0. The calibration flow of voltage/current offset is as below:
+1.Read measurement registers (32 bits). It is suggested to read several times to get the average value;
+2.Right shift the 32-bit data by 7 bits (ignore the lowest 7 bits);
+3.Invert all bits and add 1 (2’s complement);
+4.Write the lower 16-bit result to the offset register
+Every phase’s power offset calibration should be proceeded indi vidually. Take phase A for example, the signal source is:
+Ua=Ub=Uc=Un, Ia=0. The calibration flow of power offset is as below:
+1.Read measurement registers (32 bits). It is suggested to read several times to get the average value;
+2.Invert all bits and add 1 (2’s complement);
+3.Write the lower 16-bits result to the offset register
+The corresponding offset register and measurement value registers are shown as below:
+Address Name Bit15 ~ Bit0
+34H MMode1
+Bit15 Bit14 Bit13 Bit12 Bit11 Bit10 Bit9 Bit8
+- PGA_GAIN (V3) PGA_GAIN (V2) PGA_GAIN (V1)
+Bit7 Bit6 Bit5 Bit4 Bit3 Bit2 Bit1 Bit0
+- PGA_GAIN (I3) PGA_GAIN  (I2) PGA_GAIN (I1)
+Application note: Configuration principle of PGA gain
+1.Ensure that the ADC channel analog input signal should be within the dynamic range of
+0~720mVrms
+2.Configure PGA gain to be the maximum value within the whole dynamic range
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+22
+4.2.6 Voltage/ Current Measurement Calibration
+Measurement calibration means the calibration of voltage rms (Urms) gain and current rms (Irms) gain. Measurement cali-
+bration is the premise of energy metering calibration.
+1.Voltage/current offset (Uoffset/Ioffset) calibration:
+For calibration method, please refer to 4.2.5 Offset Calibration of Voltage/ Current/ Power. No need of calibration if 
+the voltage/current offset is very small in general application.
+2 Voltage/current gain calibration:
+The three phases’ calibration can be proceeded simultaneously. The signal source is: Ua=Ub=Uc=Un, 
+Ia=Ib=Ic=In(Ib). The calibration method is as below:
+a. Read voltage/current value of the external reference meter, and also read the voltage/current measurement value from chip 
+registers;
+b. Calculate the voltage/current gain;
+c. Write the result to the corresponding voltage/current gain registers
+Note: voltage/current gain calibration is not necessarily proceeded when gain register is the default value. That is, when the
+first calibration result is not ideal, there is no need to re set the gain register to the default value. Calibration can be
+performed again based on the current value. The formula is as below:
+The corresponding voltage/current gain register and measurement value registers are shown as below:
+Offset Registers Measurement Value Registers
+Address Register Name Address Register Name Address Register Name
+Voltage
+63H UoffsetA 0D9H U rmsA 0E9H UrmsALSB
+67H UoffsetB 0 DAH U rmsB 0EAH UrmsBLSB
+6BH UoffsetC 0DBH U rmsC 0EBH UrmsCLSB
+Current
+64H IoffsetA 0DDH IrmsA 0 EDH IrmsALSB
+68H IoffsetB 0 DEH IrmsB 0 EEH IrmsBLSB
+6CH Ioffs etC 0DFH IrmsC 0EFH IrmsCLSB
+6EH Ioffs etN 0D8H IrmsN1 - -
+All-wave 
+Power
+41H Poffs etA 0B1H P meanA 0C1H PmeanALSB
+42H Qoffs etA 0B5H QmeanA 0C5H QmeanALSB
+43H Poffs etB 0B2H P meanB 0C2H PmeanBLSB
+44H Qoffs etB 0B6H QmeanB 0C6H QmeanBLSB
+45H PoffsetC 0B3H P meanC 0C3H PmeanCLSB
+46H Qoffset C 0B7H QmeanC 0C7H QmeanCLSB
+fundamental 
+power
+51H PoffsetAF 0D1H PmeanAF 0 E1H PmeanAFLSB
+52H PoffsetBF 0D2H PmeanBF 0 E2H PmeanBFLSB
+53H PoffsetCF 0 D3H PmeanCF 0E3H PmeanCFLSB
+Voltage Gain =
+reference voltage value
+Voltage measurement value
+x 32768
+Current Gain =
+reference current value
+current measurement value
+x 32768
+New Voltage Gain =
+reference voltage value
+voltage measurement value
+x existing voltage gain
+New Current Gain =
+reference current value
+current measurement value
+x existing current gain
+23M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+Application Note:
+1.Voltage rms is unsigned and the minimum unit 1LSB of the UrmsA/UrmsB/UrmsC registers is 0.01V. Only the higher
+8 bits of the UrmsALSB/  UrmsBLSB/UrmsCLSB registers are valid, the lower 8 bits are always 0, and 1LSB is 0.01/
+256 V.
+2.Current rms is unsigned and the minimum unit 1LSB of the IrmsA/IrmsB/IrmsC registers is 0.001A; Only the higher 8
+bits of the IrmsALSB/ IrmsBLSB/IrmsCLSB registers are valid, the lower 8 bits are always 0, and 1LSB is 0.001/256 A.
+3.Power is signed complement. Whole 32-bit register value should be read before caculation in power value caculation.
+1LSB is 0.00032 (W/var/ VA).
+Gain Register Measurement Value Registers
+Address Register Name Address Register Name Address Register Name
+Voltage
+61H UgainA 0D9H UrmsA 0 E9H UrmsALSB
+65H UgainB 0DAH UrmsB 0 EAH UrmsBLSB
+69H UgainC 0DBH UrmsC 0EBH UrmsCLSB
+Current
+62H Igai nA 0DDH I rmsA 0EDH Irms ALSB
+66H IgainB 0DEH I rmsB 0 EEH IrmsBLSB
+6AH Igai nC 0DFH Irms C 0EFH IrmsCLSB
+Example: Voltage gain calibration
+Assume:
+The initial value of phase A voltage gain register UgainA is 8000H (32768)
+Reference meter output voltage is 220.00V
+Voltage rms register readout UrmsA = 3039H (12345)
+The higher 8 bits of voltage LSB register readout UrmsALSB = 43H (67)
+Thus:
+voltage measured value = (UrmsA x 0.01) + (UrmsALSB x 0.01 / 256)
+                                       = (12345 x 0.01) + (67 x 0.01 / 256)
+                                       =123.453 V
+voltage gain = 220.00 / 123.453 x 32768 = 58395 = 0E41BH
+So the register can be set to:
+UgainA = 0E41BH
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+24
+4.2.7 Energy Metering Calibration
+Only active energy is required for energy calibration. There is no need to calibrate reactive energy, the accuracy of which is
+guaranteed by chip design. Metering calibration flow is gain first then phase angle. Active energy pulse output (CF1) should
+be connected to the pulse input port of the calibration bench during calibration.
+Energy metering should be calibrated at In (Ib).
+1.Power offset (Poffset/Qoffset) calibration
+For calibration method please refer to 4.2.5 Offset Calibration of Voltage/ Current/ Power. No need of calibration if 
+the power offset is very small in general application.
+2.Gain calibration
+Every phase’s gain calibration should be proceeded individually. Take phase A for example, the signal source is: 
+Ua=Ub=Uc=Un, IA=In(Ib),
+Ib=Ic=0, PF=1.0. The calibration method is as below:
+a. Read the energy error value ε from calibration bench;
+b. Calculate the gain;
+ 
+c. Write the result to the corresponding gain registers.
+3.Phase angle calibration. Take phase A for example, the signal source is: Ua=Ub=Uc=Un, Ia=In(Ib), Ib=Ic=0,
+PF=0.5L.The calibration method is as below:
+a. Read the energy error value εp from calibration bench;
+b. Calculate the phase angle error;
+ 
+Gphase is a constant. When grid frequency is 50Hz, Gphase=3763.739. When grid frequency is 60Hz, Gphase=3136.449
+c. Write the result to the corresponding phase angle error registers. The phase angle registers are signed and MSB of 1 indicates 
+a negative value.
+The corresponding gain register and phase angle registers are shown as below:
+Address Register Name
+Phase A 47H GainA
+48H PhiA
+Phase B 49H GainB
+4AH PhiB
+Phase C 4BH GainC
+4CH PhiC
+Example: Energy gain and phase angle calculation
+The condition is that power factor PF=1.0, current is Ib, energy error ε is -13.78%, so:
+-ε/(1+ε)=0.159823707,
+gain = int(0.159823707* 2^15)=5237.10=1475H
+Write 1475H to the gain register.
+After gain calibration, energy error εP is 0.95% in the condition of PF=0.5L, current is I b and frequency is 50Hz,
+so:
+phase angle = εP*3763.739
+=0.0095*3763.739=35.75553=24H;
+Write 24H to the phase angle register.
+)2 x 1
+-(ary Complement 15
+ε
+ε
++=Gain
+ Gphase   AngleError p ×= ε
+25M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+4.2.8 Fundamental Energy Metering Calibration
+For fundamental energy metering calibration, only gain and offset calibration is needed. There is no need to calibrate phase
+angle. Fundamental energy pulse output (CF3) should be co nnected to the pulse input port of the calibration bench during
+calibration. Only sigle-point calibration in In(Ib) is needed for fundamental energy metering calibration.
+Fundamental energy metering calibration is similar to energy metering calibration.
+1.Fundamental power offset (PoffsetxF) calibration
+For calibration method please refer to 4.2.5 Offset Calibration of Voltage/ Current/ Power. No need of calibration if 
+the power offset is very small in general application.
+2.Fundamental energy gain calibration
+Every phase’s fundamental energy calibration should be proceeded individually. Take phase A for example, the sig-
+nal source is: Ua=Ub=Uc=Un,
+Ia=In(Ib), Ib=Ic=0, PF=1.0. The calibration method is as below:
+a. Read the error value ε from the external reference meter;
+b. Calculate the gain;
+c. Write the result to the corresponding gain registers.
+The corresponding fundamental energy gain registers are shown as below:
+Figure-6   Fundamental Energy Metering Calibration Flow
+Address Register Name
+54HP GainAF
+55HP GainBF
+56HP GainCF
+)2 x 1
+-(ary Complement G 15
+ε
+ε
++=ain
+Fundamental Power 
+Offset Calibration
+Fundamental Energy 
+Gain Calibration
+End
+Fundamental Energy 
+Calibration Startup
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+26
+4.3 Calibration in Partial Measurement Mode
+The same measurement modules are used in Partial measurement mode as Normal mode, so no need to do special cali-
+bration for Partial measurement mode.
+4.4 Calibration in Detection Mode
+Current detection is realized by low pow er consumption comparators. The comparator outputs low level when the external
+current is lower than the configured thre shold; The comparator outputs high level when the external current is higher than
+the configured threshold, as shown in Figure-7.
+Figure-7   Current Detection Principle
+4.4.1 Current Detection Module Configuration
+Current detection module can be enabled in Normal mode to facilitate the current detection threshold calibration.
+Six current threshold comparators can be configured for the current detection module to detect positive and negative
+current of three phases. These six threshold comparators can be enabled and disabled by the control bits, as shown below:
+1.DetCalEn: Enable detector calibration in Normal mode;
+0: Detector disable (default)
+1: Detectors enabled
+2.PDN3/2/1: Control bits for negative detector of channel 3/2/1;
+0: Detector enable (default)
+1: Detector disable
+3.PDP3/2/1: Control bits for positive detector of channel 3/2/1;
+0: Detector enable (default)
+1: Detector disable
+Each of the six current threshold comparators has its own register configuration as shown below:
+1.CalCodeN: negative detector threshold, 8-bit width.
+8’b0000-0000 corresponds to minimum threshold Vc=-1.2mV=-0.85mVrms
+8’b1111-1111 corresponds to maximum threshold Vc=9mV=6.35mVrms
+2.CalcodeP: positive detector threshold, definition is the same as CalCodeN.
+Address Register Name Bit15 ~ Bit0
+10H DetectCtrl
+Bit15 Bit14 Bit13 Bit12 Bit11 Bit10 Bit9 Bit8
+------ - -
+Bit7 Bit6 Bit5 Bit4 Bit3 Bit2 Bit1 Bit0
+- DetCalEn PDN3 PDN2 PDN1 PDP3 PDP2 PDP1
+Address Register 
+Name Bit15 ~ Bit0
+11H
+12H
+13H
+DetectTh1 
+DetectTh2 
+DetectTh3
+Bit15 Bit14 Bit13 Bit12 Bit11 Bit10 Bit9 Bit8
+CalCodeN
+Bit7 Bit6 Bit5 Bit4 Bit3 Bit2 Bit1 Bit0
+CalCodeP
+DAC
+Current Input
+Current Threshold IRQ Output
+27M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+4.4.2 Current Detection Threshold Calibration
+Because of the low power consumption consideration and the manufacturing process, the current detection threshold is
+different from different chips. Therefore, calibration is needed  due to the offset of chip’s DAC output (less than ±5mVrms).
+The threshold current range is 2mVrms ~ 4mVrms within wh ich the current detection module (low power consumption
+comparator) can detect accurately. It is recommended to proceed system design according to current detection threshold of
+3mVrms.
+Dichotomy is suggested in current detection threshold calibration. The recommended calibration flow is as shown in Figure-
+8.
+Figure-8   Current Detection Threshold Calibration Flow
+Reference source outputs 
+current signal that needs 
+detection (such as 5%Ib)
+Th_max = 100H
+Th_min = 00H
+Th_temp = 80H
+IRQ0 output high level?
+Y
+Th_max – Th_temp == 1 ?
+Y
+Current detection threshold 
+= Th_temp
+End
+N
+Th_min = Th_temp
+Th_temp = (Th_max – Th_min) / 2 DetectThx = Th_temp
+N
+Th_temp – Th_min == 1 ?
+Current detection threshold 
+= Th_min
+Th_max = Th_temp
+Th_temp = (Th_max – Th_min) / 2
+N
+Y
+Th_max, Th_min, Th_temp: variable
+DetectThx: Threshold register
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+28
+5 FUNCTION REGISTE RS CONFIGURATION
+5.1 Startup Current Configuration
+The registers which related to startup current configuration is shown as below:
+1.Due to system interference when current is 0, small signal may be gernerated in current sampling channel, producing
+a certain amount of energy and affecting the measurem ent and metering accuracy. To avoid this, the M90E32AS
+provides the each-phase startup power configuration/judgment function.
+2.PPhaseTh, QPhaseTh and SPhaseTh are used to judge the startup power of each phase (A/B/C). Take active power
+for example, when a single phase input power is smaller than the configured PPhaseTh value, the input active power
+of that phase will be set to 0 by force, that means input to the next process is 0. Otherwise the signal will be streamed
+to the next process.
+Note that the threshold are configured separately to active(P), reactive(Q) and apparent (S). The compared value is 
+(|P|+|Q|).
+3.PStartTh, QStartTh and SStartTh are used to judge all-phase startup power. Take active power for example, when all-
+phase-sum power is less than the conf igured PStartTh value, energy accumu lation will not start. Otherwise energy
+accumulation will start.
+4.Calculation methods of the two register gr oups are the same. The formula is as below:
+Register value = N / 0.00032, (N is the configured power threshold).
+Address Register Name Description
+35H PStartTh All-phase Active Startup Power Threshold.
+36H QStartTh All-phase Reactive Startup Power Threshold.
+37H SStartTh All-phase Apparent Startup Power Threshold.
+38H PPhaseTh Each-phase Active Startup Power Threshold.
+39H QPhaseTh Each-phase Reactive Startup Power Threshold.
+3AH SPhaseTh Each-phase Apparent Startup Power Threshold.
+Example: Startup Current Configuration
+Assume:
+meter voltage is 220V, current specification 5(100)A, active startup current is 0.1%
+considering the accuracy of current measuremen t in small-current stat e, it is recommended to
+configure the all-phase startup current threshold to  be 50% of startup current (also can configure
+based the actual conditions).
+Assume the startup threshold of each-phase power is configured to be 10% of startup current.
+so:
+All-phase Active Startup Power Threshold = 3 x 5 x 0.1% x 50% x 220 = 1.65W
+Each-phase Active Startup Power Threshold = 5 x 0.1% x 10% x 220 = 0.11W
+register values are:
+PStartTh[35H] = 1.65 / 0.00032 = 5156 = 1424H
+PPhaseTh[38H] = 0.11 / 0.00032 = 344 = 158H
+29M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+Figure-9   Metering Startup Handling
+5.2 Sag Function
+Sag detect function is provided in M90E32AS. The threshol d of sag detection is configured through the SagTh register
+(08H). All three voltage phases use the same threshold. The threshold equation is as below:
+Vth: the voltage threshold to be configured;
+Ugain: the gain after calibration
+0
+1Phase Active 
+Power from DSP
+0 Phase Active 
+Energy Metering
+Power Threshold 
+|P|+|Q|> 
+PPhaseTh?
+0
+1
+0
+0
+1
+Phase Reactive 
+Power from DSP
+0 Phase Reactive 
+Energy Metering
+Power Threshold 
+|P|+|Q|> 
+QPhaseTh?
+0
+1
+0
+0
+1
+Phase Apparent 
+Power from DSP
+0 Phase Apparent 
+Energy Metering
+Power Threshold 
+|P|+|Q|> 
+SPhaseTh?
+0
+1
+0
+Total Active 
+Energy Metering
++
+ABS > 
+PStartTh?
+0
+1
+0Total Active Power
+3 phases
+Total Reactive 
+Energy Metering
++
+ABS > 
+QStartTh?
+0
+1
+0Total Reactive Power
+3 phases
+Total (arithmetic 
+sum) Apparent 
+Energy Metering
++
+ABS > 
+SStartTh?
+0
+1
+0Total Apparent Power
+3 phases
+A/B/C
+A/B/C
+A/B/C
+327682
+2100
+/Ugain
+VthSagTh ×
+××=
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+30
+6 COMPENSATION METHOD
+M90E32AS provids excellent metering accuracy over a dynamic range of 6000:1 and industrial temperature range.
+But in application of power meter, system metering accuracy would be infulenced by the performance difference of periph-
+eral devices. So M90E32AS provides com pensation function for system metering er ror considering the system application
+of power meter.
+M90E32AS provides three compensation functions based on different correspondences:
+1.Current besed Compensation (per phase), it goes to Gain and Phi;
+2.Frequency based compensation(all phases are the same), it goes to Phi;
+3.Temperature based compensation (per phase), it goes to UGain
+6.1 Current Segment Compensation Descriprion
+Irms0Irms1 Log(Irms)
+Delta-Gain 
+(MeterErr)
+Delta-Gain
+GainIrms0GainIrms1GainIrms2
+31M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+1.Irms0 and Irms1 are the current points of segments, through which the whole current range can be divided to three
+segments in calibration; gain and phi use the same current points in segment compensation;
+2.GainIrms0, GainIrms1 and GainIrms2 are gain compensation coefficients for every current segment; Log(Irms) is the
+X axis, and delta-gain value when PF=1.0 is the Y axis value;
+3.PhiIrms0, PhiIrms1 and PhiIrms2 are phi compensation coefficients for every current segment; Log(Irms) is the X axis,
+and delta- phi value when PF=1.0 is the Y axis value.
+Note: Log(X)=Log2(X)*6 in the following description, for example Log(2)=16 and Log(16)=64.
+PhiIrms0PhiIrms1PhiIrms2
+Irms0Irms1 Log(Irms)
+Delta-Phi 
+(MeterErr)
+Delta-Gain
+Delta-Phi
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+32
+6.2 GainIrms Segment Compensation Example
+Per-phase compensation, take phase-A for example:
+1.Irms0=5A
+register value is 5000, Log(Irms0) = Log2(5000)*16 = 197 (=0xC5), that is the LOGIrms0[0x20]register value should 
+be set to 0xC5;
+2.Irms1=0.5A
+register value is 500, Log(Irms1) = Log2(500)*16 = 143 (=0x8F), that is the LOGIrms1[0x21] register value should be 
+0x8F;
+3.GainIrms0
+X axis difference ΔX is: 
+Log(50000) - Log(5000) = Log(50000/5000) = Log(10) = Log2(10)*16 = 53
+Y axis difference ΔY is: 0.3% - 0 = 0.003,
+Then  (Note:  is constant)
+that is IGainAIrms01[0x26, Bit7:0] =-30 (=0xE2) (Note: complement);
+4.GainIrms1
+no compensation
+that is IGainAIrms01[0x26, Bit15:8]=0;
+5.GainIrms2
+difference ΔX is: Log(500) - Log(50) = Log(500/50) = Log(10) = Log2(10)*16 = 53,
+difference ΔY is: 0 - (-0.5%) = 0.005,
+Then (Note:  is constant)
+that is IGainAIrms2[0x27] =-49 (=0xCF)(Note: complement)
+GainIrms0
+GainIrms1
+GainIrms2
+Irms0Irms1
+Log(Irms)
+MeterErr
+5A0.5A
+50A
+GainErr 
+= 0.3%
+0.05A
+GainErr 
+= -0.5%
+3053
+0.0032 = X
+Y  2 1919 −=×−Δ
+Δ×−=onValueCompensati  219
+4953
+0.0052 = X
+Y  2 1919 −=×−Δ
+Δ×−=onValueCompensati  219
+33M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+6.3 PhiIrms Segment Compensation Example
+Per-phase compensation, take phase-A for example:
+1.Irms0=5A
+register value is 5000, Log(Irms0) = Log2(5000)*16 = 197 (=0xC5)
+that is LOGIrms0[0x20] register value should be set to 0xC5
+2.Irms1=0.5A
+register vaue is 500, Log(Irms1) = Log2(500)*16 = 143 (=0x8F)
+that is LOGIrms1[0x21] register value should be set to 0x8F
+3.PhiIrms0
+X axis difference ΔX is:
+Log(50000) - Log(5000) = Log(50000/5000) = Log(10) = Log2(10)*16 = 53,
+Y axis differece ΔY:0.3% - 0 = 0.003,
+then (Note:  is constant),
+that is PhiAIrms01[0x24] Bit7:0=55 (=0x37) (Note: complement);
+4.PhiIrms1
+X axis differenceΔ is:
+Log(5000) - Log(500) = Log(5000/500) = Log(10) = Log2(10)*16 = 53
+Y axis difference ΔY: 0 - (-0.2%) = 0.002,
+then (Note:  is constant),
+that is PhiAIrms01[0x24] Bit15:8=36 (=0x24) (Note: complement);
+5.PhiIrms2
+X axis difference ΔX is: 
+Log(500) - Log(50) = Log(500/50) = Log(10) = Log2(10)*16 = 53,
+Y axix difference ΔY: (-0.2%) - (-0.7%) = 0.005,
+then (Note:  is constant),
+that is PhiAIrms2[0x25] Bit7:0=91 (=0x5A) (Note: complement).
+PhiIrms0
+PhiIrms1
+PhiIrms2
+Irms0Irms1
+Log(Irms)
+MeterErr
+5A0.5A
+50A
+MeterErr 
+= 0.3%
+0.05A
+MeterErr 
+= -0.7%
+MeterErr 
+= -0.2%
+5553
+0.00323764 = X  23764 88 =××Δ
+Δ××= YonValueCompensati  23764 8×
+3653
+0.00223764 = X  23764 88 =××Δ
+Δ××= YonValueCompensati  23764 8×
+9153
+0.00523764 = X
+Y  23764 88 =××Δ
+Δ××=onValueCompensati  23764 8×
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+34
+6.4 Frequency-Phase Compensation (PhiFreqComp)
+Example (all phases use the same compensation):
+1.Assume reference frequency is 50Hz, that means the F0[0x22] register value is set to 5000 (=0x1388);
+2.Assume offset is 0% when 50Hz(P F=0.5L) and 0.1% when 52Hz(PF=0.5L),
+then (Note:  is constant),
+That is PhiFreqComp[0x1C]=-10 (=0xF6)(Note: complement)
+10- = 5000-5200
+0% - 0.1%  2-3764 9 ××=onValueCompensati  23764 9×
+35M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+7 TEMPERATURE COMPENSATION
+The M90E32AS itself embodies good temperature characteri stic. Considering that the external components might be
+affected by temperature in application, the M90E32AS also provides compensation function for external temperature drift.
+A series of special registers should be configured for temp erature compensation. These registers are located in special
+addresses, and access to these registers should be strictly carried out as the following.
+7.1 On-chip Temperature Sensor Configuration
+The M90E32AS provides a built-in temperature sensor. Due to  the manufacturing process, the temperature sensor might
+be somewhat different for different chips. Therefore the on-chip temperature sens or should be configured before tempera-
+ture compensation.
+The configuration method is as below:
+1.Write 55AAH to address 2FFH
+2.Write 5183H to address 216H
+3.Write 01C1H to address 219H
+4.Write 0000H to address 2FFH
+Read the Temp[0FCH] register directly to  get the current temperature after configur ation completed. Please note that, the
+temperature sensor will sense the temperat ure of the chip and it ma y have a few degr ees of difference between the chip
+junction temperature and ambient temperature.
+M90E32AS [Application Note]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+36
+7.2 Temperature Compensati on Based on Ugaint Example
+Test data before temperature compensation is as below:
+After linearization:
+The reference temperature (temperature in calibrating) is 25 ℃ , which means setting the T0[0x23] register value to 25
+(=0x19) (complement), metering error is 0.0000%;
+The error at 85 ℃ point is 0.06%
+So the temperature coefficient is calculated as below:
+then (Note:  is constant),
+That is UGainTA[0x1A,Bit15:8]=-10 (=0xF6)(note: complement)
+105- = 25-85
+0% - 0.6%  -220 ×=onValueCompensati  220
+37M90E32AS [APPLICATION NOTE]
+Atmel-46103A-SE-M90E32AS-ApplicationNote_050514
+7.3 Temperature Compensation Based on Reference Voltage
+On-chip high-precision reference voltage is provided with exce llent low temperature coefficient. But in application, what
+should be considered is the temperature drift of the whole system. Therefore, the M90E32AS specially provides tempera-
+ture compensation based on reference voltage to minimize temperature drift caused by the on-board components.
+Note that, as voltage and current ADC sampling adopt the same reference voltage, compensation on the reference voltage
+will bring double effect on power and energy.
+Temperature compensation on reference voltage is proceeded with every 8 ℃ as a segment. In application, it is suggested
+to test on a small batch of components from the same lot to  get the best temperature compensation coefficient. And then
+use this compensation coefficient as a fixed value to be written directly to register in production.
+The temperature compensation method is as below:
+1.Write 55AAH to address 2FFH
+2.Write the reference voltage coefficient of segment compensation to addresses 202H~209H
+3.Write the curvature of segment compensation curve to address 201H
+4.Write 0000H to address 2FFH
+In normal condition, reference voltage is 1200mV. The unit of reference voltage compensation is 0.020mV in this compen-
+sation method.
+The default value of the corresponding comp ensation registers is the ideal value in chip design. In application, only incre-
+mental adjustment is needed.
+Address Register Name Bit Read/Write Default Value Description
+201H BGCurv eK
+15:4 - - Reserved bit, readout value is 0
+3:0 Read/Write 0
+Reference voltage temperature compensation curve.
+The bit3 is assumed as sign bit, range is -8 to +7. Scaling
+factor = 1+ register value*1/8.
+So the scaling factor will be from 0, with step of 1/8, all the
+way to 1+7/8.
+202H BG_TEMP_P12 15:8 Read/Write 0 Compensation coefficient on the 25℃ temperature point
+7:0 Read/Write 1 Compensation coefficient on the 17 ℃ temperature point
+203H BG_TEMP_P34 15:8 Read/Write 6 Compensation coefficient on the 41 ℃ temperature point
+7:0 Read/Write 2 Compensation coefficient on the 33 ℃ temperature point
+204H BG_TEMP_P56 15:8 Read/Write 25 Compensation coefficient on the 57 ℃ temperature point
+7:0 Read/Write 13 Compensation coefficient on the 49 ℃ temperature point
+205H BG_TEMP_P78 15:8 Read/Write 53 Compensation coefficient on the 73 ℃ temperature point
+7:0 Read/Write 39 Compensation coefficient on the 65 ℃ temperature point
+206H BG_TEMP_N12 15:8 Read/Write 16 Compensation coefficient on the 1 ℃ temperature point
+7:0 Read/Write 6 Compensation coefficient on the 9 ℃ temperature point
+207H BG_TEMP_N34 15:8 Read/Write 54 Compensation coefficient on the -15 ℃ temperature point
+7:0 Read/Write 34 Compensation coefficient on the -7 ℃ temperature point
+208H BG_TEMP_N56 15:8 Read/Write 117 Compensation coefficient on the -31 ℃ temperature point
+7:0 Read/Write 79 Compensation coefficient on the  -23 ℃ temperature point
+209H BG_TEMP_N78 15:8 Read/Write 205 Compensation coefficient on the -47 ℃ temperature point
+7:0 Read/Write 159 Compensation coefficient on the -39 ℃ temperature point
+XX X X
+Revision History
+Doc. Rev. Date Comments
+46103A 5/5/2014 Initial release.
+Atmel Corporation 1600 Technology Drive, San Jose, CA 95110 USA T: (+1)(408) 441.0311 F: (+1)(408) 436.4200 | www.atmel.com
+© 2014 Atmel Corporation. All rights reserved.  /  Rev.: Atmel-46103A-SE-M90E32AS-ApplicationNote_050514.
+Atmel®, Atmel logo and combinations thereof, Enabling Unlimited Possibilities®, and others are registered trademarks or trademarks of Atmel Corporation or its 
+subsidiaries. Other terms and product names may be trademarks of others.
+DISCLAIMER: The information in this document is provided in connec tion with Atmel products. No license, express or implied, by estoppel or otherwise, to any intellectual property right
+is granted by this document or in connection with the sale of Atmel products. EXCEPT AS SET FORTH IN THE ATMEL TERMS AND CONDIT IONS OF SALES LOCATED ON THE
+ATMEL WEBSITE, ATMEL ASSUMES NO LIABILITY WHATSOEVER AND DISCLA IMS ANY EXPRESS, IMPLIED OR STATUTORY WARRANTY RELATING TO ITS P RODUCTS
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTY OF MERCHANTABI LITY, FITNESS FOR A PARTICULAR PURPOSE, OR NON-INFRINGEMENT. IN NO EVENT
+SHALL ATMEL BE LIABLE FOR ANY DIRECT, INDIRECT, CONSEQUENTIAL, PU NITIVE, SPECIAL OR INCIDENTAL DAMAGES (INCLUDING, WITHOUT LIMI TATION, DAMAGES
+FOR LOSS AND PROFITS, BUSINESS INTERRUPTION, OR LOSS OF INFORMATION) ARISING OUT OF THE USE OR INABILITY TO USE THIS DOCUMENT, EVEN IF ATMEL HAS
+BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. Atmel makes no r epresentations or warranties with respect to the accuracy or c ompleteness of the contents of this
+document and reserves the right to make changes to specifications  and products descriptions at any time without notice. Atmel d oes not make any commitment to update the information
+contained herein. Unless specifically prov ided otherwise, Atmel products are not suitable for, and shall not be used in, automo tive applications. Atmel products are not intended,
+authorized, or warranted for use as components in applications intended to support or sustain life. 
+SAFETY-CRITICAL, MILITARY, AND AUTOMOTIVE APPLICATIONS DISCLAIM ER: Atmel products are not designed for and will not be used in connection with any applications where
+the failure of such products would reasonably be expected to result  in significant personal injury  or death (“Safety-Critical A pplications”) without an Atmel officer's specific written
+consent. Safety-Critical Applications include, without limitati on, life support devices and systems, equipment or systems for t he operation of nuclear facilities and weapons systems.
+Atmel products are not designed nor intended for use in military or  aerospace applications or env ironments unless specifically designated by Atmel as military-grade. Atmel products are
+not designed nor intended for use in automotive applications unl ess specifically designated by  Atmel as automotive-grade.

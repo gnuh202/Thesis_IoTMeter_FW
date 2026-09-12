@@ -12,14 +12,15 @@ Thiết bị ESP32-S3 đóng vai trò **Modbus RTU Slave** (đồng hồ đo 3 p
 | -------------- | ----------------- | ----------------------------------------- |
 | Chuẩn vật lý   | RS485 half-duplex | hướng truyền tự động (không cần chân DE/RE) |
 | UART           | UART1             | RX = GPIO13, TX = GPIO14                   |
-| Slave address  | **0xAB (171)**    | cấu hình được qua Holding reg + NVS        |
-| Baud rate      | **9600**          |                                            |
+| Slave address  | **10** (0x0A)     | mặc định từ Kconfig; đổi qua LCD (Settings > RTU Slave), reboot mới có hiệu lực |
+| Baud rate      | **9600**          | mặc định; đổi qua LCD (Settings > RTU Slave), reboot mới có hiệu lực. **Độc lập với bus master** — mỗi link một baud riêng |
 | Data bits      | 8                 |                                            |
-| Parity         | None              |                                            |
+| Parity         | None              | cố định — slave không có cài đặt parity    |
 | Stop bits      | 1                 |                                            |
-| Framing        | **8N1**           |                                            |
+| Framing        | **8N1**           | không đổi được                             |
 
-UART còn lại (RX=GPIO11, TX=GPIO12) dành cho **Modbus Master** — hiện chỉ define khung, chưa thực thi.
+UART còn lại (RX=GPIO11, TX=GPIO12) dành cho **Modbus Master** (đọc công tơ
+downstream qua web portal/LCD RTU Master) — hai link hoạt động độc lập.
 
 ---
 
@@ -177,18 +178,23 @@ Từ PCF8574.
 
 | Addr | Tên               | Kiểu   | R/W | Ghi chú                                            |
 | ---- | ----------------- | ------ | --- | -------------------------------------------------- |
-| 0    | SlaveAddress      | uint16 | RW  | 1..247, mặc định 0xAB                              |
-| 1    | BaudRateCode      | uint16 | RW  | 0=9600,1=19200,2=38400,3=57600,4=115200            |
-| 2    | ParityCode        | uint16 | RW  | 0=None,1=Even,2=Odd                                |
-| 3    | WiringMode        | uint16 | RW  | 0=3P4W, 1=3P3W                                     |
-| 4    | LineFrequencySel  | uint16 | RW  | 0=50Hz, 1=60Hz                                     |
-| 5    | DemandWindowMin   | uint16 | RW  | cửa sổ demand, phút (mặc định 15)                  |
-| 10   | ApplyConfig       | uint16 | W   | ghi 1 = áp dụng cấu hình truyền thông + lưu NVS    |
-| 11   | ResetEnergy       | uint16 | W   | ghi 1 = xóa toàn bộ energy accumulator             |
-| 12   | ResetDemand       | uint16 | W   | ghi 1 = xóa demand + max demand                    |
-| 13   | RebootDevice      | uint16 | W   | ghi 0x5AA5 = reboot thiết bị                       |
+| 0    | WiringMode        | uint16 | RW  | 0=3P4W, 1=3P3W; áp dụng ngay vào energy meter |
+| 1    | LineFrequencySel  | uint16 | RW  | 0=50Hz, 1=60Hz; áp dụng ngay vào energy meter |
+| 2    | DemandWindowMin   | uint16 | RW  | cửa sổ demand; giá trị 0 bị từ chối |
+| 3    | ResetEnergy       | uint16 | W   | ghi khác 0 = xóa toàn bộ energy accumulator |
+| 4    | ResetDemand       | uint16 | W   | ghi khác 0 = xóa demand + max demand |
+| 5    | LastCommand       | uint16 | R   | địa chỉ action gần nhất |
+| 6    | LastResult        | uint16 | R   | 0=success, 1=failed |
+| 7    | RebootDevice      | uint16 | W   | ghi `0x5AA5` = reboot có chủ đích |
 
-> Đổi address/baud/parity chỉ có hiệu lực sau khi ghi `ApplyConfig=1` (tránh mất kết nối giữa chừng).
+> Cấu hình link truyền thông (slave address, baud) **không** nằm trong Holding
+> Register Modbus và cũng **không** chỉnh được qua web portal: hai giá trị này chỉ
+> đổi trên LCD (Settings > RTU Slave), reboot để áp dụng. Parity/stop là hằng số
+> 8N1, không có cài đặt. Baud/parity của bus **master** (UART2, chỉnh trên web
+> portal) là hai tham số hoàn toàn tách biệt — không liên kết với link slave này.
+> Modbus không có lệnh ApplyConfig.
+>
+> HR3, HR4 và HR7 là command one-shot, firmware tự trả chúng về 0 sau khi xử lý. HR5 và HR6 chỉ đọc. Ghi một dải FC16 bao gồm HR5 hoặc HR6 sẽ bị từ chối để tránh ghi đè diagnostics.
 
 ---
 

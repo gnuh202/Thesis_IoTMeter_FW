@@ -6,7 +6,7 @@ Tài liệu bàn giao: phân lớp module, thứ tự khởi động, và ranh g
 
 ## 1. Tổng quan
 
-Đồng hồ đo điện năng 3 pha công nghiệp trên ESP32-S3 (N16R2: 16MB flash, 2MB PSRAM). Lõi đo dùng IC **ATM90E32AS** (SPI). Dữ liệu ra ngoài qua **Modbus RTU** (RS485) và **MQTT** (Ethernet/WiFi). Cấu hình lưu **NVS**, chỉnh runtime qua console.
+Đồng hồ đo điện năng 3 pha công nghiệp trên ESP32-S3 (N16R8: 16MB flash, 8MB OPI PSRAM). Lõi đo dùng IC **ATM90E32AS** (SPI). Dữ liệu ra ngoài qua **Modbus RTU** (RS485) và **MQTT** (Ethernet/WiFi). Cấu hình lưu **NVS**, chỉnh runtime qua console.
 
 Nguyên tắc xuyên suốt: **lõi đo (ATM90 + Modbus RTU) độc lập hoàn toàn với mạng.** Mạng sập, đổi interface, hay đang cấu hình — task đo vẫn chạy.
 
@@ -71,7 +71,7 @@ components/
 ├── atm90e32as/  pcf8574/  i2c_bus/  spi_bus_shared/  sd_card/
 
 docs/                # tài liệu (bạn đang đọc)
-partitions.csv       # bảng phân vùng 16MB (app 3MB + storage)
+partitions.csv       # dual-OTA 16MB (ota_0/ota_1 4MB + NVS 64KB + storage 1MB)
 sdkconfig.defaults   # cấu hình sống qua regenerate (flash, partition, TLS, log level)
 ```
 
