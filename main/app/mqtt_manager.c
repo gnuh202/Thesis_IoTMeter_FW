@@ -28,7 +28,7 @@
 /*
  * MQTT manager skeleton (step 3).
  *
- * Connects to the active broker profile once the network has an IP, sets an LWT,
+ * Connects to the device's single MQTT broker once the network has an IP, sets an LWT,
  * and publishes online/offline status. Telemetry publishing and relay command
  * handling arrive in later steps. Runs entirely in its own task so a stalled or
  * failing broker never blocks the metering core.
@@ -76,7 +76,7 @@ static char s_topic_io[MQTT_TOPIC_MAX];
 static char s_topic_heartbeat[MQTT_TOPIC_MAX];
 static char s_topic_cmd_out0[MQTT_TOPIC_MAX];   /* subscribed: relay out0 control */
 static char s_topic_cmd_out1[MQTT_TOPIC_MAX];   /* subscribed: relay out1 control */
-static char s_active_broker[CONFIG_MANAGER_MQTT_NAME_LEN];  /* name of connected profile, for heartbeat */
+static char s_active_broker[CONFIG_MANAGER_MQTT_NAME_LEN];  /* broker label, for heartbeat */
 
 /*
  * PEM buffers loaded from the filesystem (Feature 13). esp-mqtt keeps the
@@ -114,12 +114,12 @@ static void sanitize_device_id(const char *name, char *out, size_t out_len)
     }
 }
 
-/* Build device identity, client ID and every runtime topic from the active
- * profile. Empty profile fields preserve the runtime defaults that existed
+/* Build device identity, client ID and every runtime topic from the broker
+ * config. Empty fields preserve the runtime defaults that existed
  * before MQTT Apply. */
 static void build_identity(const config_mqtt_profile_t *profile)
 {
-    /* config_manager_t is ~2.2 KB since Feature 12 (mqtt_profiles[3]); heap it
+    /* config_manager_t is ~1.2 KB; heap it
      * rather than putting it on the caller's stack. */
     config_manager_t *cfg = malloc(sizeof(*cfg));
     if (cfg == NULL) {
@@ -289,7 +289,7 @@ static esp_err_t load_pem_file(const char *label, const char *path, char **out)
     *out = NULL;
 
     if (path == NULL || path[0] == '\0') {
-        ESP_LOGE(TAG, "TLS %s: path is empty in the active profile", label);
+        ESP_LOGE(TAG, "TLS %s: path is empty in the broker config", label);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -359,7 +359,7 @@ static void free_tls_pems(void)
 }
 
 /*
- * Apply the profile's tls_mode to the esp-mqtt config (Feature 13).
+ * Apply the broker's tls_mode to the esp-mqtt config (Feature 13).
  *
  *   DISABLE  — nothing to do; the caller already chose the mqtt:// scheme.
  *   CA_ONLY  — verify the broker against the PEM at ca_path.
@@ -388,11 +388,11 @@ static esp_err_t apply_tls_config(const config_mqtt_profile_t *p, esp_mqtt_clien
             cfg->broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
             return ESP_OK;
 #else
-            /* No profile index here to name the exact ca<N>.pem, so point at the
-             * portal section that writes it rather than guessing a path. */
+            /* No cert index to name here, so point at
+             * the portal section that writes the CA file rather than guessing a path. */
             ESP_LOGE(TAG, "TLS CA_ONLY: ca_path is empty and this build has no "
                           "certificate bundle (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE); "
-                          "upload a CA for this profile (portal Certs section, under "
+                          "upload a CA (portal Certs section, under "
                           "%s) or enable the bundle. Refusing to connect.",
                      CERT_STORE_MOUNT_POINT);
             return ESP_ERR_INVALID_STATE;
@@ -449,16 +449,16 @@ static esp_err_t apply_tls_config(const config_mqtt_profile_t *p, esp_mqtt_clien
 #endif
 
     default:
-        ESP_LOGE(TAG, "unknown tls_mode %d in active profile; refusing to connect",
+        ESP_LOGE(TAG, "unknown tls_mode %d in broker config; refusing to connect",
                  (int)p->tls_mode);
         return ESP_ERR_INVALID_ARG;
     }
 }
 
 /*
- * Build the esp-mqtt config from a profile and start the client. Returns
- * ESP_ERR_INVALID_STATE (not a fault) if the profile has no broker to connect to,
- * or an error if the profile's TLS material cannot be loaded.
+ * Build the esp-mqtt config from the broker struct and start the client. Returns
+ * ESP_ERR_INVALID_STATE (not a fault) if no broker host is configured,
+ * or an error if the TLS material cannot be loaded.
  *
  * Feature 13 wires tls_mode to real behaviour: see apply_tls_config(). Only the
  * construction of esp_mqtt_client_config_t changed — the client lifecycle,
@@ -467,7 +467,7 @@ static esp_err_t apply_tls_config(const config_mqtt_profile_t *p, esp_mqtt_clien
 static esp_err_t start_client_for_profile(const config_mqtt_profile_t *p)
 {
     if (strlen(p->broker) == 0) {
-        ESP_LOGW(TAG, "active profile has no broker; MQTT idle until configured");
+        ESP_LOGW(TAG, "no broker host configured; MQTT idle until configured");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -586,9 +586,15 @@ static esp_err_t destroy_current_client(void)
     return ESP_OK;
 }
 
-/* Load the Configuration Manager-level MQTT publish period. It is not a
- * per-profile field, but it belongs to the runtime configuration refreshed by
- * MQTT Apply. */
+/* Load the Configuration Manager-level MQTT publish period. It is not part of
+ * the broker struct, but it belongs to the runtime configuration refreshed by
+ * MQTT Apply.
+ *
+ * config_manager_update() already refuses a period outside 1..60 s, so an
+ * out-of-range value here can only come from a blob written by an older
+ * firmware. The runtime clamps rather than refuses: publishing too fast would
+ * flood the broker, and stopping telemetry entirely would be worse than
+ * publishing at the limit. */
 static esp_err_t reload_publish_period(void)
 {
     config_manager_t *cfg = malloc(sizeof(*cfg));
@@ -598,19 +604,25 @@ static esp_err_t reload_publish_period(void)
 
     esp_err_t ret = config_manager_get(cfg);
     if (ret == ESP_OK) {
-        s_publish_period_ms = cfg->mqtt_publish_ms;
+        uint32_t ms = cfg->mqtt_publish_ms;
+        if (ms < CONFIG_MANAGER_MQTT_PERIOD_MIN_MS) {
+            ms = CONFIG_MANAGER_MQTT_PERIOD_MIN_MS;
+        } else if (ms > CONFIG_MANAGER_MQTT_PERIOD_MAX_MS) {
+            ms = CONFIG_MANAGER_MQTT_PERIOD_MAX_MS;
+        }
+        s_publish_period_ms = ms;
     }
     free(cfg);
     return ret;
 }
 
-/* Feature 14 lifecycle: discard all old esp-mqtt state, read the active RAM
- * profile again, rebuild runtime identity/topics/TLS config, and create a fresh
+/* Feature 14 lifecycle: discard all old esp-mqtt state, read the broker config
+ * from RAM again, rebuild runtime identity/topics/TLS config, and create a fresh
  * client. This function is called only by mqtt_manager_task, which exclusively
  * owns s_client. */
-static esp_err_t recreate_client_from_active_profile(void)
+static esp_err_t apply_mqtt_from_config(void)
 {
-    ESP_LOGI(TAG, "applying active MQTT profile");
+    ESP_LOGI(TAG, "applying MQTT broker config");
 
     esp_err_t ret = destroy_current_client();
     if (ret != ESP_OK) {
@@ -618,10 +630,9 @@ static esp_err_t recreate_client_from_active_profile(void)
     }
 
     config_mqtt_profile_t profile;
-    uint8_t active_index = 0;
-    ret = config_manager_get_active_mqtt_profile(&profile, &active_index);
+    ret = config_manager_get_mqtt(&profile);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "read active MQTT profile failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "read MQTT broker config failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
@@ -635,8 +646,7 @@ static esp_err_t recreate_client_from_active_profile(void)
     strlcpy(s_active_broker, profile.name, sizeof(s_active_broker));
 
     if (!profile.enable) {
-        ESP_LOGI(TAG, "MQTT disabled in active profile %u; client remains OFFLINE",
-                 (unsigned)active_index);
+        ESP_LOGI(TAG, "MQTT disabled in config; client remains OFFLINE");
         return ESP_OK;
     }
 
@@ -644,13 +654,12 @@ static esp_err_t recreate_client_from_active_profile(void)
     if (ret != ESP_OK) {
         s_connected = false;
         system_status_set(SYS_MODULE_MQTT, SYS_STATUS_OFFLINE);
-        ESP_LOGE(TAG, "apply MQTT profile %u failed (%s); MQTT remains OFFLINE",
-                 (unsigned)active_index, esp_err_to_name(ret));
+        ESP_LOGE(TAG, "apply MQTT broker failed (%s); MQTT remains OFFLINE",
+                 esp_err_to_name(ret));
         return ret;
     }
 
-    ESP_LOGI(TAG, "MQTT profile %u applied with a new client",
-             (unsigned)active_index);
+    ESP_LOGI(TAG, "MQTT applied with a new client");
     return ESP_OK;
 }
 
@@ -661,7 +670,7 @@ static void process_apply_request(mqtt_apply_request_t *request)
         return;
     }
 
-    request->result = recreate_client_from_active_profile();
+    request->result = apply_mqtt_from_config();
     xSemaphoreGive(request->done);
 }
 
@@ -812,7 +821,7 @@ static void mqtt_manager_task(void *arg)
     }
 
     if (!runtime_configured) {
-        esp_err_t ret = recreate_client_from_active_profile();
+        esp_err_t ret = apply_mqtt_from_config();
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "initial MQTT client not started (%s); waiting for Apply",
                      esp_err_to_name(ret));

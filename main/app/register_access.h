@@ -107,13 +107,7 @@ typedef enum {
     CFG_DNS,
     CFG_WIFI_SSID,
     CFG_WIFI_PASS,
-    CFG_MQTT_ENABLE,
-    CFG_MQTT_BROKER,
-    CFG_MQTT_PORT,
-    CFG_MQTT_USER,
-    CFG_MQTT_PASS,
-    CFG_MQTT_PUBLISH_MS,
-    CFG_MQTT_CLIENT_ID,      /* reserved */
+    CFG_MQTT_PUBLISH_MS,     /* cfg.mqtt_publish_ms: 1000..60000 (config_manager_update) */
     CFG_MB_SLAVE_ID,         /* this device's own RTU slave address (LCD-owned) */
     CFG_MB_BAUD_CODE,        /* master bus baud only (portal-owned) */
     CFG_MB_PARITY_CODE,      /* master bus parity only (portal-owned) */
@@ -127,25 +121,25 @@ typedef enum {
     CFG_BUZZER_ENABLE,       /* reserved */
     CFG_MB_SLAVE_BAUD,       /* this device's own RTU slave baud (LCD-owned) */
 
-    /* ---- MQTT profiles (Feature 12) ----
-     * CFG_MQTT_ACTIVE_PROFILE selects 0..2. Each of the 12 fields below is
-     * "current profile" — which profile that means depends on the id you write
-     * to CFG_MQTT_ACTIVE_PROFILE first; see register_access.c.
-     * CFG_MQTT_P_PASSWORD / CA_PATH / CERT_PATH / KEY_PATH are write-only:
+    /* ---- MQTT broker (single, cfg.mqtt = config_mqtt_profile_t) ----
+     * The device has exactly one broker, so these address it directly — there
+     * is no profile selector. CFG_MQTT_ENABLE is the flag the MQTT runtime
+     * gates on and the LCD Settings > MQTT toggle writes; the web portal
+     * configures the rest.
+     * CFG_MQTT_PASSWORD / CA_PATH / CERT_PATH / KEY_PATH are write-only:
      * data_point_read() returns ESP_ERR_NOT_SUPPORTED for those four. */
-    CFG_MQTT_ACTIVE_PROFILE,
-    CFG_MQTT_P_ENABLE,
-    CFG_MQTT_P_BROKER,
-    CFG_MQTT_P_PORT,
-    CFG_MQTT_P_USERNAME,
-    CFG_MQTT_P_PASSWORD,        /* write-only */
-    CFG_MQTT_P_CLIENT_ID,
-    CFG_MQTT_P_PUBLISH_TOPIC,
-    CFG_MQTT_P_SUBSCRIBE_TOPIC,
-    CFG_MQTT_P_TLS_MODE,
-    CFG_MQTT_P_CA_PATH,         /* write-only */
-    CFG_MQTT_P_CERT_PATH,       /* write-only */
-    CFG_MQTT_P_KEY_PATH,        /* write-only */
+    CFG_MQTT_ENABLE,
+    CFG_MQTT_BROKER,
+    CFG_MQTT_PORT,
+    CFG_MQTT_USERNAME,
+    CFG_MQTT_PASSWORD,        /* write-only */
+    CFG_MQTT_CLIENT_ID,
+    CFG_MQTT_PUBLISH_TOPIC,
+    CFG_MQTT_SUBSCRIBE_TOPIC,
+    CFG_MQTT_TLS_MODE,
+    CFG_MQTT_CA_PATH,         /* write-only */
+    CFG_MQTT_CERT_PATH,       /* write-only */
+    CFG_MQTT_KEY_PATH,        /* write-only */
 
     /* ---- Digital Input (RO) ---- */
     DI_INPUT0_STATE,

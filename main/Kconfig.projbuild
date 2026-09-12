@@ -615,7 +615,7 @@ menu "Application Configuration"
                     can be exercised before any protocol is wired to it.
 
                     This is measurement scaffolding, not a product feature. It can print
-                    configured passwords (CFG_WIFI_PASS / CFG_MQTT_PASS) in cleartext on
+                    a configured password (CFG_WIFI_PASS) in cleartext on
                     the serial console. Leave off for release builds.
 
         endmenu
@@ -906,17 +906,19 @@ menu "Application Configuration"
             help
                 Build the MQTT telemetry/control client. When disabled, no MQTT
                 task is started. Runtime on/off is controlled separately by the
-                enabled flag in the active broker profile (NVS).
+                enable flag of the device's single broker (NVS), toggled on the
+                LCD under Settings > MQTT.
 
         config APP_MQTT_PUBLISH_PERIOD_MS
             int "Default telemetry publish period ms"
-            range 1000 600000
+            range 1000 60000
             default 5000
             help
                 Default period between telemetry publishes. This is only the
                 first-boot default; the runtime value lives in NVS
-                (config_mqtt_t.publish_period_ms) and can be changed without a
-                rebuild.
+                (config_manager_t.mqtt_publish_ms) and can be changed without a
+                rebuild. Must stay inside the product range (1..60 s) that
+                config_manager_update() enforces on every save.
 
         config APP_MQTT_TASK_STACK_SIZE
             int "MQTT manager task stack size"

@@ -7,9 +7,9 @@ Firmware ESP-IDF cho **đồng hồ đo điện năng 3 pha công nghiệp** tr�
 - **Đo lường 3 pha** (ATM90E32AS qua SPI): điện áp, dòng, công suất P/Q/S, hệ số công suất, tần số, nhiệt độ, năng lượng tích lũy (kWh) và demand. Hiệu chỉnh (calibration) qua console, lưu NVS.
 - **Modbus RTU Slave + Master** trên **hai link UART vật lý tách biệt** (RS485): slave cho SCADA/PLC đọc (địa chỉ + baud cấu hình trên LCD, framing 8N1 cố định), master đọc công tơ ngoài (PM710, EM07K; baud/parity/slots cấu hình trên portal). Hai bên độc lập, đổi một không làm đổi bên kia.
 - **Network stack** — Ethernet W5500 (SPI) + WiFi STA/SoftAP, failover ưu tiên ETH → WiFi STA, gom init hạ tầng tập trung, SoftAP on-demand + auto-AP recovery khi mất hết mạng.
-- **MQTT client** — 3 broker profile lưu NVS (1 active), hỗ trợ TLS, publish telemetry/energy/io/heartbeat (cJSON), LWT online/offline.
+- **MQTT client** — đúng 1 broker lưu NVS, bật/tắt trên LCD (Settings ▸ MQTT), hỗ trợ TLS, publish telemetry/energy/io/heartbeat (cJSON), LWT online/offline, subscribe điều khiển relay.
 - **Web Configuration Portal** — cấu hình mạng/MQTT/RTU master/danh tính thiết bị qua HTTP; mật khẩu là trường chỉ ghi, không bao giờ trả giá trị thật về browser.
-- **Giao diện LCD 20x4 + 5 nút bấm** — menu (Settings, RTU Slave/Master, Alarm Settings, DISPLAY & KEYS), màn home xoay vòng tự động, Sleep màn hình.
+- **Giao diện LCD 20x4 + 5 nút bấm** — menu (Settings, RTU Slave/Master, MQTT, Alarm Settings, DISPLAY & KEYS), màn home xoay vòng tự động, Sleep màn hình.
 - **Console developer** — cổng đăng nhập + các lệnh đọc/ghi thanh ghi IC, hiệu chỉnh đo, cấu hình mạng/MQTT/RTU, chỉnh mức log runtime, `ping` ICMP, kiểm tra data point.
 - **Configuration Manager** — một ảnh cấu hình trong RAM, lưu NVS dạng blob có version (append-only, blob cũ vẫn đọc được), là nguồn duy nhất cho portal / LCD / console / Modbus. `config_store` là tầng ghi đọc NVS phía dưới.
 - **Thẻ SD** — mount FAT, trạng thái hiển thị trên LCD, xuất/nhập file hiệu chỉnh (calib) giữa máy và thẻ.

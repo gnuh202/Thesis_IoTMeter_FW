@@ -23,7 +23,7 @@ Nguồn code: [main/app/mqtt_manager.c](../main/app/mqtt_manager.c).
 
 | Topic | Hướng | QoS | Retain | Chu kỳ |
 |---|---|---|---|---|
-| `pm/<id>/telemetry` | publish | 0 | no  | mỗi `publish_period_ms` (mặc định 5s) |
+| `pm/<id>/telemetry` | publish | 0 | no  | mỗi chu kỳ publish (mặc định 5 s, chỉnh 1–60 s) |
 | `pm/<id>/energy`    | publish | 1 | no  | mỗi chu kỳ |
 | `pm/<id>/io`        | publish | 1 | yes | mỗi chu kỳ + echo sau lệnh relay |
 | `pm/<id>/heartbeat` | publish | 0 | no  | mỗi chu kỳ |
@@ -93,7 +93,7 @@ sau mỗi lệnh relay (echo xác nhận trạng thái thật).
 | `uptime_s` | number | thời gian chạy kể từ boot (giây) |
 | `heap` | number | RAM (heap) còn trống (byte) |
 | `fw_version` | string | phiên bản firmware (từ app descriptor) |
-| `active_broker` | string | tên profile broker đang kết nối |
+| `active_broker` | string | nhãn broker đang kết nối (`cfg.mqtt.name`; giữ tên key `active_broker` cho tương thích consumer) |
 | `iface` | string | interface data-path active: `eth` / `wifi` / `none` |
 | `ip` | string | địa chỉ IP hiện tại |
 
@@ -140,6 +140,8 @@ mosquitto_pub -h <broker> -t "pm/Power_Meter/cmd/out0" -m "{\"state\":\"on\"}"
 
 ## 5. Ghi chú
 
-- Chu kỳ publish (`publish_period_ms`) lưu trong NVS, đổi qua `mqtt-cfg period --period <ms>`
-  (xem [console_commands.md](console_commands.md)); mặc định lần đầu 5000 ms.
+- Chu kỳ publish lưu trong NVS (`cfg.mqtt_publish_ms`, 1000–60000 ms), đổi theo **giây**
+  trên LCD (Settings > MQTT > Period), trên portal (Publish interval), hoặc qua
+  `mqtt-cfg period --period <s>` (RAM only — xem [console_commands.md](console_commands.md));
+  mặc định lần đầu 5000 ms.
 - Toàn bộ JSON build bằng cJSON. Khi thêm/sửa field, cập nhật **doc này** đồng thời với code.

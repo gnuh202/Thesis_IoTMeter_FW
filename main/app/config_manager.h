@@ -29,20 +29,22 @@ extern "C" {
 #define CONFIG_MANAGER_IP_LEN 16
 #define CONFIG_MANAGER_SSID_LEN 33
 #define CONFIG_MANAGER_PASS_LEN 65
-#define CONFIG_MANAGER_URI_LEN 128
-#define CONFIG_MANAGER_USER_LEN 33
-#define CONFIG_MANAGER_CLIENT_ID_LEN 64
 #define CONFIG_MANAGER_VERSION_LEN 24
 
-/* ---- MQTT profiles (Feature 12) ---- */
-#define CONFIG_MANAGER_MQTT_PROFILE_COUNT 3
+/* ---- MQTT broker (single) ---- */
 #define CONFIG_MANAGER_MQTT_BROKER_LEN 64
 #define CONFIG_MANAGER_MQTT_USER_LEN 32
 #define CONFIG_MANAGER_MQTT_PASS_LEN 64
 #define CONFIG_MANAGER_MQTT_CLIENT_ID_LEN 64
 #define CONFIG_MANAGER_MQTT_TOPIC_LEN 64
 #define CONFIG_MANAGER_MQTT_PATH_LEN 64
-#define CONFIG_MANAGER_MQTT_NAME_LEN 32   /* profile label (Feature 12A) */
+#define CONFIG_MANAGER_MQTT_NAME_LEN 32   /* broker label */
+
+/* Telemetry publish period bounds, in milliseconds (1..60 s). One broker means
+ * one interval, and both frontends express it in seconds, so the range is
+ * enforced centrally in config_manager_update() rather than per-frontend. */
+#define CONFIG_MANAGER_MQTT_PERIOD_MIN_MS 1000U
+#define CONFIG_MANAGER_MQTT_PERIOD_MAX_MS 60000U
 
 /* RTU master multi-device slots (PM710 / EM-07K on one RS485 bus). */
 #define CONFIG_MANAGER_MB_SLOT_COUNT 8
@@ -55,8 +57,11 @@ extern "C" {
  *   3 -> + mb_slots[] multi-device RTU master
  *   4 -> CT params: ct_ratio=NCT, + i_rated_a / i_expected_a (R_BURDEN is Kconfig)
  *   5 -> + pga (1/2/4): system-owned current PGA; not stored in calib blob
- *   6 -> + SoftAP SSID/password for config portal (runtime, not Kconfig-only) */
-#define CONFIG_MANAGER_VERSION 6
+ *   6 -> + SoftAP SSID/password for config portal (runtime, not Kconfig-only)
+ *   7 -> single MQTT broker: mqtt_profiles[]/mqtt_active_profile and the
+ *        duplicate legacy scalars are gone. Pre-7 blobs are rejected; NVS is
+ *        re-provisioned from defaults (the product is not shipped yet). */
+#define CONFIG_MANAGER_VERSION 7
 
 /*
  * One downstream Modbus RTU meter on the shared master bus.
@@ -83,8 +88,10 @@ typedef enum {
 } mqtt_tls_mode_t;
 
 /*
- * One MQTT broker profile. The device keeps CONFIG_MANAGER_MQTT_PROFILE_COUNT of
- * them and one index (mqtt_active_profile) selects which is current.
+ * The device's ONE MQTT broker: connection parameters, credentials, TLS mode
+ * and the certificate paths it uses. enable gates whether the MQTT runtime
+ * connects at all; it is changed on the LCD (Settings > MQTT), never on the
+ * web portal.
  *
  * Certificates are referenced by PATH only — the PEM contents are never held in
  * this snapshot. Whoever eventually opens the TLS session reads the files at
@@ -97,16 +104,14 @@ typedef enum {
 typedef struct {
     bool enable;
 
-    /* Human-readable label, e.g. "Mosquitto local" (Feature 12A: the MQTT
-     * runtime publishes it as "active_broker" in the heartbeat). */
+    /* Human-readable label, e.g. "Mosquitto local". The MQTT runtime publishes
+     * it as "active_broker" in the heartbeat. */
     char name[CONFIG_MANAGER_MQTT_NAME_LEN];
 
     char broker[CONFIG_MANAGER_MQTT_BROKER_LEN];
     uint16_t port;
 
-    /* MQTT keepalive in seconds (Feature 12A). Per-profile here; the legacy
-     * config_store blob keeps one value shared across profiles, so a load
-     * copies that same value into every profile. */
+    /* MQTT keepalive in seconds (Feature 12A). */
     uint16_t keepalive_s;
 
     char username[CONFIG_MANAGER_MQTT_USER_LEN];
@@ -148,24 +153,13 @@ typedef struct {
     char ap_ssid[CONFIG_MANAGER_SSID_LEN];
     char ap_pass[CONFIG_MANAGER_PASS_LEN];
 
-    /* ---- MQTT (single, legacy compatibility view) ----
-     * Retained for older Configuration Manager callers. Feature 15 persists this
-     * view alongside the complete profiles, while MQTT Runtime reads only
-     * mqtt_profiles[mqtt_active_profile]. */
-    bool mqtt_enable;
-    char mqtt_broker[CONFIG_MANAGER_URI_LEN];
-    uint16_t mqtt_port;
-    char mqtt_user[CONFIG_MANAGER_USER_LEN];
-    char mqtt_pass[CONFIG_MANAGER_PASS_LEN];
+    /* ---- MQTT ----
+     * Exactly one broker, configured on the web portal and switched on/off on
+     * the LCD. mqtt_publish_ms is deliberately outside the broker struct: it is
+     * a runtime cadence, not part of how the device identifies itself to the
+     * broker, and mqtt_manager refreshes it independently of the broker. */
+    config_mqtt_profile_t mqtt;
     uint32_t mqtt_publish_ms;
-    char mqtt_client_id[CONFIG_MANAGER_CLIENT_ID_LEN];  /* RESERVED: legacy view; full snapshot persists it */
-
-    /* ---- MQTT profiles (Feature 12) ----
-     * Extended view: three complete profiles plus TLS mode/certificate paths.
-     * This is the MQTT Runtime's source of truth; Feature 15 persists it in the
-     * full Configuration Manager snapshot. */
-    config_mqtt_profile_t mqtt_profiles[CONFIG_MANAGER_MQTT_PROFILE_COUNT];
-    uint8_t mqtt_active_profile;
 
     /* ---- Modbus RTU: two independent links on two physical UARTs ----
      * SLAVE (this device, UART1): mb_slave_id + mb_slave_baud_code. Edited only
@@ -235,15 +229,14 @@ esp_err_t config_manager_init(void);
 esp_err_t config_manager_get(config_manager_t *out);
 
 /*
- * Copy out mqtt_profiles[mqtt_active_profile] — the single MQTT config the
- * runtime (mqtt_manager, web_portal, console_task) should read (Feature 12A).
- * Thread-safe. On success, out->mqtt_active_profile is not part of *out (out
- * is a config_mqtt_profile_t, not config_manager_t); active_index, if
- * non-NULL, receives which slot was copied.
+ * Copy out the device's single MQTT broker config (the same struct
+ * config_apply/mqtt_manager consume). Thread-safe, and cheaper for a caller
+ * than config_manager_get() because it copies only this struct instead of the
+ * whole snapshot — several callers run on small task stacks.
  * Returns whatever config_manager_get() would (ESP_ERR_INVALID_STATE before
  * the first load, ESP_ERR_INVALID_ARG if out is NULL).
  */
-esp_err_t config_manager_get_active_mqtt_profile(config_mqtt_profile_t *out, uint8_t *active_index);
+esp_err_t config_manager_get_mqtt(config_mqtt_profile_t *out);
 
 /* Replace the RAM snapshot (thread-safe). Does not write NVS, apply, or notify. */
 esp_err_t config_manager_update(const config_manager_t *in);

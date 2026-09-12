@@ -16,14 +16,10 @@ extern "C" {
  * content is ever written to NVS: NVS only ever holds the *paths*, inside the
  * Configuration Manager snapshot.
  *
- * Files are per MQTT profile, because the three profiles are independent brokers
- * that generally do not share a CA — pointing them all at one ca.pem would mean
- * switching profiles silently re-used the wrong CA. Each profile owns a
- * ca/cert/key triple named by its index:
+ * Files are named by slot plus a profile index, and the device's single MQTT
+ * broker always uses index 0:
  *
- *   profile 0 -> /flash/ca0.pem  /flash/cert0.pem  /flash/key0.pem
- *   profile 1 -> /flash/ca1.pem  /flash/cert1.pem  /flash/key1.pem
- *   profile 2 -> /flash/ca2.pem  /flash/cert2.pem  /flash/key2.pem
+ *   broker (index 0) -> /flash/ca0.pem  /flash/cert0.pem  /flash/key0.pem
  *
  * The names stay inside 8.3 because this project sets CONFIG_FATFS_LFN_NONE.
  *
@@ -40,8 +36,10 @@ extern "C" {
  * this module accepts can always be loaded back. */
 #define CERT_STORE_PEM_MAX 8192
 
-/* Must match CONFIG_MANAGER_MQTT_PROFILE_COUNT; cert_store.c asserts that. */
-#define CERT_STORE_PROFILE_COUNT 3
+/* The device has one MQTT broker, so the store holds one ca/cert/key triple at
+ * index 0. The index is kept as a parameter throughout the API so this module
+ * does not have to change if a second broker is ever wanted. */
+#define CERT_STORE_PROFILE_COUNT 1
 
 /* Longest path this module produces, e.g. "/flash/cert0.pem". */
 #define CERT_STORE_PATH_MAX 24

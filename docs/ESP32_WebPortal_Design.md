@@ -1,10 +1,10 @@
 # Thiết kế Web Configuration Portal (ESP32-S3, ESP-IDF)
 
-> Trạng thái: **BẢN THIẾT KẾ để review**. Chưa code. `[QUYẾT ĐỊNH]` = đã chốt, `[TODO-SAU]` = pha sau.
+> Trạng thái: **đã triển khai** trong `main/app/web_portal.c`. Phần còn lại là ghi chú thiết kế + `[TODO-SAU]`.
 
 ## 1. Mục tiêu
 
-Trang cấu hình chạy trên trình duyệt, thay cho console `net-cfg`/`mqtt-cfg` khi cần cấu hình tại hiện trường mà không cắm dây serial. Nhập được cả những thứ console khó nhập — đặc biệt **CA cert dài** (textarea thay cho một dòng console).
+Trang cấu hình chạy trên trình duyệt, thay cho console `net-cfg`/`mqtt-cfg` khi cần cấu hình tại hiện trường mà không cắm dây serial. Nhập được cả những thứ console khó nhập — đặc biệt **chứng chỉ TLS**, upload thành file qua `/api/cert` thay cho một dòng console.
 
 ## 2. Quyết định đã chốt
 
@@ -35,10 +35,11 @@ Tái dùng `config_store` (đã có sẵn, không thêm struct):
 - WiFi STA SSID / password
 - (hiển thị) mode, eth_dhcp — `[TODO-SAU]` cho sửa static IP
 
-**MQTT** (`config_mqtt_t`, 3 profiles):
-- Chọn profile active (0..2)
-- Mỗi profile: name, uri, port, username, password, tls_enable, use_custom_ca, **ca_cert (textarea)** ← đây là thứ console không nhập được
-- enabled, keepalive, publish_period_ms
+**MQTT** (`cfg.mqtt` — đúng MỘT broker, không còn danh sách profile):
+- Label, server address, port, username, password, keepalive
+- Connection security (`off` / `ca` / `mutual`) + 3 file chứng chỉ upload qua `/api/cert`
+- Publish interval nhập theo **giây** (1–60), lưu `mqtt_publish_ms`
+- **Không có control bật/tắt MQTT** — flag `mqtt.enable` thuộc về LCD (Settings ▸ MQTT); portal không parse nó nên một lần Save không bao giờ tự bật/tắt telemetry sau lưng operator
 
 **System** (`config_system_t`):
 - device_name (ảnh hưởng topic MQTT + client_id)
@@ -62,7 +63,7 @@ Tái dùng `config_store` (đã có sẵn, không thêm struct):
 | `/` | GET | trang cấu hình, 1 form duy nhất (sau khi auth) |
 | `/login` | GET/POST | trang đăng nhập, cấp session cookie |
 | `/save` | POST | lưu toàn bộ cấu hình text rồi khởi động lại để áp dụng |
-| `/api/cert?slot=ca\|cert\|key&profile=0..2` | POST | upload PEM cho 1 slot của 1 profile MQTT; thêm `&api=1` để nhận lại dòng trạng thái (không redirect) |
+| `/api/cert?slot=ca\|cert\|key&profile=0` | POST | upload PEM cho 1 slot certificate store của broker (`profile` ngoài `0` bị từ chối, không clamp); thêm `&api=1` để nhận lại dòng trạng thái (không redirect) |
 | `/api/cert/delete?slot=..&profile=..` | POST | xoá file của slot đó (`&api=1` tương tự) |
 | `/api/cert` | GET | trạng thái tất cả slot: có/không + size + fingerprint ngắn |
 | `/reboot` | POST | khởi động lại (giữ lại cho curl/script) |
@@ -72,21 +73,32 @@ Tái dùng `config_store` (đã có sẵn, không thêm struct):
 `Power Meter Setting`). Tài liệu này viết tiếng Việt nhưng khi trích tên nút/mục thì dùng đúng
 chuỗi tiếng Anh đang hiển thị.
 
-Trang `/` chia làm 2 mục theo *nơi dùng*, không theo domain NVS:
+Trang `/` chia các mục theo *nơi dùng*, không theo domain NVS — điều hướng `.nav` ở đầu trang
+neo tới từng `<section>`:
 
-- **Device & network** — tên thiết bị, SSID/mật khẩu WiFi.
-- **MQTT servers** — máy chủ đang dùng, chu kỳ gửi, rồi 3 khối gập/mở "Server 1..3". Mỗi
-  khối chứa *toàn bộ* thông tin của máy chủ đó: label, địa chỉ, cổng, tài khoản, thời
-  gian giữ kết nối, mức bảo mật, **và 3 file chứng chỉ của chính nó**.
+- **Device & network** — tên thiết bị, SSID/mật khẩu WiFi, SSID/mật khẩu portal AP. Một
+  `.row` duy nhất trên lưới 2 cột: Device name `wide` đứng 1 mình một hàng; WiFi name + WiFi
+  password cạnh nhau; AP name + AP password cạnh nhau. **Không còn tiêu đề phụ
+  "Config Portal AP"** — label từng field đã tự giải thích, và một `.row` mới sẽ làm auto-placement
+  mồ côi nửa hàng. Hai ô password đều half-width nên chữ mờ (placeholder) do
+  `send_secret_input` sinh ra hiển thị giống hệt nhau.
+- **MQTT** — đúng một broker, show trực tiếp trong section (không card gập, không Add/Remove):
+  label, chu kỳ gửi theo giây, địa chỉ server (`wide`), cổng, keep-alive, tài khoản, mật khẩu,
+  mức bảo mật, **và 3 file chứng chỉ của chính nó**. Kèm một dòng chữ mờ nói rõ bật/tắt MQTT
+  làm trên LCD: Settings → MQTT → Status.
+- **RTU master** — baud/parity bus và danh sách công tơ downstream; địa chỉ + baud slave của
+  thiết bị nằm ở LCD chứ không phải đây.
+- **Calibration** — chỉ tồn tại khi build bật `CONFIG_APP_WEB_CALIB_ENABLE` (default `n`);
+  sản phẩm không có mục này.
 
 Trang chỉ hiển thị thứ người dùng **làm được gì với nó**. Chế độ mạng (`AUTO/ETH_ONLY/...`) và
 "IP lấy tự động" đã bỏ: đọc xong cũng không sửa được ở đây, và là từ ngữ kỹ thuật nội bộ. Câu
 hướng dẫn "sửa rồi bấm Save" ở đầu trang cũng bỏ: nút nằm ngay cuối trang, không cần dặn. Trạng
-thái bật/tắt MQTT là *state* nên nằm ngay cạnh tiêu đề "MQTT servers" dạng tag có chấm màu
-(`.tag.on` = `Enabled` / `.tag.off` = `Disabled`), không phải một câu văn bên dưới.
+thái bật/tắt MQTT **không** hiển thị ở đây nữa — nó là *state* do LCD sở hữu, portal chỉ ghi cấu
+hình broker; một `.tag` trạng thái cạnh tiêu đề sẽ gợi rằng bấm được từ web nên đã bỏ hẳn.
 
 Toàn bộ input text thuộc **một** `<form id="cfg">` nằm ở mục "Save changes"; các input được gắn
-vào form qua thuộc tính HTML5 `form="cfg"` nên vẫn hiển thị bên trong khối máy chủ mà không tạo
+vào form qua thuộc tính HTML5 `form="cfg"` nên vẫn hiển thị bên trong section của chúng mà không tạo
 form lồng nhau (HTML không cho phép). Nhờ vậy mỗi slot chứng chỉ vẫn là một `multipart/form-data`
 riêng, còn **một** nút duy nhất cuối trang (`Save and restart`) phụ trách mọi ô text. Chỉ một
 nút vì hầu như không field nào áp được live — lưu mà không reboot chỉ trông như đã có hiệu lực.

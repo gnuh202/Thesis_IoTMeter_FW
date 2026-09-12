@@ -115,6 +115,11 @@ kiểu `enum system_status_state_t`
 Nguồn: `config_manager_t` (`main/app/config_manager.h`), facade trên
 `config_store` (NVS). Consumer đọc/ghi qua Configuration Manager.
 
+Thiết bị có **đúng một broker MQTT** — không còn profile selector. `CFG_MQTT_*`
+trỏ thẳng vào broker đó. Bốn điểm `CFG_MQTT_PASSWORD`, `CFG_MQTT_CA_PATH`,
+`CFG_MQTT_CERT_PATH`, `CFG_MQTT_KEY_PATH` là **write-only**: `data_point_read()`
+trả `ESP_ERR_NOT_SUPPORTED` (trước đây `dp read` in mật khẩu plaintext ra console).
+
 | ID                    | Name                 | Description                             | Data Type   | Unit | Access | Source Module   | Ghi chú                                    |
 |-----------------------|----------------------|-----------------------------------------|-------------|------|--------|-----------------|--------------------------------------------|
 | CFG_VERSION           | config_version       | Phiên bản schema cấu hình               | uint32      | -    | RO     | config_manager  | Dùng cho nâng cấp firmware                 |
@@ -128,24 +133,41 @@ Nguồn: `config_manager_t` (`main/app/config_manager.h`), facade trên
 | CFG_DNS               | dns                  | Máy chủ DNS                             | string[16]  | -    | RW     | config_manager  |                                            |
 | CFG_WIFI_SSID         | wifi_ssid            | WiFi SSID                               | string[33]  | -    | RW     | config_manager  |                                            |
 | CFG_WIFI_PASS         | wifi_pass            | WiFi password                           | string[65]  | -    | RW     | config_manager  | Nhạy cảm — không phơi bày khi chỉ đọc      |
-| CFG_MQTT_ENABLE       | mqtt_enable          | Bật MQTT client                         | bool        | -    | RW     | config_manager  |                                            |
-| CFG_MQTT_BROKER       | mqtt_broker          | Địa chỉ broker (host)                   | string[128] | -    | RW     | config_manager  |                                            |
-| CFG_MQTT_PORT         | mqtt_port            | Cổng broker                             | uint16      | -    | RW     | config_manager  |                                            |
-| CFG_MQTT_USER         | mqtt_user            | MQTT username                           | string[33]  | -    | RW     | config_manager  |                                            |
-| CFG_MQTT_PASS         | mqtt_pass            | MQTT password                           | string[65]  | -    | RW     | config_manager  | Nhạy cảm — không phơi bày khi chỉ đọc      |
-| CFG_MQTT_PUBLISH_MS   | mqtt_publish_ms      | Chu kỳ publish telemetry                | uint32      | ms   | RW     | config_manager  |                                            |
-| CFG_MQTT_CLIENT_ID    | mqtt_client_id       | MQTT client ID                          | string[64]  | -    | RW     | config_manager  | **Reserved** — sinh runtime, chưa persist  |
+| CFG_MQTT_PUBLISH_MS   | mqtt_publish_ms      | Chu kỳ publish telemetry                | uint32      | ms   | RW     | config_manager  | 1000..60000; chỉnh theo **giây** trên LCD (Settings > MQTT) và portal |
 | CFG_MB_SLAVE_ID       | mb_slave_id          | Địa chỉ Modbus slave (của thiết bị)     | uint8       | -    | RW     | config_manager  | Link UART1 lên SCADA; **chỉ chỉnh trên LCD** (Settings > RTU Slave) |
 | CFG_MB_BAUD_CODE      | mb_baud_code         | Mã baudrate (0=9600…4=115200)           | uint8       | -    | RW     | config_manager  | **Bus master** (UART2) — không liên kết baud slave |
 | CFG_MB_PARITY_CODE    | mb_parity_code       | Mã parity (0=none,1=even,2=odd)         | uint8       | -    | RW     | config_manager  | **Bus master** (UART2); slave cố định 8N1   |
 | CFG_MB_STOP_BITS      | mb_stop_bits         | Số stop bit                             | uint8       | -    | RW     | config_manager  | **Reserved** — chưa có field trong fw      |
 | CFG_LINE_FREQ         | line_freq            | Tần số lưới (mirror calib; 0=50Hz,1=60Hz) | uint8       | -    | RO     | config_manager  | Chỉ set qua console/Kconfig + meter NVS   |
+| CFG_WIRING_MODE       | wiring_mode          | Sơ đồ đấu nối (0=3P4W,1=3P3W)           | uint8       | -    | RO     | config_manager  | energy_meter là nguồn; portal chỉ hiển thị |
 | CFG_CT_RATIO          | ct_ratio             | Tỉ số biến dòng (CT)                     | uint16      | -    | RW     | config_manager  | **Reserved** — ẩn trong gain               |
 | CFG_PT_RATIO          | pt_ratio             | Tỉ số biến áp (PT)                       | uint16      | -    | RW     | config_manager  | **Reserved**                               |
 | CFG_LCD_BACKLIGHT     | lcd_backlight        | Đèn nền LCD                             | bool        | -    | RW     | config_manager  | **Reserved** — chưa persist-apply          |
 | CFG_LCD_SLEEP_TIMEOUT_S| lcd_sleep_timeout_s | Thời gian tự tắt màn hình               | uint32      | s    | RW     | config_manager  | **Reserved** — chưa triển khai             |
 | CFG_BUZZER_ENABLE     | buzzer_enable        | Bật còi báo                             | bool        | -    | RW     | config_manager  | **Reserved** — hiện là Kconfig compile-time|
 | CFG_MB_SLAVE_BAUD     | mb_slave_baud_code   | Mã baud link slave (0=9600…4=115200)    | uint8       | -    | RW     | config_manager  | Link UART1 của thiết bị; **chỉ chỉnh trên LCD**, độc lập bus master |
+
+### 4b. MQTT broker (đúng một broker, `cfg.mqtt`)
+
+Block riêng nằm sau `CFG_MB_SLAVE_BAUD`; field là thành viên của
+`config_mqtt_profile_t`. `name` và `keepalive_s` **không** có điểm dữ liệu riêng
+(qua portal/console). Bật/tắt MQTT theo sản phẩm làm trên **LCD**
+(Settings > MQTT > Status); `CFG_MQTT_ENABLE` tồn tại để console/dev ghi trực tiếp.
+
+| ID                       | Name             | Description                          | Data Type   | Unit | Access | Source Module   | Ghi chú                                   |
+|--------------------------|------------------|--------------------------------------|-------------|------|--------|-----------------|-------------------------------------------|
+| CFG_MQTT_ENABLE          | mqtt.enable      | Bật MQTT client                      | bool        | -    | RW     | config_manager  | Sản phẩm bật/tắt qua LCD                  |
+| CFG_MQTT_BROKER          | mqtt.broker      | Địa chỉ broker (host, không scheme)  | string[64]  | -    | RW     | config_manager  |                                           |
+| CFG_MQTT_PORT            | mqtt.port        | Cổng broker                          | uint16      | -    | RW     | config_manager  |                                           |
+| CFG_MQTT_USERNAME        | mqtt.username    | MQTT username                        | string[32]  | -    | RW     | config_manager  |                                           |
+| CFG_MQTT_PASSWORD        | mqtt.password    | MQTT password                        | string[64]  | -    | WO     | config_manager  | **Write-only** — read trả NOT_SUPPORTED   |
+| CFG_MQTT_CLIENT_ID       | mqtt.client_id   | MQTT client ID                       | string[64]  | -    | RW     | config_manager  | Empty = sinh từ device ID lúc runtime     |
+| CFG_MQTT_PUBLISH_TOPIC   | mqtt.publish_topic | Base topic publish                 | string[64]  | -    | RW     | config_manager  | Empty = `pm/<id>`                         |
+| CFG_MQTT_SUBSCRIBE_TOPIC | mqtt.subscribe_topic | Base topic subscribe             | string[64]  | -    | RW     | config_manager  | Empty = `pm/<id>`                         |
+| CFG_MQTT_TLS_MODE        | mqtt.tls_mode    | Chế độ TLS (0=off,1=ca,2=mutual,3=insecure) | uint8 | - | RW    | config_manager  | Marshal 1 byte, không phải size of enum   |
+| CFG_MQTT_CA_PATH         | mqtt.ca_path     | Đường dẫn CA PEM                     | string[64]  | -    | WO     | config_manager  | **Write-only**; portal tự bind theo slot  |
+| CFG_MQTT_CERT_PATH       | mqtt.cert_path   | Đường dẫn client cert PEM            | string[64]  | -    | WO     | config_manager  | **Write-only**                            |
+| CFG_MQTT_KEY_PATH        | mqtt.key_path    | Đường dẫn private key PEM            | string[64]  | -    | WO     | config_manager  | **Write-only**                            |
 
 ---
 
@@ -176,19 +198,23 @@ qua `io_expander_get_outN()` (chân OUT của PCF8574 là write-only).
 
 ## Tổng kết
 
-### Tổng số Data Point: **80**
+### Tổng số Data Point: **87**
 
 | Nhóm             | Prefix    | Số điểm dữ liệu | Reserved |
 |------------------|-----------|-----------------|----------|
 | 1. Measurement   | `MEAS_`   | 33              | 4        |
 | 2. Energy        | `ENERGY_` | 5               | 1        |
 | 3. System Status | `SYS_`    | 9               | 0        |
-| 4. Configuration | `CFG_`    | 29              | 7        |
+| 4. Configuration | `CFG_`    | 36              | 6        |
 | 5. Digital Input | `DI_`     | 2               | 0        |
 | 6. Digital Output| `DO_`     | 2               | 0        |
-| **Tổng**         |           | **80**          | **12**   |
+| **Tổng**         |           | **87**          | **11**   |
 
-### Các trường còn Reserved (12)
+Cấu hình là một enum liên tục `CFG_VERSION … CFG_MB_SLAVE_BAUD` (24 điểm) rồi tới
+block broker `CFG_MQTT_ENABLE … CFG_MQTT_KEY_PATH` (12 điểm). `DATA_POINT_ID_COUNT`
+chỉ là sentinel đếm số điểm, không phải một data point.
+
+### Các trường còn Reserved (11)
 
 Field đã có chỗ trong struct nhưng chưa có nguồn phần cứng/driver; hiện giữ
 giá trị 0/default cho tới khi có nguồn thật.
@@ -196,7 +222,7 @@ giá trị 0/default cho tới khi có nguồn thật.
 - **Measurement (4)**: `MEAS_VOLTAGE_THD`, `MEAS_CURRENT_THD`, `MEAS_TEMP_MCU`,
   `MEAS_TEMP_RESERVED`
 - **Energy (1)**: `ENERGY_APPARENT`
-- **Configuration (7)**: `CFG_MQTT_CLIENT_ID`, `CFG_MB_STOP_BITS`, `CFG_CT_RATIO`,
+- **Configuration (6)**: `CFG_MB_STOP_BITS`, `CFG_CT_RATIO`,
   `CFG_PT_RATIO`, `CFG_LCD_BACKLIGHT`, `CFG_LCD_SLEEP_TIMEOUT_S`,
   `CFG_BUZZER_ENABLE`
 

@@ -2,7 +2,9 @@
 
 Firmware có một **developer console** (esp_console qua USB serial/JTAG). Sau khi bật nguồn, console yêu cầu đăng nhập (nếu `CONFIG_APP_CONSOLE_AUTH_ENABLE`), rồi cho phép gõ các lệnh dưới đây.
 
-> Tất cả cấu hình do các lệnh này lưu đều nằm trong **NVS** và **sống qua reboot**. Nhiều thay đổi network/MQTT cần **reboot mới áp dụng** (ghi rõ ở từng lệnh).
+> Cấu hình lưu qua NVS thì **sống qua reboot**. Ngoại lệ: `mqtt-cfg` chỉ sửa RAM — cần
+> `cfg-save` để xuống NVS (ghi rõ ở từng lệnh). Đường áp dụng runtime (`cfg-apply`) được ghi
+> chú ở cuối tài liệu.
 
 ---
 
@@ -120,46 +122,49 @@ SSID có dấu cách phải bọc trong dấu nháy kép.
 
 ---
 
-## 5. `mqtt-cfg` — cấu hình MQTT (3 broker profile)
+## 5. `mqtt-cfg` — cấu hình MQTT (một broker duy nhất)
 
 ```
 mqtt-cfg show
-mqtt-cfg set --idx <0..2> [--name <n>] [--uri <host>] [--port <n>] [--user <u>] [--pass <p>]
-mqtt-cfg active --idx <0..2>
+mqtt-cfg set [--name <n>] [--uri <host>] [--port <n>] [--user <u>] [--pass <p>] [--tls <mode>]
 mqtt-cfg enable | disable
-mqtt-cfg period --period <ms>
+mqtt-cfg period --period <s>
 ```
 
 | Subcommand | Việc |
 |---|---|
-| `show` | in enabled/active/keepalive/period + cả 3 profile (profile active đánh dấu `*`) |
-| `set --idx <n> ...` | đặt các trường của profile `n` (chỉ trường có truyền vào) |
-| `active --idx <n>` | chọn profile active |
-| `enable` / `disable` | bật/tắt MQTT client |
-| `period --period <ms>` | chu kỳ publish telemetry |
+| `show` | in broker duy nhất (enable/name/host/port/keepalive/user/pass/tls_mode), `publish_period=<s>`, và trạng thái certificate store |
+| `set ...` | đặt từng trường của broker (chỉ trường có truyền vào) |
+| `enable` / `disable` | bật/tắt MQTT client — đường sản phẩm là **LCD** (Settings > MQTT > Status); lệnh này dành cho dev |
+| `period --period <s>` | chu kỳ publish telemetry, tính theo **giây**, chặn ngoài khoảng **1..60** |
 
 Cờ cho `set`:
 
 | Cờ | Ý nghĩa |
 |---|---|
-| `--idx <0..2>` | chỉ số profile (bắt buộc với `set`/`active`) |
-| `--name <n>` | nhãn profile |
+| `--name <n>` | nhãn broker (lên heartbeat `active_broker`) |
 | `--uri <host>` | host broker, **không kèm scheme** (vd `192.168.1.10`, không phải `mqtt://...`) |
 | `--port <n>` | cổng, vd `1883` (thường) / `8883` (TLS) |
 | `--user <u>` | username broker |
 | `--pass <p>` | password broker |
+| `--tls <mode>` | `off`\|`ca`\|`mutual`\|`insecure`; tự điền đường dẫn certificate theo slot `/flash` của broker (`ca0/cert0/key0.pem`) |
 
-**Mọi thay đổi `mqtt-cfg` cần reboot mới áp dụng** (task MQTT đọc config một lần lúc khởi động).
+Mật khẩu không bao giờ in ra `show` — chỉ `(set)` hoặc `(empty)`.
 
-Ví dụ:
+**`mqtt-cfg` chỉ sửa RAM** (thông báo `RAM only, not persisted`). Để thay đổi có hiệu lực thật:
+
+- `cfg-save` → xuống NVS (sống qua reboot), và
+- `cfg-apply mqtt` → MQTT client đọc lại config và rebuild ngay, **không cần reboot**
+  (hoặc reboot cũng được).
+
+Ví dụ đầy đủ:
 ```
-mqtt-cfg set --idx 0 --name "Local" --uri 192.168.1.10 --port 1883
-mqtt-cfg active --idx 0
+mqtt-cfg set --name "Local" --uri 192.168.1.10 --port 1883
 mqtt-cfg enable
-# reboot
+mqtt-cfg period --period 5
+cfg-save
+cfg-apply mqtt
 ```
-
-> TLS/custom-CA chưa cấu hình được qua console (CA PEM quá dài cho một dòng lệnh) — xem [mqtt_guide.md](mqtt_guide.md) mục ghi chú TLS/TODO.
 
 ---
 
@@ -258,6 +263,8 @@ Mã thoát: `0` nếu nhận được ít nhất một gói trả lời, `1` n�
 |---|---|
 | `net-cfg sta` | ngay (đẩy vào driver) — dùng ở failover kế tiếp |
 | `net-cfg ap` | ngay |
-| `mqtt-cfg *` | **cần reboot** |
+| `mqtt-cfg *` | RAM only; `cfg-save` để xuống NVS, `cfg-apply mqtt` để chạy ngay không reboot |
+| `cfg-save` | ghi NVS toàn bộ snapshot RAM (không tự áp dụng gì) |
+| `cfg-apply [domain]` | áp domain vào runtime; `mqtt` rebuild client bất đồng bộ |
 | `meter-cal save` | ghi NVS ngay; `apply` áp xuống chip ngay |
 | `log` | ngay (chỉ hiệu lực tới khi reboot — không lưu NVS) |

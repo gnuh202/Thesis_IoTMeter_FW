@@ -689,7 +689,7 @@ static int cmd_net_cfg(int argc, char **argv)
     const char *sub = s_netcfg_args.sub->sval[0];
 
     /* "ap" is a runtime action, not configuration — handle it before paying for
-     * the 2.2 KB snapshot. */
+     * the ~1.2 KB snapshot. */
     if (strcmp(sub, "ap") == 0) {
         const char *arg = s_netcfg_args.arg->count ? s_netcfg_args.arg->sval[0] : NULL;
         if (arg == NULL || (strcmp(arg, "on") != 0 && strcmp(arg, "off") != 0)) {
@@ -711,7 +711,7 @@ static int cmd_net_cfg(int argc, char **argv)
 
     /* Network config now reads/writes through the Configuration Manager, the
      * same source the Ethernet driver and web portal use. config_manager_t is
-     * ~2.2 KB; keep it off the console task stack. */
+     * ~1.2 KB; keep it off the console task stack. */
     config_manager_t *cfg = malloc(sizeof(*cfg));
     if (cfg == NULL) {
         printf("no memory for network config\n");
@@ -762,20 +762,19 @@ static int cmd_net_cfg(int argc, char **argv)
     return rc;
 }
 
-/* mqtt-cfg: view / set MQTT broker profiles via the Configuration Manager
- * (Feature 12A — config_manager is now the single source of truth for MQTT
+/* mqtt-cfg: view / set the device's single MQTT broker via the Configuration
+ * Manager (Feature 12A — config_manager is now the single source of truth for MQTT
  * config; this command no longer touches config_store directly).
  *
  * RAM-only: every "set"-like subcommand below calls config_manager_update()
  * and nothing else — no NVS save, no apply, no reconnect. mqtt_manager reads
- * its active profile once at task start (before the network is even up), so
+ * its broker once at task start (before the network is even up), so
  * a RAM-only edit here has no live effect on a running connection either way;
  * this matches Feature 12A's "KHÔNG Apply / KHÔNG reconnect / KHÔNG Save NVS"
  * constraints exactly. TLS/custom-CA entry stays deferred (a future TLS
  * Runtime feature), same as before this migration. */
 static struct {
     struct arg_str *sub;
-    struct arg_int *idx;
     struct arg_str *name;
     struct arg_str *uri;
     struct arg_int *port;
@@ -789,7 +788,7 @@ static struct {
 /* mqtt-cfg set --tls <mode>. The certificate paths themselves are not options:
  * for MUTUAL they are filled in from the certificate store's fixed /flash slots,
  * which is where the Web upload API writes. A caller that really needs a custom
- * path still has dp write CFG_MQTT_P_CA_PATH and friends. */
+ * path still has dp write CFG_MQTT_CA_PATH and friends. */
 static bool parse_tls_mode(const char *name, mqtt_tls_mode_t *out)
 {
     if (strcmp(name, "off") == 0 || strcmp(name, "disable") == 0) {
@@ -816,8 +815,8 @@ static int cmd_mqtt_cfg(int argc, char **argv)
 
     const char *sub = s_mqttcfg_args.sub->sval[0];
 
-    /* config_manager_t is ~2.2 KB since Feature 12 (mqtt_profiles[3]); keep it
-     * off the console task stack. */
+    /* config_manager_t is ~1.2 KB (one MQTT broker since the profile array went
+     * away); keep it off the console task stack. */
     config_manager_t *cfg = malloc(sizeof(*cfg));
     if (cfg == NULL) {
         printf("no memory for mqtt config\n");
@@ -833,38 +832,32 @@ static int cmd_mqtt_cfg(int argc, char **argv)
     int rc = 0;
 
     if (strcmp(sub, "show") == 0) {
-        printf("active_profile=%u publish_period_ms=%u\n",
-               (unsigned)cfg->mqtt_active_profile, (unsigned)cfg->mqtt_publish_ms);
-        for (int i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT; i++) {
-            const config_mqtt_profile_t *p = &cfg->mqtt_profiles[i];
-            printf("[%d]%s enable=%d name=\"%s\" broker=\"%s\" port=%u keepalive=%us user=\"%s\" pass=%s tls_mode=%d\n",
-                   i, i == cfg->mqtt_active_profile ? "*" : " ",
-                   p->enable, p->name, p->broker, (unsigned)p->port, (unsigned)p->keepalive_s,
-                   p->username, strlen(p->password) ? "(set)" : "(empty)", (int)p->tls_mode);
-            /* Paths only, and only whether a file is there — never any PEM
-             * content, for either the certificates or the private key. */
-            if (p->tls_mode != MQTT_TLS_DISABLE) {
-                printf("     ca=%s cert=%s key=%s\n",
-                       p->ca_path[0] ? p->ca_path : "(cert bundle)",
-                       p->cert_path[0] ? p->cert_path : "(none)",
-                       p->key_path[0] ? p->key_path : "(none)");
-            }
+        const config_mqtt_profile_t *p = &cfg->mqtt;
+        printf("enable=%d name=\"%s\" broker=\"%s\" port=%u keepalive=%us user=\"%s\" pass=%s tls_mode=%d\n",
+               p->enable, p->name, p->broker, (unsigned)p->port, (unsigned)p->keepalive_s,
+               p->username, strlen(p->password) ? "(set)" : "(empty)", (int)p->tls_mode);
+        printf("publish_period=%us\n", (unsigned)(cfg->mqtt_publish_ms / 1000U));
+        /* Paths only, and only whether a file is there — never any PEM
+         * content, for either the certificates or the private key. */
+        if (p->tls_mode != MQTT_TLS_DISABLE) {
+            printf("ca=%s cert=%s key=%s\n",
+                   p->ca_path[0] ? p->ca_path : "(cert bundle)",
+                   p->cert_path[0] ? p->cert_path : "(none)",
+                   p->key_path[0] ? p->key_path : "(none)");
         }
         if (cert_store_ready()) {
-            /* One line per profile: each profile owns its own ca/cert/key files, so
-             * a single combined line could not say which broker a file belongs to. */
-            for (int prof = 0; prof < CERT_STORE_PROFILE_COUNT; prof++) {
-                printf("cert store [%d]:", prof);
-                for (int i = 0; i < CERT_SLOT_COUNT; i++) {
-                    cert_slot_info_t info;
-                    if (cert_store_stat(prof, (cert_slot_t)i, &info) != ESP_OK) {
-                        continue;
-                    }
-                    printf(" %s=%s", cert_store_slot_name((cert_slot_t)i),
-                           info.present ? info.fingerprint : "absent");
+            /* The broker owns the single certificate-store index, so one line
+             * covers every slot. */
+            printf("cert store:");
+            for (int i = 0; i < CERT_SLOT_COUNT; i++) {
+                cert_slot_info_t info;
+                if (cert_store_stat(0, (cert_slot_t)i, &info) != ESP_OK) {
+                    continue;
                 }
-                printf("\n");
+                printf(" %s=%s", cert_store_slot_name((cert_slot_t)i),
+                       info.present ? info.fingerprint : "absent");
             }
+            printf("\n");
         } else {
             printf("cert store %s: not mounted\n", CERT_STORE_MOUNT_POINT);
         }
@@ -873,18 +866,7 @@ static int cmd_mqtt_cfg(int argc, char **argv)
     }
 
     if (strcmp(sub, "set") == 0) {
-        if (s_mqttcfg_args.idx->count == 0) {
-            printf("set requires --idx <0..%d>\n", CONFIG_MANAGER_MQTT_PROFILE_COUNT - 1);
-            free(cfg);
-            return 1;
-        }
-        int idx = s_mqttcfg_args.idx->ival[0];
-        if (idx < 0 || idx >= CONFIG_MANAGER_MQTT_PROFILE_COUNT) {
-            printf("idx out of range (0..%d)\n", CONFIG_MANAGER_MQTT_PROFILE_COUNT - 1);
-            free(cfg);
-            return 1;
-        }
-        config_mqtt_profile_t *p = &cfg->mqtt_profiles[idx];
+        config_mqtt_profile_t *p = &cfg->mqtt;
         if (s_mqttcfg_args.name->count) strlcpy(p->name, s_mqttcfg_args.name->sval[0], sizeof(p->name));
         if (s_mqttcfg_args.uri->count)  strlcpy(p->broker, s_mqttcfg_args.uri->sval[0], sizeof(p->broker));
         if (s_mqttcfg_args.port->count) p->port = (uint16_t)s_mqttcfg_args.port->ival[0];
@@ -898,8 +880,8 @@ static int cmd_mqtt_cfg(int argc, char **argv)
                 return 1;
             }
             p->tls_mode = mode;
-            /* Point the profile at *its own* certificate store slots — the files the
-             * Web upload API writes for this same idx. CA_ONLY deliberately leaves
+            /* Point the broker at the certificate store slots — the files the
+             * Web upload API writes. CA_ONLY deliberately leaves
              * ca_path empty so the built-in certificate bundle is used unless an
              * explicit CA is uploaded; if one is present on /flash, prefer it.
              * MUTUAL needs all three files. */
@@ -909,63 +891,55 @@ static int cmd_mqtt_cfg(int argc, char **argv)
             p->key_path[0] = '\0';
             if (mode == MQTT_TLS_CA_ONLY || mode == MQTT_TLS_MUTUAL) {
                 cert_slot_info_t info;
-                bool have_ca = cert_store_stat(idx, CERT_SLOT_CA, &info) == ESP_OK && info.present;
+                bool have_ca = cert_store_stat(0, CERT_SLOT_CA, &info) == ESP_OK && info.present;
                 if (have_ca || mode == MQTT_TLS_MUTUAL) {
-                    strlcpy(p->ca_path, cert_store_slot_path(idx, CERT_SLOT_CA, path, sizeof(path)),
+                    strlcpy(p->ca_path, cert_store_slot_path(0, CERT_SLOT_CA, path, sizeof(path)),
                             sizeof(p->ca_path));
                 }
             }
             if (mode == MQTT_TLS_MUTUAL) {
-                strlcpy(p->cert_path, cert_store_slot_path(idx, CERT_SLOT_CERT, path, sizeof(path)),
+                strlcpy(p->cert_path, cert_store_slot_path(0, CERT_SLOT_CERT, path, sizeof(path)),
                         sizeof(p->cert_path));
-                strlcpy(p->key_path, cert_store_slot_path(idx, CERT_SLOT_KEY, path, sizeof(path)),
+                strlcpy(p->key_path, cert_store_slot_path(0, CERT_SLOT_KEY, path, sizeof(path)),
                         sizeof(p->key_path));
             }
         }
 
         ret = config_manager_update(cfg);
-        printf("profile %d updated: %s (RAM only, not persisted)\n", idx, esp_err_to_name(ret));
-        rc = ret == ESP_OK ? 0 : 1;
-    } else if (strcmp(sub, "active") == 0) {
-        if (s_mqttcfg_args.idx->count == 0) {
-            printf("active requires --idx <0..%d>\n", CONFIG_MANAGER_MQTT_PROFILE_COUNT - 1);
-            free(cfg);
-            return 1;
-        }
-        int idx = s_mqttcfg_args.idx->ival[0];
-        if (idx < 0 || idx >= CONFIG_MANAGER_MQTT_PROFILE_COUNT) {
-            printf("idx out of range (0..%d)\n", CONFIG_MANAGER_MQTT_PROFILE_COUNT - 1);
-            free(cfg);
-            return 1;
-        }
-        cfg->mqtt_active_profile = (uint8_t)idx;
-        ret = config_manager_update(cfg);
-        printf("active profile = %d: %s (RAM only, not persisted)\n", idx, esp_err_to_name(ret));
+        printf("broker updated: %s (RAM only, not persisted)\n", esp_err_to_name(ret));
         rc = ret == ESP_OK ? 0 : 1;
     } else if (strcmp(sub, "enable") == 0 || strcmp(sub, "disable") == 0) {
-        /* Targets the active profile's own enable flag — that is what
-         * mqtt_manager now reads (config_mqtt_profile_t.enable), not the
-         * legacy single mqtt_enable field. */
-        uint8_t idx = (cfg->mqtt_active_profile < CONFIG_MANAGER_MQTT_PROFILE_COUNT)
-                      ? cfg->mqtt_active_profile : 0;
-        cfg->mqtt_profiles[idx].enable = (strcmp(sub, "enable") == 0);
+        /* The product path for this switch is the LCD (Settings > MQTT); the
+         * console variant lets a developer bring MQTT up without the panel.
+         * Both write config_mqtt_profile_t.enable, which is what mqtt_manager
+         * reads — there is no separate legacy mqtt_enable field anymore. */
+        cfg->mqtt.enable = (strcmp(sub, "enable") == 0);
         ret = config_manager_update(cfg);
-        printf("mqtt (profile %u) %s: %s (RAM only, not persisted)\n", (unsigned)idx,
-               cfg->mqtt_profiles[idx].enable ? "enabled" : "disabled", esp_err_to_name(ret));
+        printf("mqtt %s: %s (RAM only, not persisted)\n",
+               cfg->mqtt.enable ? "enabled" : "disabled", esp_err_to_name(ret));
         rc = ret == ESP_OK ? 0 : 1;
     } else if (strcmp(sub, "period") == 0) {
         if (s_mqttcfg_args.period->count == 0) {
-            printf("period requires --period <ms>\n");
+            printf("period requires --period <s>\n");
             free(cfg);
             return 1;
         }
-        cfg->mqtt_publish_ms = (uint32_t)s_mqttcfg_args.period->ival[0];
+        int period_s = s_mqttcfg_args.period->ival[0];
+        /* Checked here as well as in config_manager_update() so the console
+         * reports the unit it actually accepts: seconds. */
+        if (period_s < (int)(CONFIG_MANAGER_MQTT_PERIOD_MIN_MS / 1000U) ||
+            period_s > (int)(CONFIG_MANAGER_MQTT_PERIOD_MAX_MS / 1000U)) {
+            printf("period out of range (1..60 seconds)\n");
+            free(cfg);
+            return 1;
+        }
+        cfg->mqtt_publish_ms = (uint32_t)period_s * 1000U;
         ret = config_manager_update(cfg);
-        printf("publish period = %ums: %s (RAM only, not persisted)\n",
-               (unsigned)cfg->mqtt_publish_ms, esp_err_to_name(ret));
+        printf("publish period = %us: %s (RAM only, not persisted)\n",
+               (unsigned)period_s, esp_err_to_name(ret));
         rc = ret == ESP_OK ? 0 : 1;
     } else {
-        printf("unknown mqtt-cfg subcommand '%s' (show|set|active|enable|disable|period)\n", sub);
+        printf("unknown mqtt-cfg subcommand '%s' (show|set|enable|disable|period)\n", sub);
         rc = 1;
     }
 
@@ -1643,7 +1617,8 @@ static int cmd_ext_meter(int argc, char **argv)
  * Calls data_point_read()/data_point_write() straight from the console so the
  * CFG_* mapping can be exercised before any protocol is wired to the Data Point
  * Layer. Test scaffolding, not a product feature: gated on CONFIG_APP_DP_DEBUG,
- * and it prints CFG_WIFI_PASS / CFG_MQTT_PASS in cleartext.
+ * and it prints a readable secret field (CFG_WIFI_PASS) in cleartext — the MQTT
+ * password and cert paths are write-only, so "dp read" cannot expose those.
  */
 typedef enum {
     DP_KIND_STR,
@@ -1675,18 +1650,24 @@ static const dp_entry_t s_dp_table[] = {
     { "CFG_DNS",                 CFG_DNS,                 DP_KIND_STR,  CONFIG_MANAGER_IP_LEN },
     { "CFG_WIFI_SSID",           CFG_WIFI_SSID,           DP_KIND_STR,  CONFIG_MANAGER_SSID_LEN },
     { "CFG_WIFI_PASS",           CFG_WIFI_PASS,           DP_KIND_STR,  CONFIG_MANAGER_PASS_LEN },
-    { "CFG_MQTT_ENABLE",         CFG_MQTT_ENABLE,         DP_KIND_BOOL, sizeof(bool) },
-    { "CFG_MQTT_BROKER",         CFG_MQTT_BROKER,         DP_KIND_STR,  CONFIG_MANAGER_URI_LEN },
-    { "CFG_MQTT_PORT",           CFG_MQTT_PORT,           DP_KIND_U16,  2 },
-    { "CFG_MQTT_USER",           CFG_MQTT_USER,           DP_KIND_STR,  CONFIG_MANAGER_USER_LEN },
-    { "CFG_MQTT_PASS",           CFG_MQTT_PASS,           DP_KIND_STR,  CONFIG_MANAGER_PASS_LEN },
-    { "CFG_MQTT_PUBLISH_MS",     CFG_MQTT_PUBLISH_MS,     DP_KIND_U32,  4 },
-    { "CFG_MQTT_CLIENT_ID",      CFG_MQTT_CLIENT_ID,      DP_KIND_STR,  CONFIG_MANAGER_CLIENT_ID_LEN },
-    /* MQTT broker profiles (Feature 12 data points).
+    { "CFG_MQTT_PUBLISH_MS",     CFG_MQTT_PUBLISH_MS,     DP_KIND_U32,  4 },  /* 1000..60000 */
+    { "CFG_MB_SLAVE_ID",         CFG_MB_SLAVE_ID,         DP_KIND_U8,   1 },  /* this device's own slave addr (LCD-owned) */
+    { "CFG_MB_BAUD_CODE",        CFG_MB_BAUD_CODE,        DP_KIND_U8,   1 },  /* master bus only */
+    { "CFG_MB_PARITY_CODE",      CFG_MB_PARITY_CODE,      DP_KIND_U8,   1 },  /* master bus only */
+    { "CFG_MB_STOP_BITS",        CFG_MB_STOP_BITS,        DP_KIND_U8,   1 },
+    { "CFG_LINE_FREQ",           CFG_LINE_FREQ,           DP_KIND_U8,   1 },
+    { "CFG_WIRING_MODE",         CFG_WIRING_MODE,         DP_KIND_U8,   1 },
+    { "CFG_CT_RATIO",            CFG_CT_RATIO,            DP_KIND_U16,  2 },
+    { "CFG_PT_RATIO",            CFG_PT_RATIO,            DP_KIND_U16,  2 },
+    { "CFG_LCD_BACKLIGHT",       CFG_LCD_BACKLIGHT,       DP_KIND_BOOL, sizeof(bool) },
+    { "CFG_LCD_SLEEP_TIMEOUT_S", CFG_LCD_SLEEP_TIMEOUT_S, DP_KIND_U32,  4 },
+    { "CFG_BUZZER_ENABLE",       CFG_BUZZER_ENABLE,       DP_KIND_BOOL, sizeof(bool) },
+    { "CFG_MB_SLAVE_BAUD",       CFG_MB_SLAVE_BAUD,       DP_KIND_U8,   1 },  /* slave link baud (LCD-owned) */
+    /* The device's single MQTT broker (cfg.mqtt).
      *
-     * CFG_MQTT_ACTIVE_PROFILE is the selector: the twelve CFG_MQTT_P_* ids below
-     * always address mqtt_profiles[CFG_MQTT_ACTIVE_PROFILE], so write the
-     * selector first when targeting a profile other than the current one.
+     * There is no profile selector: these ids address the one broker directly.
+     * ENABLE is the flag the MQTT runtime gates on and the LCD Settings > MQTT
+     * toggle writes.
      *
      * PASSWORD / CA_PATH / CERT_PATH / KEY_PATH are write-only by design — a
      * "dp read" on those returns ESP_ERR_NOT_SUPPORTED and that is a pass, not a
@@ -1696,30 +1677,18 @@ static const dp_entry_t s_dp_table[] = {
      * Layer marshals against; a mismatch here shows up as ESP_ERR_INVALID_SIZE
      * rather than a bad write. TLS_MODE is a 1-byte wire enum
      * (0=DISABLE 1=CA_ONLY 2=MUTUAL 3=INSECURE). */
-    { "CFG_MQTT_ACTIVE_PROFILE", CFG_MQTT_ACTIVE_PROFILE, DP_KIND_U8,   1 },
-    { "CFG_MQTT_P_ENABLE",       CFG_MQTT_P_ENABLE,       DP_KIND_BOOL, sizeof(bool) },
-    { "CFG_MQTT_P_BROKER",       CFG_MQTT_P_BROKER,       DP_KIND_STR,  CONFIG_MANAGER_MQTT_BROKER_LEN },
-    { "CFG_MQTT_P_PORT",         CFG_MQTT_P_PORT,         DP_KIND_U16,  2 },
-    { "CFG_MQTT_P_USERNAME",     CFG_MQTT_P_USERNAME,     DP_KIND_STR,  CONFIG_MANAGER_MQTT_USER_LEN },
-    { "CFG_MQTT_P_PASSWORD",     CFG_MQTT_P_PASSWORD,     DP_KIND_STR,  CONFIG_MANAGER_MQTT_PASS_LEN },
-    { "CFG_MQTT_P_CLIENT_ID",    CFG_MQTT_P_CLIENT_ID,    DP_KIND_STR,  CONFIG_MANAGER_MQTT_CLIENT_ID_LEN },
-    { "CFG_MQTT_P_PUBLISH_TOPIC",   CFG_MQTT_P_PUBLISH_TOPIC,   DP_KIND_STR, CONFIG_MANAGER_MQTT_TOPIC_LEN },
-    { "CFG_MQTT_P_SUBSCRIBE_TOPIC", CFG_MQTT_P_SUBSCRIBE_TOPIC, DP_KIND_STR, CONFIG_MANAGER_MQTT_TOPIC_LEN },
-    { "CFG_MQTT_P_TLS_MODE",     CFG_MQTT_P_TLS_MODE,     DP_KIND_U8,   1 },
-    { "CFG_MQTT_P_CA_PATH",      CFG_MQTT_P_CA_PATH,      DP_KIND_STR,  CONFIG_MANAGER_MQTT_PATH_LEN },
-    { "CFG_MQTT_P_CERT_PATH",    CFG_MQTT_P_CERT_PATH,    DP_KIND_STR,  CONFIG_MANAGER_MQTT_PATH_LEN },
-    { "CFG_MQTT_P_KEY_PATH",     CFG_MQTT_P_KEY_PATH,     DP_KIND_STR,  CONFIG_MANAGER_MQTT_PATH_LEN },
-    { "CFG_MB_SLAVE_ID",         CFG_MB_SLAVE_ID,         DP_KIND_U8,   1 },  /* this device's own slave addr (LCD-owned) */
-    { "CFG_MB_BAUD_CODE",        CFG_MB_BAUD_CODE,        DP_KIND_U8,   1 },  /* master bus only */
-    { "CFG_MB_PARITY_CODE",      CFG_MB_PARITY_CODE,      DP_KIND_U8,   1 },  /* master bus only */
-    { "CFG_MB_STOP_BITS",        CFG_MB_STOP_BITS,        DP_KIND_U8,   1 },
-    { "CFG_LINE_FREQ",           CFG_LINE_FREQ,           DP_KIND_U8,   1 },
-    { "CFG_CT_RATIO",            CFG_CT_RATIO,            DP_KIND_U16,  2 },
-    { "CFG_PT_RATIO",            CFG_PT_RATIO,            DP_KIND_U16,  2 },
-    { "CFG_LCD_BACKLIGHT",       CFG_LCD_BACKLIGHT,       DP_KIND_BOOL, sizeof(bool) },
-    { "CFG_LCD_SLEEP_TIMEOUT_S", CFG_LCD_SLEEP_TIMEOUT_S, DP_KIND_U32,  4 },
-    { "CFG_BUZZER_ENABLE",       CFG_BUZZER_ENABLE,       DP_KIND_BOOL, sizeof(bool) },
-    { "CFG_MB_SLAVE_BAUD",       CFG_MB_SLAVE_BAUD,       DP_KIND_U8,   1 },  /* slave link baud (LCD-owned) */
+    { "CFG_MQTT_ENABLE",         CFG_MQTT_ENABLE,         DP_KIND_BOOL, sizeof(bool) },
+    { "CFG_MQTT_BROKER",         CFG_MQTT_BROKER,         DP_KIND_STR,  CONFIG_MANAGER_MQTT_BROKER_LEN },
+    { "CFG_MQTT_PORT",           CFG_MQTT_PORT,           DP_KIND_U16,  2 },
+    { "CFG_MQTT_USERNAME",       CFG_MQTT_USERNAME,       DP_KIND_STR,  CONFIG_MANAGER_MQTT_USER_LEN },
+    { "CFG_MQTT_PASSWORD",       CFG_MQTT_PASSWORD,       DP_KIND_STR,  CONFIG_MANAGER_MQTT_PASS_LEN },
+    { "CFG_MQTT_CLIENT_ID",      CFG_MQTT_CLIENT_ID,      DP_KIND_STR,  CONFIG_MANAGER_MQTT_CLIENT_ID_LEN },
+    { "CFG_MQTT_PUBLISH_TOPIC",  CFG_MQTT_PUBLISH_TOPIC,  DP_KIND_STR,  CONFIG_MANAGER_MQTT_TOPIC_LEN },
+    { "CFG_MQTT_SUBSCRIBE_TOPIC", CFG_MQTT_SUBSCRIBE_TOPIC, DP_KIND_STR, CONFIG_MANAGER_MQTT_TOPIC_LEN },
+    { "CFG_MQTT_TLS_MODE",       CFG_MQTT_TLS_MODE,       DP_KIND_U8,   1 },
+    { "CFG_MQTT_CA_PATH",        CFG_MQTT_CA_PATH,        DP_KIND_STR,  CONFIG_MANAGER_MQTT_PATH_LEN },
+    { "CFG_MQTT_CERT_PATH",      CFG_MQTT_CERT_PATH,      DP_KIND_STR,  CONFIG_MANAGER_MQTT_PATH_LEN },
+    { "CFG_MQTT_KEY_PATH",       CFG_MQTT_KEY_PATH,       DP_KIND_STR,  CONFIG_MANAGER_MQTT_PATH_LEN },
     /* A few non-CFG points, for the regression checks. */
     { "MEAS_VOLTAGE_L1",         MEAS_VOLTAGE_L1,         DP_KIND_F32,  4 },
     { "MEAS_VALID",              MEAS_VALID,              DP_KIND_U8,   1 },
@@ -1807,7 +1776,7 @@ static int cmd_dp(int argc, char **argv)
     const char *op = s_dp_args.op->sval[0];
 
     if (strcmp(op, "list") == 0) {
-        /* 28 wide: the longest name is CFG_MQTT_P_SUBSCRIBE_TOPIC (26). */
+        /* 28 wide: the longest name is CFG_MQTT_SUBSCRIBE_TOPIC (24). */
         printf("%-28s %4s %5s\n", "NAME", "ID", "SIZE");
         for (size_t i = 0; i < DP_TABLE_COUNT; i++) {
             printf("%-28s %4d %5u\n", s_dp_table[i].name, (int)s_dp_table[i].id,
@@ -2045,19 +2014,18 @@ static esp_err_t register_meter_commands(void)
     };
     ESP_RETURN_ON_ERROR(esp_console_cmd_register(&extmeter_cmd), TAG, "register ext-meter failed");
 
-    s_mqttcfg_args.sub = arg_str1(NULL, NULL, "<show|set|active|enable|disable|period>", "mqtt config subcommand");
-    s_mqttcfg_args.idx = arg_int0(NULL, "idx", "<0..2>", "profile index (set/active)");
-    s_mqttcfg_args.name = arg_str0(NULL, "name", "<name>", "profile label (set)");
+    s_mqttcfg_args.sub = arg_str1(NULL, NULL, "<show|set|enable|disable|period>", "mqtt config subcommand");
+    s_mqttcfg_args.name = arg_str0(NULL, "name", "<name>", "broker label (set)");
     s_mqttcfg_args.uri = arg_str0(NULL, "uri", "<host>", "broker host, no scheme (set)");
     s_mqttcfg_args.port = arg_int0(NULL, "port", "<n>", "broker port, e.g. 1883 (set)");
     s_mqttcfg_args.user = arg_str0(NULL, "user", "<user>", "broker username (set)");
     s_mqttcfg_args.pass = arg_str0(NULL, "pass", "<pass>", "broker password (set)");
-    s_mqttcfg_args.period = arg_int0(NULL, "period", "<ms>", "publish period ms (period)");
+    s_mqttcfg_args.period = arg_int0(NULL, "period", "<s>", "publish period in seconds, 1..60 (period)");
     s_mqttcfg_args.tls = arg_str0(NULL, "tls", "<mode>", "off|ca|mutual|insecure (set); fills the /flash cert paths");
     s_mqttcfg_args.end = arg_end(10);
     const esp_console_cmd_t mqttcfg_cmd = {
         .command = "mqtt-cfg",
-        .help = "MQTT config: mqtt-cfg show | set --idx 0 --uri <h> --port 8883 [--user --pass --tls ca] | active --idx 0 | enable | disable | period --period <ms>",
+        .help = "MQTT config: mqtt-cfg show | set --uri <h> --port 8883 [--user --pass --tls ca] | enable | disable | period --period <1..60 s>",
         .hint = NULL,
         .func = &cmd_mqtt_cfg,
         .argtable = &s_mqttcfg_args,

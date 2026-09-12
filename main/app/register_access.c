@@ -180,13 +180,7 @@ static const cfg_field_t *cfg_field(data_point_id_t id)
         [CFG_DNS - CFG_VERSION]                 = CFG_FIELD(dns, true, true),
         [CFG_WIFI_SSID - CFG_VERSION]           = CFG_FIELD(wifi_ssid, true, true),
         [CFG_WIFI_PASS - CFG_VERSION]           = CFG_FIELD(wifi_pass, true, true),
-        [CFG_MQTT_ENABLE - CFG_VERSION]         = CFG_FIELD(mqtt_enable, false, true),
-        [CFG_MQTT_BROKER - CFG_VERSION]         = CFG_FIELD(mqtt_broker, true, true),
-        [CFG_MQTT_PORT - CFG_VERSION]           = CFG_FIELD(mqtt_port, false, true),
-        [CFG_MQTT_USER - CFG_VERSION]           = CFG_FIELD(mqtt_user, true, true),
-        [CFG_MQTT_PASS - CFG_VERSION]           = CFG_FIELD(mqtt_pass, true, true),
         [CFG_MQTT_PUBLISH_MS - CFG_VERSION]     = CFG_FIELD(mqtt_publish_ms, false, true),
-        [CFG_MQTT_CLIENT_ID - CFG_VERSION]      = CFG_FIELD(mqtt_client_id, true, true),   /* reserved field, RAM only */
         [CFG_MB_SLAVE_ID - CFG_VERSION]         = CFG_FIELD(mb_slave_id, false, true),      /* this device's own RTU slave address (LCD-owned) */
         [CFG_MB_BAUD_CODE - CFG_VERSION]        = CFG_FIELD(mb_baud_code, false, true),     /* master bus only */
         [CFG_MB_PARITY_CODE - CFG_VERSION]      = CFG_FIELD(mb_parity_code, false, true),   /* master bus only */
@@ -228,7 +222,7 @@ static esp_err_t read_config(data_point_id_t id, void *buffer, size_t size)
         return ESP_ERR_INVALID_SIZE;
     }
 
-    /* config_manager_t is ~2.2 KB since Feature 12 (mqtt_profiles[3]); heap it
+    /* config_manager_t is ~1.2 KB (broker struct + 8 slots + alarms); heap it
      * rather than putting it on the caller's stack (callers include the
      * console REPL task, whose stack is a few KB total). */
     config_manager_t *cfg = malloc(sizeof(*cfg));
@@ -280,12 +274,12 @@ static esp_err_t write_config(data_point_id_t id, const void *buffer, size_t siz
     return err;
 }
 
-/* ---- MQTT profiles (Feature 12) ----
+/* ---- MQTT broker (single, cfg.mqtt) ----
  *
- * CFG_MQTT_ACTIVE_PROFILE selects which of config_manager_t.mqtt_profiles[3]
- * the 12 CFG_MQTT_P_* ids below address — write the selector first, then
- * read/write a field. There is no per-profile fixed addressing; this mirrors
- * the single-active-profile pattern the legacy CFG_MQTT_* ids already use.
+ * The device owns exactly one broker, so each CFG_MQTT_* id addresses one
+ * fixed member of config_manager_t.mqtt — no profile selector, no indirection.
+ * (The broker's operator label, .name, is deliberately not a data point: it is
+ * portal-only text and nothing outside the portal reads it.)
  *
  * password / ca_path / cert_path / key_path are write-only: data_point_read()
  * on those four returns ESP_ERR_NOT_SUPPORTED (Feature 12 security
@@ -299,36 +293,36 @@ typedef struct {
     size_t size;        /* data-point wire size in bytes */
     bool is_string;
     bool readable;       /* false -> data_point_read returns NOT_SUPPORTED */
-} mqtt_p_field_t;
+} mqtt_field_t;
 
-#define MQTT_P_FIELD(member, str, rdbl) \
+#define MQTT_FIELD(member, str, rdbl) \
     { offsetof(config_mqtt_profile_t, member), sizeof(((config_mqtt_profile_t *)0)->member), (str), (rdbl) }
 
-/* CFG_MQTT_P_TLS_MODE is handled separately (enum <-> 1-byte wire marshal, not
+/* CFG_MQTT_TLS_MODE is handled separately (enum <-> 1-byte wire marshal, not
  * a raw memcpy of the enum's own in-memory size) and is not in this table. */
-static const mqtt_p_field_t *mqtt_p_field(data_point_id_t id)
+static const mqtt_field_t *mqtt_field(data_point_id_t id)
 {
-    static const mqtt_p_field_t fields[] = {
-        [CFG_MQTT_P_ENABLE - CFG_MQTT_P_ENABLE]         = MQTT_P_FIELD(enable, false, true),
-        [CFG_MQTT_P_BROKER - CFG_MQTT_P_ENABLE]         = MQTT_P_FIELD(broker, true, true),
-        [CFG_MQTT_P_PORT - CFG_MQTT_P_ENABLE]           = MQTT_P_FIELD(port, false, true),
-        [CFG_MQTT_P_USERNAME - CFG_MQTT_P_ENABLE]       = MQTT_P_FIELD(username, true, true),
-        [CFG_MQTT_P_PASSWORD - CFG_MQTT_P_ENABLE]       = MQTT_P_FIELD(password, true, false),        /* write-only */
-        [CFG_MQTT_P_CLIENT_ID - CFG_MQTT_P_ENABLE]      = MQTT_P_FIELD(client_id, true, true),
-        [CFG_MQTT_P_PUBLISH_TOPIC - CFG_MQTT_P_ENABLE]  = MQTT_P_FIELD(publish_topic, true, true),
-        [CFG_MQTT_P_SUBSCRIBE_TOPIC - CFG_MQTT_P_ENABLE]= MQTT_P_FIELD(subscribe_topic, true, true),
-        [CFG_MQTT_P_CA_PATH - CFG_MQTT_P_ENABLE]        = MQTT_P_FIELD(ca_path, true, false),         /* write-only */
-        [CFG_MQTT_P_CERT_PATH - CFG_MQTT_P_ENABLE]      = MQTT_P_FIELD(cert_path, true, false),       /* write-only */
-        [CFG_MQTT_P_KEY_PATH - CFG_MQTT_P_ENABLE]       = MQTT_P_FIELD(key_path, true, false),        /* write-only */
+    static const mqtt_field_t fields[] = {
+        [CFG_MQTT_ENABLE - CFG_MQTT_ENABLE]          = MQTT_FIELD(enable, false, true),
+        [CFG_MQTT_BROKER - CFG_MQTT_ENABLE]          = MQTT_FIELD(broker, true, true),
+        [CFG_MQTT_PORT - CFG_MQTT_ENABLE]            = MQTT_FIELD(port, false, true),
+        [CFG_MQTT_USERNAME - CFG_MQTT_ENABLE]        = MQTT_FIELD(username, true, true),
+        [CFG_MQTT_PASSWORD - CFG_MQTT_ENABLE]        = MQTT_FIELD(password, true, false),         /* write-only */
+        [CFG_MQTT_CLIENT_ID - CFG_MQTT_ENABLE]       = MQTT_FIELD(client_id, true, true),
+        [CFG_MQTT_PUBLISH_TOPIC - CFG_MQTT_ENABLE]   = MQTT_FIELD(publish_topic, true, true),
+        [CFG_MQTT_SUBSCRIBE_TOPIC - CFG_MQTT_ENABLE] = MQTT_FIELD(subscribe_topic, true, true),
+        [CFG_MQTT_CA_PATH - CFG_MQTT_ENABLE]         = MQTT_FIELD(ca_path, true, false),          /* write-only */
+        [CFG_MQTT_CERT_PATH - CFG_MQTT_ENABLE]       = MQTT_FIELD(cert_path, true, false),        /* write-only */
+        [CFG_MQTT_KEY_PATH - CFG_MQTT_ENABLE]        = MQTT_FIELD(key_path, true, false),         /* write-only */
     };
 
-    if (id < CFG_MQTT_P_ENABLE || id > CFG_MQTT_P_KEY_PATH || id == CFG_MQTT_P_TLS_MODE) {
+    if (id < CFG_MQTT_ENABLE || id > CFG_MQTT_KEY_PATH || id == CFG_MQTT_TLS_MODE) {
         return NULL;
     }
-    return &fields[id - CFG_MQTT_P_ENABLE];
+    return &fields[id - CFG_MQTT_ENABLE];
 }
 
-static esp_err_t read_mqtt_profile(data_point_id_t id, void *buffer, size_t size)
+static esp_err_t read_mqtt_broker(data_point_id_t id, void *buffer, size_t size)
 {
     /* Heap-allocated for the same reason as read_config() above. */
     config_manager_t *cfg = malloc(sizeof(*cfg));
@@ -340,28 +334,16 @@ static esp_err_t read_mqtt_profile(data_point_id_t id, void *buffer, size_t size
         free(cfg);
         return err;
     }
+    const config_mqtt_profile_t *p = &cfg->mqtt;
 
-    if (id == CFG_MQTT_ACTIVE_PROFILE) {
-        uint8_t v = cfg->mqtt_active_profile;
-        err = copy_out(buffer, size, &v, sizeof(v));
-        free(cfg);
-        return err;
-    }
-
-    /* active_profile is range-checked on write below; this only guards a
-     * snapshot that predates that check (e.g. a fresh default of 0 is fine). */
-    uint8_t idx = (cfg->mqtt_active_profile < CONFIG_MANAGER_MQTT_PROFILE_COUNT)
-                  ? cfg->mqtt_active_profile : 0;
-    const config_mqtt_profile_t *p = &cfg->mqtt_profiles[idx];
-
-    if (id == CFG_MQTT_P_TLS_MODE) {
+    if (id == CFG_MQTT_TLS_MODE) {
         uint8_t v = (uint8_t)p->tls_mode;
         err = copy_out(buffer, size, &v, sizeof(v));
         free(cfg);
         return err;
     }
 
-    const mqtt_p_field_t *f = mqtt_p_field(id);
+    const mqtt_field_t *f = mqtt_field(id);
     if (f == NULL) {
         free(cfg);
         return ESP_ERR_NOT_SUPPORTED;
@@ -380,7 +362,7 @@ static esp_err_t read_mqtt_profile(data_point_id_t id, void *buffer, size_t size
     return ESP_OK;
 }
 
-static esp_err_t write_mqtt_profile(data_point_id_t id, const void *buffer, size_t size)
+static esp_err_t write_mqtt_broker(data_point_id_t id, const void *buffer, size_t size)
 {
     /* Heap-allocated for the same reason as write_config() above. */
     config_manager_t *cfg = malloc(sizeof(*cfg));
@@ -392,28 +374,9 @@ static esp_err_t write_mqtt_profile(data_point_id_t id, const void *buffer, size
         free(cfg);
         return err;
     }
+    config_mqtt_profile_t *p = &cfg->mqtt;
 
-    if (id == CFG_MQTT_ACTIVE_PROFILE) {
-        if (size != sizeof(uint8_t)) {
-            free(cfg);
-            return ESP_ERR_INVALID_SIZE;
-        }
-        uint8_t v = *(const uint8_t *)buffer;
-        if (v >= CONFIG_MANAGER_MQTT_PROFILE_COUNT) {
-            free(cfg);
-            return ESP_ERR_INVALID_ARG;  /* would index mqtt_profiles[] out of bounds */
-        }
-        cfg->mqtt_active_profile = v;
-        err = config_manager_update(cfg);
-        free(cfg);
-        return err;
-    }
-
-    uint8_t idx = (cfg->mqtt_active_profile < CONFIG_MANAGER_MQTT_PROFILE_COUNT)
-                  ? cfg->mqtt_active_profile : 0;
-    config_mqtt_profile_t *p = &cfg->mqtt_profiles[idx];
-
-    if (id == CFG_MQTT_P_TLS_MODE) {
+    if (id == CFG_MQTT_TLS_MODE) {
         if (size != sizeof(uint8_t)) {
             free(cfg);
             return ESP_ERR_INVALID_SIZE;
@@ -429,7 +392,7 @@ static esp_err_t write_mqtt_profile(data_point_id_t id, const void *buffer, size
         return err;
     }
 
-    const mqtt_p_field_t *f = mqtt_p_field(id);
+    const mqtt_field_t *f = mqtt_field(id);
     if (f == NULL) {
         free(cfg);
         return ESP_ERR_NOT_SUPPORTED;
@@ -479,9 +442,9 @@ esp_err_t data_point_read(data_point_id_t id, void *buffer, size_t size)
         return read_config(id, buffer, size);
     }
 
-    /* Configuration: MQTT profiles (Feature 12). */
-    if (id >= CFG_MQTT_ACTIVE_PROFILE && id <= CFG_MQTT_P_KEY_PATH) {
-        return read_mqtt_profile(id, buffer, size);
+    /* Configuration: the single MQTT broker. */
+    if (id >= CFG_MQTT_ENABLE && id <= CFG_MQTT_KEY_PATH) {
+        return read_mqtt_broker(id, buffer, size);
     }
 
     return ESP_ERR_NOT_SUPPORTED;
@@ -501,10 +464,10 @@ esp_err_t data_point_write(data_point_id_t id, const void *buffer, size_t size)
         return write_config(id, buffer, size);
     }
 
-    /* Configuration: MQTT profiles (Feature 12). RAM snapshot only, same as
-     * write_config() above — every field here is writable. */
-    if (id >= CFG_MQTT_ACTIVE_PROFILE && id <= CFG_MQTT_P_KEY_PATH) {
-        return write_mqtt_profile(id, buffer, size);
+    /* Configuration: the single MQTT broker, RAM snapshot only — same contract
+     * as write_config() above. */
+    if (id >= CFG_MQTT_ENABLE && id <= CFG_MQTT_KEY_PATH) {
+        return write_mqtt_broker(id, buffer, size);
     }
 
     switch (id) {

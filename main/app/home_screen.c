@@ -672,9 +672,9 @@ static void lcd_settings_reload(void)
     s_buzzer_alarm_val = cfg->buzzer_alarm_enable;
     s_autocycle = cfg->lcd_autocycle;
     s_cycle_time_ms = (cfg->lcd_cycle_time_ms > 0) ? cfg->lcd_cycle_time_ms : HOME_AUTOCYCLE_MS;
-    config_mqtt_profile_t mqtt_profile;
-    s_mqtt_enabled = (config_manager_get_active_mqtt_profile(&mqtt_profile, NULL) == ESP_OK) &&
-                     mqtt_profile.enable;
+    /* The snapshot is already in hand, so read the enable flag straight off it
+     * rather than taking a second lock via config_manager_get_mqtt(). */
+    s_mqtt_enabled = cfg->mqtt.enable;
     free(cfg);
 
     s_asleep = false;
@@ -994,7 +994,7 @@ static esp_err_t menu_device_info(lcd_menu_t *menu, const lcd_menu_item_t *item,
 
 /* ---- Cached config snapshot for inline VALUE menu rows ----
  * The engine calls each VALUE row's value_get() on every render (which happens
- * after every key). config_manager_get() copies the whole ~2.2 KB snapshot under
+ * after every key). config_manager_get() copies the whole ~1.2 KB snapshot under
  * a lock, so reading it per row per render would churn the heap and the bus.
  * Instead keep one static snapshot, refreshed lazily: the first provider in a
  * render reads it, the rest reuse it. It is invalidated after any local write
@@ -1673,10 +1673,14 @@ static esp_err_t menu_tcp_server(lcd_menu_t *menu, const lcd_menu_item_t *item, 
     return ESP_OK;
 }
 
-static uint32_t wrap_setting_seconds(uint32_t value, bool increment)
+/* Step one second within [min,max], wrapping at both ends. The wrap is what
+ * makes the editor usable with three buttons: from the floor, DOWN lands on the
+ * ceiling instead of sticking. */
+static uint32_t wrap_setting_seconds(uint32_t value, bool increment,
+                                     uint32_t min, uint32_t max)
 {
-    if (increment) return value >= HOME_SETTING_MAX_S ? HOME_SETTING_MIN_S : value + 1U;
-    return value <= HOME_SETTING_MIN_S ? HOME_SETTING_MAX_S : value - 1U;
+    if (increment) return value >= max ? min : value + 1U;
+    return value <= min ? max : value - 1U;
 }
 
 static uint32_t setting_repeat_interval_ms(uint32_t held_ms)
@@ -1690,10 +1694,16 @@ static uint32_t setting_repeat_interval_ms(uint32_t held_ms)
     return HOME_SETTING_REPEAT_SLOW_MS;
 }
 
-static bool edit_setting_seconds(const char *title, uint32_t initial, uint32_t *result)
+/* Seconds editor shared by every timed setting. The range is a parameter
+ * because the settings do not agree on one: LCD sleep / auto-cycle allow 0
+ * ("Off") up to HOME_SETTING_MAX_S, the MQTT publish period is 1..60.
+ * A stored value outside the range is pulled in before the first draw. */
+static bool edit_setting_seconds(const char *title, uint32_t initial,
+                                 uint32_t min, uint32_t max, uint32_t *result)
 {
     uint32_t value = initial;
-    if (value > HOME_SETTING_MAX_S) value = HOME_SETTING_MAX_S;
+    if (value > max) value = max;
+    if (value < min) value = min;
 
     wait_buttons_released();
     uint8_t previous = 0;
@@ -1742,7 +1752,7 @@ static bool edit_setting_seconds(const char *title, uint32_t initial, uint32_t *
              direction_edges == HMI_BSP_BUTTON_BOTTOM) &&
             direction == direction_edges) {
             value = wrap_setting_seconds(value,
-                                         direction_edges == HMI_BSP_BUTTON_TOP);
+                                         direction_edges == HMI_BSP_BUTTON_TOP, min, max);
             held_key = direction_edges;
             pressed_at = now;
             repeat_at = now + pdMS_TO_TICKS(HOME_SETTING_HOLD_MS);
@@ -1751,7 +1761,7 @@ static bool edit_setting_seconds(const char *title, uint32_t initial, uint32_t *
         } else if (direction == held_key && held_key != 0) {
             if ((int32_t)(now - repeat_at) >= 0) {
                 value = wrap_setting_seconds(value,
-                                             held_key == HMI_BSP_BUTTON_TOP);
+                                             held_key == HMI_BSP_BUTTON_TOP, min, max);
                 uint32_t held_ms = (uint32_t)((now - pressed_at) * portTICK_PERIOD_MS);
                 repeat_at = now + pdMS_TO_TICKS(setting_repeat_interval_ms(held_ms));
                 redraw = true;
@@ -1982,10 +1992,10 @@ static esp_err_t menu_lcd_timed_setting(bool autocycle)
     uint32_t seconds = autocycle
         ? (cfg->lcd_autocycle ? cfg->lcd_cycle_time_ms / 1000U : 0U)
         : cfg->lcd_sleep_timeout_s;
-    if (seconds > HOME_SETTING_MAX_S) seconds = HOME_SETTING_MAX_S;
 
     if (!edit_setting_seconds(autocycle ? "AUTO CYCLE" : "LCD SLEEP TIME",
-                              seconds, &seconds)) {
+                              seconds, HOME_SETTING_MIN_S, HOME_SETTING_MAX_S,
+                              &seconds)) {
         free(cfg);
         return ESP_OK;
     }
@@ -3064,6 +3074,88 @@ static const lcd_menu_screen_t s_screen_rtu_slave = {
     .item_count = sizeof(s_items_rtu_slave) / sizeof(s_items_rtu_slave[0]),
 };
 
+/* MQTT: the operator's only control over telemetry. Status is the device-wide
+ * enable (the web portal deliberately has no such control — it configures the
+ * broker, this toggle decides whether it is used at all), and Period is the
+ * publish cadence in whole seconds, 1..60 to match the guard in
+ * config_manager_update(). CONFIG_APPLY_MQTT rebuilds the client
+ * asynchronously, so both rows take effect without a reboot; apply does not
+ * notify the home screen, so Status also refreshes the s_mqtt_enabled mirror
+ * that the home page renders. */
+#define HOME_MQTT_PERIOD_MIN_S (CONFIG_MANAGER_MQTT_PERIOD_MIN_MS / 1000U)
+#define HOME_MQTT_PERIOD_MAX_S (CONFIG_MANAGER_MQTT_PERIOD_MAX_MS / 1000U)
+
+static void mqtt_status_value(lcd_menu_t *m, const lcd_menu_item_t *it,
+                              char *buf, size_t buf_size, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) { snprintf(buf, buf_size, "< ?>  "); return; }
+    snprintf(buf, buf_size, "<%s>  ", c->mqtt.enable ? "ON" : "OFF");
+}
+
+static esp_err_t mqtt_status_toggle(lcd_menu_t *m, const lcd_menu_item_t *it, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) return ESP_ERR_INVALID_STATE;
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) return ESP_ERR_NO_MEM;
+    *cfg = *c;
+    cfg->mqtt.enable = !cfg->mqtt.enable;
+    esp_err_t ret = update_save_apply(cfg, CONFIG_APPLY_MQTT);
+    if (ret == ESP_OK) {
+        /* CONFIG_APPLY_MQTT does not raise s_cfg_pending, and only the
+         * backlight is applied locally — keep the home-page mirror honest. */
+        s_mqtt_enabled = cfg->mqtt.enable;
+    }
+    free(cfg);
+    return ESP_OK;
+}
+
+static void mqtt_period_value(lcd_menu_t *m, const lcd_menu_item_t *it,
+                              char *buf, size_t buf_size, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) { snprintf(buf, buf_size, "< ?>  "); return; }
+    snprintf(buf, buf_size, "<%lus>  ",
+             (unsigned long)(c->mqtt_publish_ms / 1000U));
+}
+
+static esp_err_t mqtt_period_edit(lcd_menu_t *m, const lcd_menu_item_t *it, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) return ESP_ERR_INVALID_STATE;
+    uint32_t seconds = c->mqtt_publish_ms / 1000U;
+    if (!edit_setting_seconds("MQTT PERIOD", seconds,
+                              HOME_MQTT_PERIOD_MIN_S, HOME_MQTT_PERIOD_MAX_S,
+                              &seconds)) {
+        return ESP_OK;   /* LEFT: discard, row keeps the old value */
+    }
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) return ESP_ERR_NO_MEM;
+    *cfg = *c;
+    cfg->mqtt_publish_ms = seconds * 1000U;
+    (void)update_save_apply(cfg, CONFIG_APPLY_MQTT);
+    free(cfg);
+    return ESP_OK;
+}
+
+static const lcd_menu_item_t s_items_mqtt[] = {
+    {.label = "Status", .type = LCD_MENU_ITEM_VALUE,
+     .value_get = mqtt_status_value, .action = mqtt_status_toggle},
+    {.label = "Period", .type = LCD_MENU_ITEM_VALUE,
+     .value_get = mqtt_period_value, .action = mqtt_period_edit},
+    {.label = "Back",   .type = LCD_MENU_ITEM_BACK},
+};
+static const lcd_menu_screen_t s_screen_mqtt = {
+    .title = "MQTT",
+    .items = s_items_mqtt,
+    .item_count = sizeof(s_items_mqtt) / sizeof(s_items_mqtt[0]),
+};
+
 /* Settings root — order matches agreed IA.
  * Config Portal, TCP Server and Factory Reset are direct ACTIONs, not submenus:
  * each has exactly one real destination, so the submenu level only added a
@@ -3076,6 +3168,7 @@ static const lcd_menu_item_t s_items_settings[] = {
     {.label = "Config Portal",   .type = LCD_MENU_ITEM_ACTION,  .action = menu_portal_start},
     {.label = "RTU Master",      .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_rtu_master},
     {.label = "RTU Slave",       .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_rtu_slave},
+    {.label = "MQTT",            .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_mqtt},
     {.label = "TCP Server",      .type = LCD_MENU_ITEM_ACTION,  .action = menu_tcp_server},
     {.label = "Alarm Settings",  .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_settings},
     {.label = "Display & Keys",  .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_display},
