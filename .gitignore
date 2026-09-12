@@ -76,3 +76,11 @@ Desktop.ini
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+
+# Local-only working notes and tooling: editor/session plan files, per-machine
+# tool settings, and one-off build/debug scratch scripts with hardcoded local
+# paths. None belong in the firmware deliverable.
+.claude/
+/build_now.ps1
+/test_activate.ps1
+/tmp_sizeof.c
