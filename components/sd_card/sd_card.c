@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp: short/long calib filename match */
 #include <sys/stat.h>
 #include <dirent.h>
 #include "driver/gpio.h"
@@ -321,18 +322,31 @@ esp_err_t sd_card_calib_export_current(char *path_out, size_t path_cap)
             }
             char file_mode[4];
             int num;
-            if (sscanf(entry->d_name, "calib_%3[^_]_%d.bin", file_mode, &num) == 2) {
-                if (strcmp(file_mode, mode_str) == 0 && num > max_num) {
-                    max_num = num;
+            bool matched = false;
+            if (sscanf(entry->d_name, "c%3[^_]_%d.bin", file_mode, &num) == 2) {
+                if (strcasecmp(file_mode, "3w") == 0) {
+                    strlcpy(file_mode, "3W", sizeof(file_mode));
+                    matched = true;
+                } else if (strcasecmp(file_mode, "4w") == 0) {
+                    strlcpy(file_mode, "4W", sizeof(file_mode));
+                    matched = true;
                 }
+            } else if (sscanf(entry->d_name, "calib_%3[^_]_%d.bin", file_mode, &num) == 2) {
+                matched = true;
+            }
+            if (matched && strcmp(file_mode, mode_str) == 0 && num > max_num) {
+                max_num = num;
             }
         }
         closedir(dir);
     }
 
     int next_num = max_num + 1;
+    /* 8.3 short names: FATFS_LFN_NONE is set, so the basename must stay
+     * <= 8 chars ("c3w_01" = 6). Long names fail fopen with EINVAL. */
     char filename[32];
-    snprintf(filename, sizeof(filename), "calib_%s_%02d.bin", mode_str, next_num);
+    snprintf(filename, sizeof(filename), "c%sw_%02d.bin",
+             (strcmp(mode_str, "3W") == 0) ? "3" : "4", next_num);
     char full_path[64];
     snprintf(full_path, sizeof(full_path), "%s/%s", SD_CALIB_DIR, filename);
 
@@ -362,7 +376,8 @@ esp_err_t sd_card_calib_export_current(char *path_out, size_t path_cap)
 
                 /* Also create CSV metadata file with same prefix */
                 char json_filename[32];
-                snprintf(json_filename, sizeof(json_filename), "calib_%s_%02d.csv", mode_str, next_num);
+                snprintf(json_filename, sizeof(json_filename), "c%sw_%02d.csv",
+                         (strcmp(mode_str, "3W") == 0) ? "3" : "4", next_num);
                 char json_path[64];
                 snprintf(json_path, sizeof(json_path), "%s/%s", SD_CALIB_DIR, json_filename);
 
@@ -429,28 +444,44 @@ esp_err_t sd_card_calib_list(sd_calib_entry_t *out, size_t max, size_t *count)
         if (entry->d_type != DT_REG) {
             continue;
         }
+        /* Accept both current short names (c3w_NN.bin / c4w_NN.bin) and legacy
+         * long names (calib_3W_NN.bin / calib_4W_NN.bin) so old cards still list. */
         char mode_str[4];
         int num;
-        /* Match "calib_3W_NN.bin" or "calib_4W_NN.bin" */
-        if (sscanf(entry->d_name, "calib_%3[^_]_%d.bin", mode_str, &num) == 2) {
-            /* Verify extension */
-            const char *ext = strrchr(entry->d_name, '.');
-            if (ext && strcmp(ext, ".bin") == 0) {
-                uint8_t mode;
-                if (strcmp(mode_str, "3W") == 0) {
-                    mode = 1;  /* ATM90E32AS_WIRING_3P3W */
-                } else if (strcmp(mode_str, "4W") == 0) {
-                    mode = 0;  /* ATM90E32AS_WIRING_3P4W */
-                } else {
-                    continue;  /* unknown mode, skip */
-                }
-                strncpy(temp[temp_count].name, entry->d_name, sizeof(temp[temp_count].name) - 1);
-                temp[temp_count].name[sizeof(temp[temp_count].name) - 1] = '\0';
-                temp[temp_count].mode = mode;
-                temp[temp_count].num = num;
-                temp_count++;
+        bool matched = false;
+        if (sscanf(entry->d_name, "c%3[^_]_%d.bin", mode_str, &num) == 2) {
+            /* Short form: mode_str is "3w" or "4w" */
+            if (strcasecmp(mode_str, "3w") == 0) {
+                strlcpy(mode_str, "3W", sizeof(mode_str));
+                matched = true;
+            } else if (strcasecmp(mode_str, "4w") == 0) {
+                strlcpy(mode_str, "4W", sizeof(mode_str));
+                matched = true;
             }
+        } else if (sscanf(entry->d_name, "calib_%3[^_]_%d.bin", mode_str, &num) == 2) {
+            matched = true;
         }
+        if (!matched) {
+            continue;
+        }
+        /* Verify extension */
+        const char *ext = strrchr(entry->d_name, '.');
+        if (ext == NULL || strcmp(ext, ".bin") != 0) {
+            continue;
+        }
+        uint8_t mode;
+        if (strcmp(mode_str, "3W") == 0) {
+            mode = 1;  /* ATM90E32AS_WIRING_3P3W */
+        } else if (strcmp(mode_str, "4W") == 0) {
+            mode = 0;  /* ATM90E32AS_WIRING_3P4W */
+        } else {
+            continue;  /* unknown mode, skip */
+        }
+        strncpy(temp[temp_count].name, entry->d_name, sizeof(temp[temp_count].name) - 1);
+        temp[temp_count].name[sizeof(temp[temp_count].name) - 1] = '\0';
+        temp[temp_count].mode = mode;
+        temp[temp_count].num = num;
+        temp_count++;
     }
     closedir(dir);
 

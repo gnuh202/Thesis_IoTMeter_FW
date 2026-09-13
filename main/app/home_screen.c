@@ -2331,13 +2331,14 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
             size_t idx = window_start + i;
 
             if (idx < count) {
-                /* Display: "[3W] cal_01" or "[4W] cal_02" */
+                /* Display: "[3W] c3w_01" or "[4W] c4w_02" (short 8.3 names) */
                 const char *mode_str = (files[idx].mode == 1) ? "3W" : "4W";
+                const char *short_mode = (files[idx].mode == 1) ? "c3w" : "c4w";
 
                 /* Build line: pointer + mode + filename, pad to full width */
-                int written = snprintf(line, sizeof(line), "%c [%s] cal_%02d",
+                int written = snprintf(line, sizeof(line), "%c [%s] %s_%02d",
                                        (idx == cursor) ? '>' : ' ',
-                                       mode_str, files[idx].num);
+                                       mode_str, short_mode, files[idx].num);
 
                 /* Pad remaining space (put_line uses strlen, so must pad explicitly) */
                 if (written < HOME_LCD_WIDTH) {
@@ -2394,7 +2395,8 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
 
     const char *file_mode_str = (files[cursor].mode == 1) ? "3W" : "4W";
     char display[HOME_LCD_WIDTH + 1];
-    snprintf(display, sizeof(display), "[%s] calib_%02d.bin", file_mode_str, files[cursor].num);
+    /* Show the real basename from the card (short 8.3 or legacy long name). */
+    snprintf(display, sizeof(display), "%.20s", files[cursor].filename);
     char confirm_msg[HOME_LCD_WIDTH + 1];
     snprintf(confirm_msg, sizeof(confirm_msg), "Apply to %s mode?", current_mode_str);
 

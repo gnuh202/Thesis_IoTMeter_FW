@@ -26,6 +26,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
@@ -38,6 +39,39 @@ static bool s_dns_running;
 static TaskHandle_t s_dns_task;
 static int s_dns_sock = -1;
 static char s_session_token[17];
+static esp_timer_handle_t s_reboot_timer;
+
+/* Deferred restart runs on the esp_timer task, not on a private FreeRTOS task:
+ * esp_restart() walks the registered shutdown handlers (USB console flush,
+ * NVS, WiFi, ...) on the caller's stack, so a small throwaway task is exactly
+ * the wrong place to call it from. The timer fires once ~900 ms after the
+ * reply page is queued, giving the browser time to receive it before the
+ * device drops off the network. */
+static void reboot_timer_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGW(TAG, "rebooting to apply web portal config");
+    esp_restart();
+}
+
+static void schedule_reboot(void)
+{
+    if (s_reboot_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = reboot_timer_cb,
+            .name = "web_reboot",
+        };
+        if (esp_timer_create(&args, &s_reboot_timer) != ESP_OK) {
+            ESP_LOGE(TAG, "create reboot timer failed");
+            return;
+        }
+    } else {
+        esp_timer_stop(s_reboot_timer); /* ESP_ERR_INVALID_STATE if idle: harmless */
+    }
+    if (esp_timer_start_once(s_reboot_timer, 900 * 1000ULL) != ESP_OK) {
+        ESP_LOGE(TAG, "start reboot timer failed");
+    }
+}
 
 #define DNS_PORT 53
 #define DNS_MAX_PACKET 512
@@ -764,14 +798,6 @@ static void send_field_end(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, "</div>");
 }
 
-static void reboot_task(void *arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(900));
-    ESP_LOGW(TAG, "rebooting to apply web portal config");
-    esp_restart();
-}
-
 /* Three choices, not four: MQTT_TLS_INSECURE skips server verification and is a
  * console-only bring-up mode, so it is never selectable here. */
 static bool tls_mode_from_form(const char *s, mqtt_tls_mode_t *out)
@@ -1011,9 +1037,7 @@ static esp_err_t save_all_post_handler(httpd_req_t *req)
         "Wait a few seconds, then reconnect.</p>");
     send_page_end(req);
 
-    if (xTaskCreate(reboot_task, "web_reboot", 2048, NULL, 5, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "create reboot task failed");
-    }
+    schedule_reboot();
     return ESP_OK;
 }
 
@@ -1546,10 +1570,7 @@ static esp_err_t reboot_post_handler(httpd_req_t *req)
         "<p>Wait a few seconds, then reconnect.</p>");
     send_page_end(req);
 
-    BaseType_t ok = xTaskCreate(reboot_task, "web_reboot", 2048, NULL, 5, NULL);
-    if (ok != pdPASS) {
-        ESP_LOGE(TAG, "create reboot task failed");
-    }
+    schedule_reboot();
     return ESP_OK;
 }
 
