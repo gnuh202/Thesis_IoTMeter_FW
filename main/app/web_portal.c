@@ -200,6 +200,9 @@ static const char *HTML_STYLE =
     "h1{margin:10px 0 4px;font-size:22px;font-weight:600;line-height:1.25}"
     "h2{margin:0 0 6px;font-size:16px;font-weight:600}h3{margin:0 0 4px;font-size:14px;font-weight:600}"
     "p{margin:6px 0;color:var(--body)}.muted{color:var(--muted);font-size:12px}"
+    /* Small hint under a field label: same muted tone as .muted, but tied to the
+     * field so it reads as part of the label, not page prose. */
+    ".hint{display:block;margin:2px 0 0;font-size:12px;font-weight:400;color:var(--muted)}"
     "code{background:var(--inset);border:1px solid var(--line-s);border-radius:6px;padding:1px 5px;"
     "font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}"
     /* Primer Label: outlined, not filled. */
@@ -212,6 +215,24 @@ static const char *HTML_STYLE =
     ".nav a:hover{background:var(--inset-h);border-color:var(--muted);color:var(--ink)}"
     ".nav a:active{background:var(--inset-a)}"
     ".section{margin-top:20px;padding-top:16px;border-top:1px solid var(--line-s)}"
+    /* Collapsible sections: <details> with the same card border as .profile, but
+     * full-width and without the per-device margin. The summary is the section
+     * heading; the body is the section content. */
+    "details.section{margin-top:20px;padding:0;border:1px solid var(--line-s);border-radius:6px;"
+    "background:var(--card);transition:border-color var(--t),box-shadow var(--t)}"
+    "details.section:hover{border-color:var(--line)}"
+    "details.section[open]{box-shadow:0 1px 3px #1f23280f}"
+    "details.section>summary{display:flex;align-items:center;gap:8px;padding:16px 16px 12px;"
+    "font-size:16px;font-weight:600;color:var(--ink);cursor:pointer;list-style:none;"
+    "transition:background var(--t)}"
+    "details.section>summary:hover{background:var(--inset)}"
+    "details.section>summary:active{background:var(--inset-a)}"
+    "details.section>summary::-webkit-details-marker{display:none}"
+    "details.section>summary::before{content:'\\25B8';display:inline-block;color:var(--muted);"
+    "font-size:11px;transition:transform var(--t)}"
+    "details.section[open]>summary::before{transform:rotate(90deg)}"
+    "details.section[open]>summary{border-bottom:1px solid var(--line-s);border-radius:6px 6px 0 0}"
+    "details.section>.sbody{padding:16px}"
     /* One column by default; two only when there is room for two. */
     ".row{display:grid;grid-template-columns:1fr;gap:14px;margin-top:14px}"
     ".field{min-width:0}.field.wide{grid-column:1/-1}"
@@ -367,6 +388,22 @@ static const char *HTML_SCRIPT =
     "if(r.ok&&!f.dataset.keep)f.reset();if(r.ok&&d)d.hidden=false;"
     "if(f.dataset.calib)calibApplyPhaseUi();});})"
     ".catch(function(){if(s){s.className='st bad';s.textContent='Lost connection to the device.';}});"
+    "});"
+    /* MQTT cert slots follow the Connection security dropdown: hidden for "off",
+     * CA only for "ca", all three for "mutual". Runs on load (the server already
+     * pre-hides the right blocks; this keeps them in sync) and on every change. */
+    "function mqttApplyCertUi(){"
+    "var sel=document.querySelector('select[name=\"mqtt_tls\"]');"
+    "var all=document.getElementById('mqtt-certs');"
+    "var mut=document.getElementById('mqtt-certs-mutual');"
+    "if(!sel||!all)return;"
+    "var v=sel.value;"
+    "all.hidden=(v==='off');"
+    "if(mut)mut.hidden=(v!=='mutual');}"
+    "document.addEventListener('DOMContentLoaded',function(){"
+    "mqttApplyCertUi();"
+    "var sel=document.querySelector('select[name=\"mqtt_tls\"]');"
+    "if(sel)sel.addEventListener('change',mqttApplyCertUi);"
     "});"
     "document.addEventListener('click',function(e){"
     "var b=e.target.closest('[data-del]');if(!b)return;e.preventDefault();"
@@ -647,6 +684,23 @@ static esp_err_t send_input_ex(httpd_req_t *req, const char *label, const char *
 {
     httpd_resp_sendstr_chunk(req, wide ? "<div class=\"field wide\"><label>" : "<div class=\"field\"><label>");
     httpd_resp_sendstr_chunk(req, label);
+    httpd_resp_sendstr_chunk(req, "</label><input class=\"input\" form=\"" CFG_FORM_ID "\" name=\"");
+    httpd_resp_sendstr_chunk(req, name);
+    httpd_resp_sendstr_chunk(req, "\" value=\"");
+    send_escaped(req, value != NULL ? value : "");
+    return httpd_resp_sendstr_chunk(req, "\"></div>");
+}
+
+static esp_err_t send_input_with_hint(httpd_req_t *req, const char *label, const char *hint,
+                                      const char *name, const char *value, bool wide)
+{
+    httpd_resp_sendstr_chunk(req, wide ? "<div class=\"field wide\"><label>" : "<div class=\"field\"><label>");
+    httpd_resp_sendstr_chunk(req, label);
+    if (hint != NULL && hint[0] != '\0') {
+        httpd_resp_sendstr_chunk(req, "<span class=\"hint\">");
+        httpd_resp_sendstr_chunk(req, hint);
+        httpd_resp_sendstr_chunk(req, "</span>");
+    }
     httpd_resp_sendstr_chunk(req, "</label><input class=\"input\" form=\"" CFG_FORM_ID "\" name=\"");
     httpd_resp_sendstr_chunk(req, name);
     httpd_resp_sendstr_chunk(req, "\" value=\"");
@@ -1601,12 +1655,22 @@ static void send_mqtt_broker_block(httpd_req_t *req, const config_mqtt_profile_t
                                       "cannot be uploaded. Check the boot log at the \"Cert Store\" "
                                       "step.</div>");
     } else {
+        /* Cert slots are only relevant when TLS is on. They are wrapped in
+         * #mqtt-certs so the dropdown can show/hide them without a reload.
+         * Server-side they are always rendered (so no-script still works); JS
+         * hides them on load when the current value is "off". */
+        bool show_certs = (p->tls_mode != MQTT_TLS_DISABLE);
+        httpd_resp_sendstr_chunk(req, show_certs ? "<div id=\"mqtt-certs\">" : "<div id=\"mqtt-certs\" hidden>");
         send_cert_slot(req, 0, CERT_SLOT_CA, "Server certificate (CA)",
                        "Enough for TLS mode.");
+        bool show_mutual = (p->tls_mode == MQTT_TLS_MUTUAL);
+        httpd_resp_sendstr_chunk(req, show_mutual ? "<div id=\"mqtt-certs-mutual\">" : "<div id=\"mqtt-certs-mutual\" hidden>");
         send_cert_slot(req, 0, CERT_SLOT_CERT, "Device certificate",
                        "Only needed when the server asks the device to present one.");
         send_cert_slot(req, 0, CERT_SLOT_KEY, "Device private key",
                        "Goes with the device certificate.");
+        httpd_resp_sendstr_chunk(req, "</div>");
+        httpd_resp_sendstr_chunk(req, "</div>");
     }
 }
 
@@ -1645,15 +1709,21 @@ static esp_err_t root_get_handler(httpd_req_t *req)
      * self-identifying by their labels, so no "Config Portal AP" subheading.
      * Both password fields are half-width, which is also what makes their muted
      * placeholder text render identically (it is generated by send_secret_input).
-     * No network-mode or DHCP line: the operator cannot act on either from here. */
-    httpd_resp_sendstr_chunk(req, "<section class=\"section\" id=\"device\"><h2>Device &amp; network</h2>"
-                                  "<div class=\"row\">");
-    send_input_ex(req, "Device name", "device_name", mcfg->device_name, true);
+     * No network-mode or DHCP line: the operator cannot act on either from here.
+     *
+     * The section is a <details> so the operator can collapse it; it ships open
+     * because device identity is the first thing to check on a fresh board. */
+    httpd_resp_sendstr_chunk(req, "<details class=\"section\" id=\"device\" open>"
+                                  "<summary>Device &amp; network</summary>"
+                                  "<div class=\"sbody\"><div class=\"row\">");
+    send_input_with_hint(req, "Device name",
+                         "Used for MQTT topics and client ID (sanitized: / + # and spaces become _)",
+                         "device_name", mcfg->device_name, true);
     send_input(req, "WiFi name (SSID)", "wifi_ssid", mcfg->wifi_ssid);
     send_secret_input(req, "WiFi password", "wifi_pass", strlen(mcfg->wifi_pass) > 0, false);
     send_input(req, "Portal AP SSID", "ap_ssid", mcfg->ap_ssid);
     send_secret_input(req, "Portal AP password", "ap_pass", strlen(mcfg->ap_pass) > 0, false);
-    httpd_resp_sendstr_chunk(req, "</div></section>");
+    httpd_resp_sendstr_chunk(req, "</div></div></details>");
 
     /* MQTT: exactly one broker, configured here and switched on or off on the
      * device. The publish interval is shared with the LCD and entered in whole
@@ -1661,8 +1731,12 @@ static esp_err_t root_get_handler(httpd_req_t *req)
      *
      * There is deliberately no enable control on this page. Writing it from the
      * portal would let a settings save silently turn telemetry on or off under
-     * an operator who only came to change a topic, so the flag stays the LCD's. */
-    httpd_resp_sendstr_chunk(req, "<section class=\"section\" id=\"mqtt\"><h2>MQTT</h2>");
+     * an operator who only came to change a topic, so the flag stays the LCD's.
+     *
+     * Collapsible like the other sections; ships open because the broker is the
+     * most-edited part of this page. */
+    httpd_resp_sendstr_chunk(req, "<details class=\"section\" id=\"mqtt\" open>"
+                                  "<summary>MQTT</summary><div class=\"sbody\">");
     httpd_resp_sendstr_chunk(req,
         "<p class=\"muted\">The device publishes to this one broker. MQTT is turned on or "
         "off from the device LCD: Settings &#8594; MQTT &#8594; Status.</p>");
@@ -1670,10 +1744,12 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     snprintf(tmp, sizeof(tmp), "%lu",
              (unsigned long)(mcfg->mqtt_publish_ms / 1000U));
     send_mqtt_broker_block(req, &mcfg->mqtt, tmp);
-    httpd_resp_sendstr_chunk(req, "</section>");
+    httpd_resp_sendstr_chunk(req, "</div></details>");
 
     /* RTU master: bus settings + dynamic device list (Add device).
-     * Master/slot Active is LCD-only — portal never offers enable toggles. */
+     * Master/slot Active is LCD-only — portal never offers enable toggles.
+     * Collapsible; ships closed because the bus is configured less often than
+     * network/MQTT. */
     {
         char tmpb[24];
         unsigned used_n = 0;
@@ -1683,7 +1759,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             }
         }
 
-        httpd_resp_sendstr_chunk(req, "<section class=\"section\" id=\"rtu\"><h2>RTU master</h2>");
+        httpd_resp_sendstr_chunk(req, "<details class=\"section\" id=\"rtu\">"
+                                      "<summary>RTU master</summary><div class=\"sbody\">");
         httpd_resp_sendstr_chunk(req,
             "<p class=\"muted\">Configure the master bus (downstream meters) here. Turn the "
             "master on or off from the device LCD: Settings → RTU Master → Active.<br>"
@@ -1755,7 +1832,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             first = false;
             httpd_resp_sendstr_chunk(req, js);
         }
-        httpd_resp_sendstr_chunk(req, "]</script></section>");
+        httpd_resp_sendstr_chunk(req, "]</script></div></details>");
     }
 
     /* Calibration: enter true V/I; check result on the device LCD. Persist via Save and restart.
@@ -1772,7 +1849,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             hide_phase_b_v = true; /* default channel is V → hide B on first paint */
         }
         httpd_resp_sendstr_chunk(req,
-            "<section class=\"section\" id=\"calib\"><h2>Calibration</h2>"
+            "<details class=\"section\" id=\"calib\"><summary>Calibration</summary><div class=\"sbody\">"
             "<p class=\"muted\">Enter the real voltage (V) or current (A) you applied. "
             "Keep changes with Save and restart below.</p>"
             "<p>Active profile: <span id=\"calib-profile\" class=\"st\">");
@@ -1804,7 +1881,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             "<input class=\"input\" name=\"value\" placeholder=\"230 or 5.000\" required>"
             "</div></div>"
             "<button class=\"btn\" type=\"submit\">Calibrate</button>"
-            "</form></section>");
+            "</form></div></details>");
     }
 #endif /* CONFIG_APP_WEB_CALIB_ENABLE */
 

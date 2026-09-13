@@ -547,9 +547,11 @@ cần session của Web Config Portal (cùng tài khoản console). Thiếu `pro
 **Cách 1 — chọn file trong portal (thường dùng).** Mở `http://192.168.4.1/`, login, vào mục
 **MQTT**. Giao diện portal là tiếng Anh, nên tên nút/mục dưới đây trích đúng chuỗi đang
 hiển thị. Mục MQTT là **một broker duy nhất**: Label, Publish interval (seconds), Server
-address, Port, Keep-alive, Username, Password, dropdown **Connection security**, rồi tới 3 slot
+address, Port, Keep-alive, Username, Password, dropdown **Connection security**, rồi tới các slot
 chứng chỉ ca/cert/key nằm ngay bên dưới — không còn mục "Certs" riêng, nên không thể upload nhầm
-sang máy chủ khác. Mỗi slot có một nút chọn file: chọn file từ máy rồi bấm **Upload file**, có
+sang máy chủ khác. Các slot **chỉ hiện khi cần**: chọn `No encryption (port 1883)` thì ẩn cả 3;
+chọn `TLS (port 8883) — typical` thì chỉ hiện CA; chọn `TLS with device certificate` thì hiện cả 3.
+Mỗi slot có một nút chọn file: chọn file từ máy rồi bấm **Upload file**, có
 hiệu lực ngay không cần bấm Save. Slot nào đã có file thì hiện `Loaded` + size + 16 hex đầu của
 SHA-256 kèm nút **Delete file**; slot rỗng hiện `Not loaded`.
 

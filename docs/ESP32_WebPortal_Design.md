@@ -74,22 +74,30 @@ Tái dùng `config_store` (đã có sẵn, không thêm struct):
 chuỗi tiếng Anh đang hiển thị.
 
 Trang `/` chia các mục theo *nơi dùng*, không theo domain NVS — điều hướng `.nav` ở đầu trang
-neo tới từng `<section>`:
+neo tới từng `<details>`:
 
 - **Device & network** — tên thiết bị, SSID/mật khẩu WiFi, SSID/mật khẩu portal AP. Một
   `.row` duy nhất trên lưới 2 cột: Device name `wide` đứng 1 mình một hàng; WiFi name + WiFi
   password cạnh nhau; AP name + AP password cạnh nhau. **Không còn tiêu đề phụ
   "Config Portal AP"** — label từng field đã tự giải thích, và một `.row` mới sẽ làm auto-placement
   mồ côi nửa hàng. Hai ô password đều half-width nên chữ mờ (placeholder) do
-  `send_secret_input` sinh ra hiển thị giống hệt nhau.
+  `send_secret_input` sinh ra hiển thị giống hệt nhau. Device name có dòng hint nhỏ ngay dưới
+  label: dùng cho MQTT topic và client ID (sanitize `/ + #` và khoảng trắng thành `_`).
 - **MQTT** — đúng một broker, show trực tiếp trong section (không card gập, không Add/Remove):
   label, chu kỳ gửi theo giây, địa chỉ server (`wide`), cổng, keep-alive, tài khoản, mật khẩu,
   mức bảo mật, **và 3 file chứng chỉ của chính nó**. Kèm một dòng chữ mờ nói rõ bật/tắt MQTT
-  làm trên LCD: Settings → MQTT → Status.
+  làm trên LCD: Settings → MQTT → Status. Các slot chứng chỉ **ẩn/hiện theo dropdown
+  Connection security**: `off` → ẩn cả 3; `ca` → chỉ CA; `mutual` → cả 3. Server render sẵn
+  đúng trạng thái theo `tls_mode` hiện tại (no-script vẫn đúng), script `mqttApplyCertUi()`
+  đồng bộ lại khi đổi dropdown.
 - **RTU master** — baud/parity bus và danh sách công tơ downstream; địa chỉ + baud slave của
   thiết bị nằm ở LCD chứ không phải đây.
 - **Calibration** — chỉ tồn tại khi build bật `CONFIG_APP_WEB_CALIB_ENABLE` (default `n`);
   sản phẩm không có mục này.
+
+Mỗi mục lớn là một `<details class="section">` có thể xổ/gập (không JavaScript): Device &
+network và MQTT mở sẵn (`open`), RTU master và Calibration gập sẵn. Mục Save changes luôn
+hiện (không gập) vì là nút hành động.
 
 Trang chỉ hiển thị thứ người dùng **làm được gì với nó**. Chế độ mạng (`AUTO/ETH_ONLY/...`) và
 "IP lấy tự động" đã bỏ: đọc xong cũng không sửa được ở đây, và là từ ngữ kỹ thuật nội bộ. Câu
