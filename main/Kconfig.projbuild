@@ -404,22 +404,14 @@ menu "Application Configuration"
         menu "ATM90E32AS Parameters"
             comment "Build-time defaults for first boot / factory calib (NVS overrides when present)"
 
-            choice APP_ATM90E32AS_DEFAULT_PGA
-                prompt "Fallback current PGA (no CT config)"
-                default APP_ATM90E32AS_DEFAULT_PGA_1X
+            config APP_ATM90E32AS_FIXED_PGA_4X
+                bool
+                default y
                 help
-                    Used only when CT-based PGA auto-select cannot run (e.g. missing
-                    CT params). Normal path: Current CT Apply recomputes PGA from
-                    NCT / I Rated / I Expected and R_BURDEN. A saved NVS calib still
-                    restores its stored PGA on boot until the next CT Apply.
-
-                config APP_ATM90E32AS_DEFAULT_PGA_1X
-                    bool "x1"
-                config APP_ATM90E32AS_DEFAULT_PGA_2X
-                    bool "x2"
-                config APP_ATM90E32AS_DEFAULT_PGA_4X
-                    bool "x4"
-            endchoice
+                    Current-channel PGA is fixed at 4× (maximum analog gain) to avoid
+                    recalibration when swapping CTs. NCT changes rescale digitally in
+                    the measurement path. This lock is per the thesis requirement that
+                    CT ratio adjustment must not invalidate factory Igain calibration.
 
             choice APP_ATM90E32AS_DEFAULT_LINE_FREQ
                 prompt "Default grid frequency"
@@ -442,8 +434,8 @@ menu "Application Configuration"
                 default 4400
                 help
                     Fixed board burden resistor in milliohms (4400 = 4.4 ohm).
-                    Build-time only — not stored in NVS. Used with VADC limit
-                    720 mVrms for PGA auto-select: Ilim = 0.72 * NCT / (R * PGA).
+                    Build-time only — not stored in NVS. With fixed PGA=4×,
+                    Ilim = 0.72 * NCT / (4.4 * 4) [primary A].
 
             config APP_ATM90E32AS_CT_RATIO
                 int "Default CT ratio NCT (primary:1)"
