@@ -254,20 +254,14 @@ esp_err_t calib_backup_unpack(const uint8_t *file_in, size_t file_len, bool appl
  * Display-only companion to the bin; not authoritative for restore. */
 esp_err_t calib_backup_json(char *json_out, size_t cap, size_t *json_len);
 
-/* ---- Current CT setup / PGA auto-select ----
- * R_BURDEN is Kconfig-only (board fixed). VADC limit = 720 mVrms.
- * Ilim(pga) = 0.72 * NCT / (R_burden * pga_mult)
+/* ---- Current CT setup / PGA (fixed 4×) ----
+ * R_BURDEN is Kconfig (board fixed, 4.4Ω). VADC limit = 720 mVrms.
+ * PGA is locked at 4× per thesis requirement: CT swaps rescale digitally
+ * without recalibration. Ilim = 0.72 * NCT / (4.4 * 4) [primary A].
  *
- * Walk 1X → 2X → 4X (chip-wide, applied to A/B/C).
- *   - Gate to TRY higher PGA: Ilim(next) >= I_Expected (otherwise higher PGA
- *     would clip the operating range — fall back).
- *   - Gate "Rated": if the chosen PGA's Ilim < I_Rated, we accept the
- *     trade-off (higher PGA for accuracy at I_Expected) and set
- *     rated_truncated=true so the operator is warned. I_Rated alone never
- *     forces PGA down.
- *   - When even PGA=1 cannot cover I_Expected: stay at PGA=1, set
- *     expected_clamped=true (LCD shows range warning). I_Expected is NOT
- *     mutated — operator must lower the value or change CT. */
+ * expected_clamped: true when Ilim(PGA=4) < I_Expected (operator must lower
+ *   Expected or use higher-ratio CT; cannot increase PGA).
+ * rated_truncated: true when Ilim < I_Rated (headroom warning; PGA stays 4). */
 
 typedef struct {
     uint16_t ct_ratio;      /* NCT primary:1 — 1000..6000 step 100 */
@@ -275,13 +269,11 @@ typedef struct {
     uint16_t i_expected_a;  /* Operator expected max primary (A) — never mutated */
     atm90e32as_pga_gain_t pga;
     float ilim_a;           /* Ilim of selected PGA (primary A) */
-    /* True when even PGA=1 cannot cover I_Expected (case A). Expected is left
+    /* True when Ilim(PGA=4) cannot cover I_Expected. Expected is left
      * unchanged in i_expected_a; the caller should show a range warning. */
     bool expected_clamped;
-    /* True when the chosen PGA sacrifices I_Rated headroom to keep I_Expected
-     * in range (e.g. 100A Rated + 75A Expected + PGA=4 → Ilim=81.8A). */
+    /* True when Ilim < I_Rated (headroom warning; PGA stays 4). */
     bool rated_truncated;
-    bool igain_reset;       /* true if Igain was forced to 0x8000 */
 } energy_meter_ct_apply_result_t;
 
 /* Pure compute: pick PGA + optional Expected clamp. Does not touch hardware. */
@@ -294,14 +286,14 @@ esp_err_t energy_meter_ct_select_pga(uint16_t ct_ratio, uint16_t i_rated_a,
 unsigned energy_meter_pga_mult(atm90e32as_pga_gain_t pga);
 
 /* Apply CT setup:
- *   - recompute PGA, clamp Expected if needed
- *   - if reset_igain: set all-phase current_gain to 0x8000 (user edited CT fields)
- *   - write PGA (+ optional Igain) to chip and both wiring profiles (PGA chip-wide)
+ *   - compute PGA (always 4×), flag Expected/Rated warnings if Ilim insufficient
+ *   - stamp PGA=4 to chip (idempotent)
+ *   - Igain kept (CT is just a ratio; measurement rescale handles NCT changes)
  *   - does NOT persist config_manager CT fields (caller saves those)
  *   - save_calib_nvs: persist calib blob after apply
  * out may be NULL. */
 esp_err_t energy_meter_ct_apply(uint16_t ct_ratio, uint16_t i_rated_a,
-                                uint16_t i_expected_a, bool reset_igain,
+                                uint16_t i_expected_a,
                                 bool save_calib_nvs,
                                 energy_meter_ct_apply_result_t *out);
 
