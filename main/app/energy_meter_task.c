@@ -257,7 +257,7 @@ esp_err_t energy_meter_ct_select_pga(uint16_t ct_ratio, uint16_t i_rated_a,
 }
 
 esp_err_t energy_meter_ct_apply(uint16_t ct_ratio, uint16_t i_rated_a,
-                                uint16_t i_expected_a, bool reset_igain,
+                                uint16_t i_expected_a,
                                 bool save_calib_nvs,
                                 energy_meter_ct_apply_result_t *out)
 {
@@ -270,7 +270,6 @@ esp_err_t energy_meter_ct_apply(uint16_t ct_ratio, uint16_t i_rated_a,
     if (ret != ESP_OK) {
         return ret;
     }
-    r->igain_reset = reset_igain;
 
     /* CT is a ratio scaling factor. With fixed PGA=4×, Igain survives CT swaps;
      * measurement path rescales by (NCT_current / NCT_calib). Stamping PGA=4
