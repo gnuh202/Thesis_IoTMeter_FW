@@ -183,13 +183,13 @@ typedef struct {
     /* ---- Measurement ---- */
     uint8_t line_freq;       /* 0=50Hz,1=60Hz */
     uint8_t wiring_mode;     /* 0=3P4W,1=3P3W */
-    uint16_t ct_ratio;       /* NCT primary:1 — 1000..6000, step 100 (persisted) */
+    uint16_t ct_ratio;       /* NCT primary:1 — 1000..6000, step 100 (current CT) */
+    uint16_t ct_ratio_calib; /* NCT at calibration time (measurement rescale baseline) */
     uint16_t pt_ratio;       /* RESERVED (PT not used yet) */
     uint16_t i_rated_a;      /* CT nameplate primary current (A) */
     uint16_t i_expected_a;   /* Operator expected max primary (A); true range after Apply */
-    /* System-owned PGA for ATM90 current channels: 1, 2, or 4.
-     * Product path: set only by CT Apply. Dev console may override.
-     * Not stored in calib NVS / SD bin (those are phase gains only). */
+    /* System-owned PGA for ATM90 current channels: fixed at 4 per thesis requirement.
+     * Legacy field kept for config snapshot compatibility. */
     uint8_t pga;
 
     /* ---- LCD ---- (applied by the Home Screen task) */

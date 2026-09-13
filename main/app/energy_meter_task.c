@@ -374,6 +374,29 @@ static esp_err_t energy_meter_save_calibration_to_nvs(const atm90e32as_calib_t *
         ret = nvs_commit(nvs);
     }
     nvs_close(nvs);
+
+    /* Stamp ct_ratio_calib when saving a fresh calibration: this CT's NCT
+     * becomes the rescale baseline. Future CT swaps rescale digitally. */
+    if (ret == ESP_OK) {
+        config_manager_t *cfg = malloc(sizeof(*cfg));
+        if (cfg != NULL && config_manager_get(cfg) == ESP_OK) {
+            if (cfg->ct_ratio >= 1000U && cfg->ct_ratio_calib != cfg->ct_ratio) {
+                cfg->ct_ratio_calib = cfg->ct_ratio;
+                esp_err_t cfg_ret = config_manager_update(cfg);
+                if (cfg_ret == ESP_OK) {
+                    cfg_ret = config_manager_save();
+                }
+                if (cfg_ret == ESP_OK) {
+                    ESP_LOGI(TAG, "stamped ct_ratio_calib=%u (rescale baseline)",
+                             (unsigned)cfg->ct_ratio);
+                } else {
+                    ESP_LOGW(TAG, "calib saved but ct_ratio_calib stamp failed: %s",
+                             esp_err_to_name(cfg_ret));
+                }
+            }
+        }
+        free(cfg);
+    }
     return ret;
 }
 
@@ -498,6 +521,29 @@ static void energy_meter_task(void *arg)
         xSemaphoreGive(s_meter_mutex);
 
         if (ret == ESP_OK) {
+            /* CT ratio rescale: if operator swapped CT since calibration, rescale
+             * measurements digitally. PGA=4 fixed → Igain stays valid; only NCT changes.
+             * ct_ratio_calib=0 (legacy/unset) → no rescale (1.0×). */
+            config_manager_t *cfg = malloc(sizeof(*cfg));
+            if (cfg != NULL && config_manager_get(cfg) == ESP_OK) {
+                if (cfg->ct_ratio_calib >= 1000U && cfg->ct_ratio >= 1000U &&
+                    cfg->ct_ratio != cfg->ct_ratio_calib) {
+                    float nct_scale = (float)cfg->ct_ratio / (float)cfg->ct_ratio_calib;
+                    for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+                        measurements.current[i] *= nct_scale;
+                        measurements.current_peak[i] *= nct_scale;
+                        /* Power rescale: P=V×I, I rescaled → P rescaled */
+                        measurements.active_power[i] *= nct_scale;
+                        measurements.reactive_power[i] *= nct_scale;
+                        measurements.apparent_power[i] *= nct_scale;
+                    }
+                    measurements.total_active_power *= nct_scale;
+                    measurements.total_reactive_power *= nct_scale;
+                    measurements.total_apparent_power *= nct_scale;
+                }
+            }
+            free(cfg);
+
             xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
             s_latest_measurements = measurements;
             s_measurements_valid = true;
