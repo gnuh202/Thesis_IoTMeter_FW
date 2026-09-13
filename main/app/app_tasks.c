@@ -48,18 +48,41 @@ esp_err_t app_tasks_start(void)
 
     /* Read the engineering-mode key combo now that buttons are up. */
     bool engineering_mode = boot_manager_engineering_mode();
+    if (engineering_mode) {
+        ESP_LOGW(TAG, "============================================");
+        ESP_LOGW(TAG, "ENGINEERING MODE ACTIVE");
+        ESP_LOGW(TAG, "Only calibration-related tasks enabled:");
+        ESP_LOGW(TAG, "  - energy_meter (calibration needs it)");
+        ESP_LOGW(TAG, "  - sd_card (export/load)");
+        ESP_LOGW(TAG, "  - console (debug)");
+        ESP_LOGW(TAG, "ALL other tasks disabled:");
+        ESP_LOGW(TAG, "  - LED/IO expander");
+        ESP_LOGW(TAG, "  - WiFi/Ethernet");
+        ESP_LOGW(TAG, "  - MQTT/Modbus");
+        ESP_LOGW(TAG, "============================================");
+    }
 
     /* Peripheral / extension modules: init failure is logged, marked ERROR, and
      * boot continues. Each module keeps its own init ownership; we only feed the
      * result to boot_manager for logging + on-screen status, and to the status
      * registry so consumers see a READY/ERROR baseline after boot. Each start is
-     * called exactly once; its result is reused for both. */
+     * called exactly once; its result is reused for both.
+     *
+     * In engineering mode: ONLY energy_meter + sd_card + console run.
+     * All other tasks (LED, WiFi, Ethernet, Modbus, MQTT) are skipped. */
     esp_err_t r;
 
-    r = io_expander_start();
-    boot_manager_step("Digital IO", r);
-    system_status_set(SYS_MODULE_DIGITAL_INPUT, boot_state(r));
-    system_status_set(SYS_MODULE_DIGITAL_OUTPUT, boot_state(r));
+    /* IO Expander (LED blink) — skip in engineering mode */
+    if (!engineering_mode) {
+        r = io_expander_start();
+        boot_manager_step("Digital IO", r);
+        system_status_set(SYS_MODULE_DIGITAL_INPUT, boot_state(r));
+        system_status_set(SYS_MODULE_DIGITAL_OUTPUT, boot_state(r));
+    } else {
+        ESP_LOGI(TAG, "IO Expander skipped (engineering mode)");
+        system_status_set(SYS_MODULE_DIGITAL_INPUT, SYS_STATUS_OFFLINE);
+        system_status_set(SYS_MODULE_DIGITAL_OUTPUT, SYS_STATUS_OFFLINE);
+    }
 
     r = sd_card_manager_start();
     boot_manager_step("SD Card", r);
@@ -70,39 +93,78 @@ esp_err_t app_tasks_start(void)
      * cannot load its PEM. Non-fatal: a mount failure only costs TLS. */
     boot_manager_step("Cert Store", cert_store_init());
 
+    /* Energy meter — ALWAYS run (calibration needs it) */
     r = energy_meter_task_start();
     boot_manager_step("ATM90E32", r);
     system_status_set(SYS_MODULE_ATM90,
                       r == ESP_OK ? SYS_STATUS_INIT : SYS_STATUS_ERROR);
 
-    r = modbus_slave_task_start();
-    boot_manager_step("RS485 Slave", r);
-    system_status_set(SYS_MODULE_RS485_SLAVE, boot_state(r));
-
-    r = modbus_master_task_start();
-    boot_manager_step("RS485 Master", r);
-    if (r != ESP_OK) {
-        system_status_set(SYS_MODULE_RS485_MASTER, SYS_STATUS_ERROR);
+    /* Modbus slave — skip in engineering mode */
+    if (!engineering_mode) {
+        r = modbus_slave_task_start();
+        boot_manager_step("RS485 Slave", r);
+        system_status_set(SYS_MODULE_RS485_SLAVE, boot_state(r));
+    } else {
+        ESP_LOGI(TAG, "Modbus Slave skipped (engineering mode)");
+        system_status_set(SYS_MODULE_RS485_SLAVE, SYS_STATUS_OFFLINE);
     }
+
+    /* Modbus master — skip in engineering mode */
+    if (!engineering_mode) {
+        r = modbus_master_task_start();
+        boot_manager_step("RS485 Master", r);
+        if (r != ESP_OK) {
+            system_status_set(SYS_MODULE_RS485_MASTER, SYS_STATUS_ERROR);
+        }
+    } else {
+        ESP_LOGI(TAG, "Modbus Master skipped (engineering mode)");
+        system_status_set(SYS_MODULE_RS485_MASTER, SYS_STATUS_OFFLINE);
+    }
+
 #if CONFIG_APP_CONSOLE_ENABLE
     boot_manager_step("Console", console_task_start());
 #endif
-    r = wifi_manager_start();
-    boot_manager_step("WiFi", r);
-    system_status_set(SYS_MODULE_WIFI,
-                      r == ESP_OK ? SYS_STATUS_INIT : SYS_STATUS_ERROR);
 
-    r = network_comm_task_start();
-    boot_manager_step("Ethernet", r);
-    system_status_set(SYS_MODULE_ETHERNET,
-                      r == ESP_OK ? SYS_STATUS_INIT : SYS_STATUS_ERROR);
+    /* WiFi — skip in engineering mode */
+    if (!engineering_mode) {
+        r = wifi_manager_start();
+        boot_manager_step("WiFi", r);
+        system_status_set(SYS_MODULE_WIFI,
+                          r == ESP_OK ? SYS_STATUS_INIT : SYS_STATUS_ERROR);
+    } else {
+        ESP_LOGI(TAG, "WiFi skipped (engineering mode)");
+        system_status_set(SYS_MODULE_WIFI, SYS_STATUS_OFFLINE);
+    }
 
-    boot_manager_step("Network", network_manager_start());
+    /* Ethernet — skip in engineering mode */
+    if (!engineering_mode) {
+        r = network_comm_task_start();
+        boot_manager_step("Ethernet", r);
+        system_status_set(SYS_MODULE_ETHERNET,
+                          r == ESP_OK ? SYS_STATUS_INIT : SYS_STATUS_ERROR);
+    } else {
+        ESP_LOGI(TAG, "Ethernet skipped (engineering mode)");
+        system_status_set(SYS_MODULE_ETHERNET, SYS_STATUS_OFFLINE);
+    }
+
+    /* Network manager — skip in engineering mode */
+    if (!engineering_mode) {
+        boot_manager_step("Network", network_manager_start());
+    } else {
+        ESP_LOGI(TAG, "Network Manager skipped (engineering mode)");
+    }
+
 #if CONFIG_APP_MQTT_ENABLE
-    r = mqtt_manager_start();
-    boot_manager_step("MQTT", r);
-    system_status_set(SYS_MODULE_MQTT,
-                      r == ESP_OK ? SYS_STATUS_INIT : SYS_STATUS_ERROR);
+    /* MQTT — skip in engineering mode */
+    if (!engineering_mode) {
+        r = mqtt_manager_start();
+        boot_manager_step("MQTT", r);
+        system_status_set(SYS_MODULE_MQTT,
+                          r == ESP_OK ? SYS_STATUS_INIT : SYS_STATUS_ERROR);
+    } else {
+        ESP_LOGI(TAG, "MQTT skipped (engineering mode)");
+        system_status_set(SYS_MODULE_MQTT, SYS_STATUS_OFFLINE);
+    }
 #else
     system_status_set(SYS_MODULE_MQTT, SYS_STATUS_OFFLINE);
 #endif

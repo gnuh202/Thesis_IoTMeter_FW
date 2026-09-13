@@ -116,16 +116,32 @@ void boot_manager_end(void)
 
 bool boot_manager_engineering_mode(void)
 {
+    /* Cache the result at boot — it's constant for the session lifetime.
+     * User and engineer modes are completely isolated: device enters one mode
+     * at boot and must reset to switch modes. */
+    static bool s_cached = false;
+    static bool s_engineering_mode = false;
+
+    if (s_cached) {
+        return s_engineering_mode;
+    }
+
     if (!s_lcd_ok) {
+        s_engineering_mode = false;
+        s_cached = true;
         return false;
     }
 
     uint8_t mask = 0;
     if (hmi_bsp_read_buttons(&mask) != ESP_OK) {
+        s_engineering_mode = false;
+        s_cached = true;
         return false;
     }
     /* LEFT + RIGHT held together at boot selects engineering mode. */
-    return (mask & HMI_BSP_BUTTON_LEFT) && (mask & HMI_BSP_BUTTON_RIGHT);
+    s_engineering_mode = (mask & HMI_BSP_BUTTON_LEFT) && (mask & HMI_BSP_BUTTON_RIGHT);
+    s_cached = true;
+    return s_engineering_mode;
 }
 
 uint8_t boot_manager_get_status(const boot_module_status_t **out)

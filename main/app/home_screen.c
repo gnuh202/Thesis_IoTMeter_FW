@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "boot_manager.h"
 #include "config_apply.h"
 #include "config_manager.h"
 #include "energy_meter_task.h"
@@ -735,6 +736,13 @@ static uint8_t s_led_mask_written = 0xFF;  /* 0xFF = never written, forces first
 
 static void update_leds(void)
 {
+    /* In engineering mode: LED status pattern is disabled (calibration is
+     * isolated from all background tasks and visual indicators).
+     * boot_manager_engineering_mode() is cached at boot, constant for session. */
+    if (boot_manager_engineering_mode()) {
+        return;
+    }
+
     bool blink = status_blink_phase();
     uint8_t mask = 0;
 
@@ -1120,12 +1128,28 @@ static void line_freq_value(lcd_menu_t *menu, const lcd_menu_item_t *item, char 
  *            No=discard draft and exit
  *   clean → exit, no prompt.
  * Device clamp of Expected alone does not count as user edit for Igain reset. */
+/* CT configuration constants */
 #define CT_RATIO_MIN  1000U
 #define CT_RATIO_MAX  6000U
 #define CT_RATIO_STEP 100U
+#define CT_PRIMARY_MIN  1000U
+#define CT_PRIMARY_MAX  6000U
+#define CT_PRIMARY_STEP 100U
+#define CT_SECONDARY_FIXED 1U  /* Secondary always 1 (1:N format) */
 #define CT_I_EDIT_MIN 1U
 #define CT_I_EDIT_MAX 10000U
 #define CT_I_EDIT_STEP 1U
+
+/* CT I_max calculation: V_ADC_max=180mV (720mV/PGA4), R_burden=4.4Ω
+ * I_max(A) = (V_ADC_max / R_burden) × NCT
+ *          = (0.180V / 4.4Ω) × NCT
+ *          = 0.040909091 × NCT
+ *
+ * Optimized integer formula to avoid division in display path:
+ * I_max_mA = (NCT × 40909) / 1000  (result in milliamps)
+ * This way: only ONE division by constant 1000, MCU handles efficiently */
+#define CT_IMAX_COEFF_MA  40909UL  /* 0.040909 A/ratio × 1000 mA/A */
+#define CT_CALC_IMAX_MA(nct)  (((uint32_t)(nct) * CT_IMAX_COEFF_MA) / 1000UL)
 
 static uint32_t setting_repeat_interval_ms(uint32_t held_ms);
 
@@ -1185,83 +1209,6 @@ static uint16_t wrap_step_u16(uint16_t value, bool increment,
     return (uint16_t)(value - step);
 }
 
-static bool edit_ct_u16(const char *title, const char *unit, uint16_t initial, uint16_t *result,
-                        uint16_t min_v, uint16_t max_v, uint16_t step)
-{
-    uint16_t value = clamp_step_u16(initial, min_v, max_v, step);
-
-    wait_buttons_released();
-    uint8_t previous = 0;
-    uint8_t held_key = 0;
-    TickType_t pressed_at = 0;
-    TickType_t repeat_at = 0;
-    bool redraw = true;
-
-    while (1) {
-        if (redraw) {
-            char line[HOME_LCD_WIDTH + 1];
-            put_line_centre(0, title);
-            put_line(1, "");
-            if (unit && unit[0]) {
-                snprintf(line, sizeof(line), "%u %s", (unsigned)value, unit);
-            } else {
-                snprintf(line, sizeof(line), "%u", (unsigned)value);
-            }
-            put_line_centre(2, line);
-            put_line(3, "");
-            redraw = false;
-        }
-
-        uint8_t buttons = 0;
-        if (hmi_bsp_read_buttons(&buttons) != ESP_OK) buttons = 0;
-        uint8_t edges = buttons & ~previous;
-        previous = buttons;
-
-        if (edges & HMI_BSP_BUTTON_LEFT) {
-            button_click();
-            wait_buttons_released();
-            return false;
-        }
-        if (edges & HMI_BSP_BUTTON_CENTER) {
-            button_click();
-            wait_buttons_released();
-            *result = value;
-            return true;
-        }
-
-        const uint8_t adjust_mask = HMI_BSP_BUTTON_TOP | HMI_BSP_BUTTON_BOTTOM;
-        uint8_t direction = buttons & adjust_mask;
-        uint8_t direction_edges = edges & adjust_mask;
-        TickType_t now = xTaskGetTickCount();
-
-        if ((direction_edges == HMI_BSP_BUTTON_TOP ||
-             direction_edges == HMI_BSP_BUTTON_BOTTOM) &&
-            direction == direction_edges) {
-            value = wrap_step_u16(value, direction_edges == HMI_BSP_BUTTON_TOP,
-                                  min_v, max_v, step);
-            held_key = direction_edges;
-            pressed_at = now;
-            repeat_at = now + pdMS_TO_TICKS(HOME_SETTING_HOLD_MS);
-            redraw = true;
-            button_click();
-        } else if (direction == held_key && held_key != 0) {
-            if ((int32_t)(now - repeat_at) >= 0) {
-                value = wrap_step_u16(value, held_key == HMI_BSP_BUTTON_TOP,
-                                      min_v, max_v, step);
-                uint32_t held_ms = (uint32_t)((now - pressed_at) * portTICK_PERIOD_MS);
-                repeat_at = now + pdMS_TO_TICKS(setting_repeat_interval_ms(held_ms));
-                redraw = true;
-            }
-        } else {
-            held_key = 0;
-        }
-
-        alarm_tick();
-        update_leds();
-        vTaskDelay(pdMS_TO_TICKS(HOME_POLL_MS));
-    }
-}
-
 static esp_err_t menu_current_ct(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
 {
     (void)menu; (void)item; (void)ctx;
@@ -1279,36 +1226,30 @@ static esp_err_t menu_current_ct(lcd_menu_t *menu, const lcd_menu_item_t *item, 
 
     uint16_t draft_nct = clamp_step_u16(cfg->ct_ratio ? cfg->ct_ratio : CT_RATIO_MIN,
                                         CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
-    uint16_t draft_rated = cfg->i_rated_a ? cfg->i_rated_a : 1U;
-    uint16_t draft_exp = cfg->i_expected_a ? cfg->i_expected_a : 1U;
-    if (draft_rated < CT_I_EDIT_MIN) draft_rated = CT_I_EDIT_MIN;
-    if (draft_rated > CT_I_EDIT_MAX) draft_rated = CT_I_EDIT_MAX;
-    if (draft_exp < CT_I_EDIT_MIN) draft_exp = CT_I_EDIT_MIN;
-    if (draft_exp > CT_I_EDIT_MAX) draft_exp = CT_I_EDIT_MAX;
     uint16_t orig_nct = draft_nct;
-    uint16_t orig_rated = draft_rated;
-    uint16_t orig_exp = draft_exp;
 
-    int cursor = 0;
     bool redraw = true;
     uint8_t previous = 0;
+    uint8_t held_key = 0;
+    TickType_t pressed_at = 0;
+    TickType_t repeat_at = 0;
 
     wait_buttons_released();
     while (1) {
         if (redraw) {
             char l1[HOME_LCD_WIDTH + 1];
             char l2[HOME_LCD_WIDTH + 1];
-            char l3[HOME_LCD_WIDTH + 1];
             put_line_centre(0, "CURRENT CT");
-            snprintf(l1, sizeof(l1), "%c CT Ratio %u:1",
-                     cursor == 0 ? '>' : ' ', (unsigned)draft_nct);
-            snprintf(l2, sizeof(l2), "%c I Rated  %uA",
-                     cursor == 1 ? '>' : ' ', (unsigned)draft_rated);
-            snprintf(l3, sizeof(l3), "%c I Expect %uA",
-                     cursor == 2 ? '>' : ' ', (unsigned)draft_exp);
+
+            /* Calculate I_max for display */
+            uint32_t i_max_ma = CT_CALC_IMAX_MA(draft_nct);
+            float i_max_a = (float)i_max_ma / 1000.0f;
+
+            snprintf(l1, sizeof(l1), "> Ratio  <%u:1>  ", (unsigned)draft_nct);
+            snprintf(l2, sizeof(l2), "  I max  %.1f A", i_max_a);
             put_line(1, l1);
             put_line(2, l2);
-            put_line(3, l3);
+            put_line(3, "");
             redraw = false;
         }
 
@@ -1319,57 +1260,45 @@ static esp_err_t menu_current_ct(lcd_menu_t *menu, const lcd_menu_item_t *item, 
 
         if (edges & HMI_BSP_BUTTON_TOP) {
             button_click();
-            cursor = (cursor + 2) % 3;
+            draft_nct = wrap_step_u16(draft_nct, true, CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
+            held_key = HMI_BSP_BUTTON_TOP;
+            pressed_at = xTaskGetTickCount();
+            repeat_at = pressed_at + pdMS_TO_TICKS(HOME_SETTING_HOLD_MS);
             redraw = true;
         } else if (edges & HMI_BSP_BUTTON_BOTTOM) {
             button_click();
-            cursor = (cursor + 1) % 3;
+            draft_nct = wrap_step_u16(draft_nct, false, CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
+            held_key = HMI_BSP_BUTTON_BOTTOM;
+            pressed_at = xTaskGetTickCount();
+            repeat_at = pressed_at + pdMS_TO_TICKS(HOME_SETTING_HOLD_MS);
             redraw = true;
         } else if (edges & HMI_BSP_BUTTON_CENTER) {
             button_click();
             wait_buttons_released();
-            uint16_t edited = 0;
-            bool ok = false;
-            if (cursor == 0) {
-                ok = edit_ct_u16("CT RATIO", ":1", draft_nct, &edited,
-                                 CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
-                if (ok) draft_nct = edited;
-            } else if (cursor == 1) {
-                ok = edit_ct_u16("I RATED", "A", draft_rated, &edited,
-                                 CT_I_EDIT_MIN, CT_I_EDIT_MAX, CT_I_EDIT_STEP);
-                if (ok) draft_rated = edited;
-            } else {
-                ok = edit_ct_u16("I EXPECTED", "A", draft_exp, &edited,
-                                 CT_I_EDIT_MIN, CT_I_EDIT_MAX, CT_I_EDIT_STEP);
-                if (ok) draft_exp = edited;
-            }
-            previous = 0;
-            redraw = true;
-            (void)ok;
-        } else if (edges & HMI_BSP_BUTTON_LEFT) {
-            button_click();
-            wait_buttons_released();
 
-            bool dirty = (draft_nct != orig_nct) ||
-                         (draft_rated != orig_rated) ||
-                         (draft_exp != orig_exp);
+            bool dirty = (draft_nct != orig_nct);
             if (!dirty) {
                 free(cfg);
                 return ESP_OK;
             }
 
             put_line_centre(0, "APPLY CT?");
-            put_line_centre(1, "Save PGA / range");
+            put_line_centre(1, "Save ratio");
+            put_line(2, "");
             put_line(3, "");
             if (!wait_confirm_cancel()) {
                 free(cfg);
                 return ESP_OK;
             }
 
-            /* PGA=4 fixed → Igain kept. CT is just a ratio; measurement path rescales. */
+            /* Get current I_rated */
+            uint16_t i_rated = cfg->i_rated_a ? cfg->i_rated_a : 1U;
+            if (i_rated < CT_I_EDIT_MIN) i_rated = CT_I_EDIT_MIN;
+            if (i_rated > CT_I_EDIT_MAX) i_rated = CT_I_EDIT_MAX;
+
+            /* Apply CT ratio */
             energy_meter_ct_apply_result_t result;
-            esp_err_t ret = energy_meter_ct_apply(draft_nct, draft_rated, draft_exp,
-                                                  true, &result);
+            esp_err_t ret = energy_meter_ct_apply(draft_nct, i_rated, 0, true, &result);
             if (ret == ESP_OK) {
                 cfg->ct_ratio = result.ct_ratio;
                 cfg->i_rated_a = result.i_rated_a;
@@ -1382,34 +1311,37 @@ static esp_err_t menu_current_ct(lcd_menu_t *menu, const lcd_menu_item_t *item, 
 
             if (ret != ESP_OK) {
                 show_action_result(false);
-                previous = 0;
-                redraw = true;
-                continue;
-            }
-
-            /* Stay in menu with applied (possibly clamped) values as new baseline. */
-            draft_nct = result.ct_ratio;
-            draft_rated = result.i_rated_a;
-            draft_exp = result.i_expected_a;
-            orig_nct = draft_nct;
-            orig_rated = draft_rated;
-            orig_exp = draft_exp;
-            previous = 0;
-            redraw = true;
-            if (result.expected_clamped) {
-                /* Even PGA=1 cannot cover I_Expected. */
-                char note[HOME_LCD_WIDTH + 1];
-                snprintf(note, sizeof(note), "Clamped %uA", (unsigned)draft_exp);
-                show_info("RANGE WARN", note, "PGA=1x", "Reduce I Exp");
-            } else if (result.rated_truncated) {
-                /* PGA=4 keeps I_Expected but clips I_Rated headroom. */
-                char note[HOME_LCD_WIDTH + 1];
-                snprintf(note, sizeof(note), "PGA=%ux Ilim=%.0fA",
-                         energy_meter_pga_mult(result.pga), (double)result.ilim_a);
-                show_info("TRADE-OFF", note, "Rated headroom", "reduced");
+                draft_nct = orig_nct;  /* Rollback on error */
             } else {
+                /* Success - update baseline */
+                orig_nct = result.ct_ratio;
+                draft_nct = orig_nct;
                 show_action_result(true);
             }
+            previous = 0;
+            redraw = true;
+        } else if (edges & HMI_BSP_BUTTON_LEFT) {
+            button_click();
+            wait_buttons_released();
+            free(cfg);
+            return ESP_OK;
+        } else if (edges & HMI_BSP_BUTTON_RIGHT) {
+            /* RIGHT button has no function here, but still beep for consistency */
+            button_click();
+        }
+
+        /* Key repeat for ratio adjustment */
+        if (held_key != 0 && (buttons & held_key)) {
+            TickType_t now = xTaskGetTickCount();
+            if ((int32_t)(now - repeat_at) >= 0) {
+                draft_nct = wrap_step_u16(draft_nct, held_key == HMI_BSP_BUTTON_TOP,
+                                          CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
+                uint32_t held_ms = (uint32_t)((now - pressed_at) * portTICK_PERIOD_MS);
+                repeat_at = now + pdMS_TO_TICKS(setting_repeat_interval_ms(held_ms));
+                redraw = true;
+            }
+        } else {
+            held_key = 0;
         }
 
         alarm_tick();
@@ -2261,11 +2193,15 @@ static esp_err_t menu_calib_export_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
 {
     (void)menu; (void)item; (void)ctx;
 
+    ESP_LOGI(TAG, "[ENGINEER] Calibration Export SD requested");
+
     if (!sd_card_is_inserted()) {
+        ESP_LOGW(TAG, "[ENGINEER] Export failed: SD card not inserted");
         show_info("NO SD CARD", "Insert card", "", "OK: Back");
         return ESP_OK;
     }
     if (!sd_card_is_mounted()) {
+        ESP_LOGW(TAG, "[ENGINEER] Export failed: SD card not mounted");
         show_info("SD NOT READY", "Wait or reinsert", "", "OK: Back");
         return ESP_OK;
     }
@@ -2279,8 +2215,10 @@ static esp_err_t menu_calib_export_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
         basename = basename ? basename + 1 : path;
         char display[HOME_LCD_WIDTH + 1];
         snprintf(display, sizeof(display), "%.20s", basename);
+        ESP_LOGI(TAG, "[ENGINEER] Export succeeded: %s", path);
         show_info("EXPORTED", display, "", "OK: Back");
     } else {
+        ESP_LOGE(TAG, "[ENGINEER] Export failed: %s", esp_err_to_name(ret));
         show_action_result(false);
     }
     return ESP_OK;
@@ -2291,11 +2229,15 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
 {
     (void)menu; (void)item; (void)ctx;
 
+    ESP_LOGI(TAG, "[ENGINEER] Calibration Load SD requested");
+
     if (!sd_card_is_inserted()) {
+        ESP_LOGW(TAG, "[ENGINEER] Load failed: SD card not inserted");
         show_info("NO SD CARD", "Insert card", "", "OK: Back");
         return ESP_OK;
     }
     if (!sd_card_is_mounted()) {
+        ESP_LOGW(TAG, "[ENGINEER] Load failed: SD card not mounted");
         show_info("SD NOT READY", "Wait or reinsert", "", "OK: Back");
         return ESP_OK;
     }
@@ -2305,6 +2247,8 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
     size_t count;
     esp_err_t ret = sd_card_calib_list(files, 16, &count);
     if (ret != ESP_OK || count == 0) {
+        ESP_LOGW(TAG, "[ENGINEER] Load failed: no calibration files found (ret=%s, count=%zu)",
+                 esp_err_to_name(ret), count);
         show_info("NO FILES", "/sdcard/calib", "", "OK: Back");
         return ESP_OK;
     }
@@ -2329,14 +2273,10 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
             size_t idx = window_start + i;
 
             if (idx < count) {
-                /* Display: "[3W] c3w_01" or "[4W] c4w_02" (short 8.3 names) */
-                const char *mode_str = (files[idx].mode == 1) ? "3W" : "4W";
-                const char *short_mode = (files[idx].mode == 1) ? "c3w" : "c4w";
-
-                /* Build line: pointer + mode + filename, pad to full width */
-                int written = snprintf(line, sizeof(line), "%c [%s] %s_%02d",
+                /* Display: "> Calib 01" (no 3W/4W prefix since we only calibrate 4W) */
+                int written = snprintf(line, sizeof(line), "%c Calib %02d",
                                        (idx == cursor) ? '>' : ' ',
-                                       mode_str, short_mode, files[idx].num);
+                                       files[idx].num);
 
                 /* Pad remaining space (put_line uses strlen, so must pad explicitly) */
                 if (written < HOME_LCD_WIDTH) {
@@ -2408,7 +2348,16 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
         return ESP_OK;
     }
 
+    ESP_LOGI(TAG, "[ENGINEER] Load calibration: selected '%s' (mode=%s)",
+             files[cursor].filename, file_mode_str);
+
     ret = sd_card_calib_import(files[cursor].filename);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "[ENGINEER] Import succeeded: %s", files[cursor].filename);
+    } else {
+        ESP_LOGE(TAG, "[ENGINEER] Import failed: %s (ret=%s)",
+                 files[cursor].filename, esp_err_to_name(ret));
+    }
     show_action_result(ret == ESP_OK);
     return ESP_OK;
 }

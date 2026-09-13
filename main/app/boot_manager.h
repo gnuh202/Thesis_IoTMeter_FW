@@ -48,6 +48,10 @@ void boot_manager_end(void);
 /*
  * True if the engineering-mode key combo (LEFT + RIGHT) is held at boot. Read
  * once, after boot_manager_begin() has brought up the buttons.
+ *
+ * This flag is set once at boot and remains constant for the entire session.
+ * Device must reset to change modes — user mode and engineer mode are
+ * completely isolated.
  */
 bool boot_manager_engineering_mode(void);
 
