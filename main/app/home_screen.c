@@ -1366,12 +1366,10 @@ static esp_err_t menu_current_ct(lcd_menu_t *menu, const lcd_menu_item_t *item, 
                 return ESP_OK;
             }
 
-            /* User changed any of the 3 fields → reset Igain to 0x8000.
-             * Device clamp of Expected alone does not count (handled inside apply
-             * after this flag is set from pre-apply draft vs orig). */
+            /* PGA=4 fixed → Igain kept. CT is just a ratio; measurement path rescales. */
             energy_meter_ct_apply_result_t result;
             esp_err_t ret = energy_meter_ct_apply(draft_nct, draft_rated, draft_exp,
-                                                  true /* reset_igain */, true, &result);
+                                                  true, &result);
             if (ret == ESP_OK) {
                 cfg->ct_ratio = result.ct_ratio;
                 cfg->i_rated_a = result.i_rated_a;
