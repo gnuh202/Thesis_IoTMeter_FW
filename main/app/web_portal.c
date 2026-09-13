@@ -1625,7 +1625,7 @@ static void send_mqtt_broker_block(httpd_req_t *req, const config_mqtt_profile_t
     /* The interval sits beside the label, not the port, so the wide server address
      * below does not split the remaining half-width fields: that leaves
      * Port|Keep-alive and Username|Password each on a full row. */
-    send_input(req, "Label", "mqtt_name", p->name);
+    send_input(req, "Broker name", "mqtt_name", p->name);
     send_input(req, "Publish interval (seconds)", "publish_period_s", period_s);
     send_input_ex(req, "Server address", "mqtt_uri", p->broker, true);
     snprintf(buf, sizeof(buf), "%u", (unsigned)p->port);
