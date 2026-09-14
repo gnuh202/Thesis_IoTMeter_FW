@@ -334,6 +334,8 @@ static void poll_em07k_slot(uint8_t slot, uint8_t addr)
     }
     if (mb_read_holding(addr, EM07K_REG_VOLT_L1, 3, v) == ESP_OK) {
         ok++;
+        ESP_LOGI(TAG, "EM07K addr=%d VTR=%u CTR=%u VOLT[L1=%u L2=%u L3=%u]",
+                 addr, ratios[0], ratios[1], v[0], v[1], v[2]);
     } else {
         fail++;
     }
