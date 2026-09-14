@@ -19,22 +19,17 @@
  * enabled (esp_vfs_fat_spiflash_mount_rw_wl) because certificates are rewritten
  * in place whenever the operator uploads a new one.
  *
- * Files are named "<slot><profile>.pem" so each MQTT profile has its own triple:
- * ca0/cert0/key0 for profile 0, ca1/... for profile 1, and so on. Three profiles
- * are three independent brokers, so a shared CA file would mean switching the
- * active profile silently verified against the previous broker's CA.
+ * Files are named "<slot><profile>.pem", and the device's single MQTT broker is
+ * profile 0: ca0/cert0/key0. The index is part of the name rather than fixed in
+ * the code so that this module has no knowledge of how many brokers the
+ * configuration layer supports.
  *
  * CONFIG_FATFS_LFN_NONE is set in this project, so filenames must stay inside
  * 8.3. The longest base name is "cert0" (5 chars), well inside the limit.
  */
 
-/* The profile index in a filename comes straight from the config manager's
- * profile array, so the two counts have to agree. */
-_Static_assert(CERT_STORE_PROFILE_COUNT == CONFIG_MANAGER_MQTT_PROFILE_COUNT,
-               "cert store profile count must match the MQTT profile count");
-
 /* Paths written here go into config_mqtt_profile_t.ca_path and friends, so they
- * must fit that field too. */
+ * must fit the broker struct's path fields too. */
 _Static_assert(CERT_STORE_PATH_MAX <= CONFIG_MANAGER_MQTT_PATH_LEN,
                "cert store paths must fit the profile's path fields");
 
@@ -101,16 +96,16 @@ esp_err_t cert_store_init(void)
     ESP_LOGI(TAG, "certificate store mounted at %s (partition \"%s\")",
              CERT_STORE_MOUNT_POINT, CERT_STORE_PARTITION_LABEL);
 
-    /* Log presence only — never content. Helps diagnose a TLS profile that
+    /* Log presence only — never content. Helps diagnose a TLS broker that
      * refuses to connect because its file was never uploaded. Absent slots are
-     * skipped: with 3 profiles x 3 slots, listing every empty one would bury the
-     * boot log for what is normally a one-CA setup. */
+     * skipped so a plain one-CA setup does not print lines for files it does
+     * not use. */
     for (int prof = 0; prof < CERT_STORE_PROFILE_COUNT; prof++) {
         for (int i = 0; i < CERT_SLOT_COUNT; i++) {
             cert_slot_info_t info;
             char path[CERT_STORE_PATH_MAX];
             if (cert_store_stat(prof, (cert_slot_t)i, &info) == ESP_OK && info.present) {
-                ESP_LOGI(TAG, "  profile %d %-4s %s (%u bytes)", prof, s_slot_names[i],
+                ESP_LOGI(TAG, "  broker slot %-4s %s (%u bytes)", s_slot_names[i],
                          slot_path(prof, (cert_slot_t)i, path, sizeof(path)),
                          (unsigned)info.size);
             }

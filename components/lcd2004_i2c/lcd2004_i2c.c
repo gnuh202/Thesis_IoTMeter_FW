@@ -178,3 +178,23 @@ esp_err_t lcd2004_i2c_backlight(lcd2004_i2c_handle_t handle, bool on)
     handle->backlight = on ? LCD_BIT_BL : 0;
     return lcd_write_raw(handle, 0);
 }
+
+esp_err_t lcd2004_i2c_create_char(lcd2004_i2c_handle_t handle, uint8_t location, const uint8_t charmap[8])
+{
+    ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
+    ESP_RETURN_ON_FALSE(charmap != NULL, ESP_ERR_INVALID_ARG, TAG, "charmap is NULL");
+    ESP_RETURN_ON_FALSE(location < 8, ESP_ERR_INVALID_ARG, TAG, "location must be 0-7");
+
+    /* Set CGRAM address (0x40 + location * 8) */
+    ESP_RETURN_ON_ERROR(lcd_command(handle, (uint8_t)(0x40 | (location << 3))), TAG, "set CGRAM address failed");
+
+    /* Write 8 bytes of character pattern */
+    for (uint8_t i = 0; i < 8; i++) {
+        ESP_RETURN_ON_ERROR(lcd_write_byte(handle, charmap[i], true), TAG, "write CGRAM data failed");
+    }
+
+    /* Return to DDRAM mode (cursor to home) */
+    ESP_RETURN_ON_ERROR(lcd_command(handle, 0x80), TAG, "return to DDRAM failed");
+
+    return ESP_OK;
+}

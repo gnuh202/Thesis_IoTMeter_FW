@@ -110,16 +110,10 @@ static esp_err_t energy_meter_apply_locked(const atm90e32as_calib_t *target);
 static void energy_meter_stamp_chipwide_locked(atm90e32as_pga_gain_t pga,
                                               atm90e32as_line_freq_t freq);
 
-/* Kconfig "ATM90E32AS Parameters" — first-boot / factory defaults only. */
+/* Kconfig "ATM90E32AS Parameters" — PGA fixed at 4× per thesis requirement. */
 static atm90e32as_pga_gain_t energy_meter_kconfig_default_pga(void)
 {
-#if CONFIG_APP_ATM90E32AS_DEFAULT_PGA_4X
-    return ATM90E32AS_PGA_GAIN_4X;
-#elif CONFIG_APP_ATM90E32AS_DEFAULT_PGA_2X
-    return ATM90E32AS_PGA_GAIN_2X;
-#else
-    return ATM90E32AS_PGA_GAIN_1X;
-#endif
+    return ATM90E32AS_PGA_GAIN_4X;  /* Fixed per CONFIG_APP_ATM90E32AS_FIXED_PGA_4X */
 }
 
 static atm90e32as_line_freq_t energy_meter_kconfig_default_line_freq(void)
@@ -188,31 +182,8 @@ static atm90e32as_pga_gain_t energy_meter_resolve_system_pga(atm90e32as_pga_gain
     if (out_need_persist) {
         *out_need_persist = false;
     }
-    /* Heap the snapshot: config_manager_t is ~2.6 KB and energy_meter_init runs on
-     * main_task (CONFIG_ESP_MAIN_TASK_STACK_SIZE, often 3584 B). A stack local here
-     * overflows into the heap and corrupts TLSF before spi_bus_initialize(). */
-    config_manager_t *cfg = malloc(sizeof(*cfg));
-    if (cfg == NULL) {
-        return energy_meter_kconfig_default_pga();
-    }
-    atm90e32as_pga_gain_t result = energy_meter_kconfig_default_pga();
-    if (config_manager_get(cfg) == ESP_OK) {
-        if (cfg->pga == 1U || cfg->pga == 2U || cfg->pga == 4U) {
-            result = energy_meter_pga_from_config_u8(cfg->pga);
-        } else {
-            /* Unset (legacy snapshot): prefer calib NVS hint, else Kconfig. */
-            atm90e32as_pga_gain_t pga = calib_hint;
-            if (pga > ATM90E32AS_PGA_GAIN_4X) {
-                pga = energy_meter_kconfig_default_pga();
-            }
-            if (out_need_persist) {
-                *out_need_persist = true;
-            }
-            result = pga;
-        }
-    }
-    free(cfg);
-    return result;
+    (void)calib_hint;
+    return ATM90E32AS_PGA_GAIN_4X;  /* Fixed; CT ratio changes rescale digitally */
 }
 
 /* Ilim(pga) = VADC_limit * NCT / (R_burden * pga_mult)  [primary amps] */
@@ -269,56 +240,24 @@ esp_err_t energy_meter_ct_select_pga(uint16_t ct_ratio, uint16_t i_rated_a,
     out->ct_ratio = ct_ratio;
     out->i_rated_a = i_rated_a;
     out->i_expected_a = i_expected_a;
-    out->expected_clamped = false;
-    out->rated_truncated = false;
+    out->pga = ATM90E32AS_PGA_GAIN_4X;  /* Fixed */
 
-    /* Candidates in INCREASING gain order so we walk 1 → 2 → 4. */
-    const atm90e32as_pga_gain_t candidates[] = {
-        ATM90E32AS_PGA_GAIN_1X,
-        ATM90E32AS_PGA_GAIN_2X,
-        ATM90E32AS_PGA_GAIN_4X,
-    };
-    const size_t n_cand = sizeof(candidates) / sizeof(candidates[0]);
+    /* Ilim at PGA=4: 0.72 * NCT / (R_burden * 4) */
+    out->ilim_a = energy_meter_ilim_a(ct_ratio, 4U);
 
-    /* PGA=1 is the floor. */
-    float ilim1 = energy_meter_ilim_a(ct_ratio, 1U);
-    if (ilim1 + 1e-6f < (float)i_expected_a) {
-        /* Case A: even 1× cannot cover Expected. Stay at 1×, do NOT mutate. */
-        out->pga = ATM90E32AS_PGA_GAIN_1X;
-        out->ilim_a = ilim1;
+    /* Range warnings if Ilim4 cannot cover the operator's requirements.
+     * No fallback to lower PGA — digital rescale absorbs CT changes. */
+    if (out->ilim_a + 1e-6f < (float)i_expected_a) {
         out->expected_clamped = true;
-        out->rated_truncated = ((float)i_rated_a > ilim1);
-        return ESP_OK;
     }
-
-    atm90e32as_pga_gain_t chosen = ATM90E32AS_PGA_GAIN_1X;
-    float chosen_ilim = ilim1;
-
-    for (size_t i = 1; i < n_cand; i++) {
-        unsigned mult = energy_meter_pga_mult(candidates[i]);
-        float ilim_next = energy_meter_ilim_a(ct_ratio, mult);
-
-        /* If the higher PGA would clip Expected, we cannot pick it. Stop here. */
-        if (ilim_next + 1e-6f < (float)i_expected_a) {
-            break;
-        }
-        /* Higher PGA still covers Expected. Take it.
-         * If it also clips Rated we will set rated_truncated below for the UI. */
-        chosen = candidates[i];
-        chosen_ilim = ilim_next;
-    }
-
-    out->pga = chosen;
-    out->ilim_a = chosen_ilim;
-    if (chosen_ilim + 1e-6f < (float)i_rated_a) {
-        /* Trade-off: PGA covers Expected but clips Rated headroom. */
+    if (out->ilim_a + 1e-6f < (float)i_rated_a) {
         out->rated_truncated = true;
     }
     return ESP_OK;
 }
 
 esp_err_t energy_meter_ct_apply(uint16_t ct_ratio, uint16_t i_rated_a,
-                                uint16_t i_expected_a, bool reset_igain,
+                                uint16_t i_expected_a,
                                 bool save_calib_nvs,
                                 energy_meter_ct_apply_result_t *out)
 {
@@ -331,16 +270,12 @@ esp_err_t energy_meter_ct_apply(uint16_t ct_ratio, uint16_t i_rated_a,
     if (ret != ESP_OK) {
         return ret;
     }
-    r->igain_reset = reset_igain;
 
+    /* CT is a ratio scaling factor. With fixed PGA=4×, Igain survives CT swaps;
+     * measurement path rescales by (NCT_current / NCT_calib). Stamping PGA=4
+     * here is idempotent (already 4), kept for uniformity with line_freq stamp. */
     xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
     s_current_calib.pga_gain = r->pga;
-    if (reset_igain) {
-        for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
-            s_current_calib.phase[i].current_gain = ENERGY_METER_FACTORY_GAIN;
-            s_calib.phase[i].current_gain = ENERGY_METER_FACTORY_GAIN;
-        }
-    }
     /* PGA is chip-wide runtime stamp only; authoritative store is config_manager. */
     energy_meter_stamp_chipwide_locked(r->pga, s_current_calib.line_freq);
     s_calib = s_current_calib;
@@ -360,12 +295,11 @@ esp_err_t energy_meter_ct_apply(uint16_t ct_ratio, uint16_t i_rated_a,
     }
 
     ESP_LOGI(TAG,
-             "CT apply: NCT=%u Rated=%uA Expected=%uA PGA=%ux Ilim=%.1fA%s%s Igain%s",
+             "CT apply: NCT=%u Rated=%uA Expected=%uA PGA=%ux Ilim=%.1fA%s%s (Igain kept)",
              (unsigned)r->ct_ratio, (unsigned)r->i_rated_a, (unsigned)r->i_expected_a,
              energy_meter_pga_mult(r->pga), (double)r->ilim_a,
              r->expected_clamped ? " [exp range warning]" : "",
-             r->rated_truncated ? " [rated truncated]" : "",
-             reset_igain ? "=0x8000" : " kept");
+             r->rated_truncated ? " [rated truncated]" : "");
 
     if (save_calib_nvs) {
         ret = energy_meter_save_calibration();
@@ -439,6 +373,29 @@ static esp_err_t energy_meter_save_calibration_to_nvs(const atm90e32as_calib_t *
         ret = nvs_commit(nvs);
     }
     nvs_close(nvs);
+
+    /* Stamp ct_ratio_calib when saving a fresh calibration: this CT's NCT
+     * becomes the rescale baseline. Future CT swaps rescale digitally. */
+    if (ret == ESP_OK) {
+        config_manager_t *cfg = malloc(sizeof(*cfg));
+        if (cfg != NULL && config_manager_get(cfg) == ESP_OK) {
+            if (cfg->ct_ratio >= 1000U && cfg->ct_ratio_calib != cfg->ct_ratio) {
+                cfg->ct_ratio_calib = cfg->ct_ratio;
+                esp_err_t cfg_ret = config_manager_update(cfg);
+                if (cfg_ret == ESP_OK) {
+                    cfg_ret = config_manager_save();
+                }
+                if (cfg_ret == ESP_OK) {
+                    ESP_LOGI(TAG, "stamped ct_ratio_calib=%u (rescale baseline)",
+                             (unsigned)cfg->ct_ratio);
+                } else {
+                    ESP_LOGW(TAG, "calib saved but ct_ratio_calib stamp failed: %s",
+                             esp_err_to_name(cfg_ret));
+                }
+            }
+        }
+        free(cfg);
+    }
     return ret;
 }
 
@@ -510,60 +467,16 @@ static esp_err_t energy_meter_init(void)
         ESP_LOGW(TAG, "using ATM90E32AS bring-up defaults; no saved calibration: %s", esp_err_to_name(calib_ret));
     }
 
-    /* System PGA ownership: config_manager.
-     *
-     * - Config has 1/2/4  → use it (normal path after CT Apply / prior boot).
-     * - Config pga unset (0): compute PGA from CT params (NCT/I_Rated/I_Expected)
-     *   exactly like a confirmed Current CT Apply, stamp chip, persist config.pga.
-     *   Covers true first boot (defaults) and legacy migrate without PGA tail. */
-    bool persist_pga = false;
-    atm90e32as_pga_gain_t sys_pga =
-        energy_meter_resolve_system_pga(calib.pga_gain, &persist_pga);
-
-    if (persist_pga) {
-        uint16_t nct = (uint16_t)CONFIG_APP_ATM90E32AS_CT_RATIO;
-        uint16_t i_rated = (uint16_t)CONFIG_APP_ATM90E32AS_I_RATED_A;
-        uint16_t i_exp = (uint16_t)CONFIG_APP_ATM90E32AS_I_EXPECTED_A;
-        /* Heap: same main_task stack budget as resolve_system_pga(). */
-        config_manager_t *cfg = malloc(sizeof(*cfg));
-        if (cfg != NULL && config_manager_get(cfg) == ESP_OK) {
-            if (cfg->ct_ratio >= 1000U) {
-                nct = cfg->ct_ratio;
-            }
-            if (cfg->i_rated_a >= 1U) {
-                i_rated = cfg->i_rated_a;
-            }
-            if (cfg->i_expected_a >= 1U) {
-                i_exp = cfg->i_expected_a;
-            }
-        }
-        free(cfg);
-        energy_meter_ct_apply_result_t ct;
-        if (energy_meter_ct_select_pga(nct, i_rated, i_exp, &ct) == ESP_OK) {
-            sys_pga = ct.pga;
-            ESP_LOGI(TAG,
-                     "%s CT→PGA: NCT=%u Rated=%uA Exp=%uA → PGA=x%u Ilim=%.1fA%s%s",
-                     (calib_ret != ESP_OK) ? "first-boot" : "migrate",
-                     (unsigned)nct, (unsigned)i_rated, (unsigned)i_exp,
-                     energy_meter_pga_mult(sys_pga), (double)ct.ilim_a,
-                     ct.expected_clamped ? " [exp warn]" : "",
-                     ct.rated_truncated ? " [rated trunc]" : "");
-        } else {
-            ESP_LOGW(TAG, "CT→PGA select failed; keep fallback PGA=x%u",
-                     energy_meter_pga_mult(sys_pga));
-        }
-    }
+    /* System PGA: fixed 4× per thesis requirement (no recal when CT swaps). */
+    atm90e32as_pga_gain_t sys_pga = ATM90E32AS_PGA_GAIN_4X;
 
     calib.pga_gain = sys_pga;
     energy_meter_stamp_chipwide_locked(sys_pga, calib.line_freq);
-    if (persist_pga) {
-        esp_err_t pr = energy_meter_persist_pga_to_config(sys_pga);
-        if (pr == ESP_OK) {
-            ESP_LOGI(TAG, "persisted system PGA=x%u into config snapshot",
-                     energy_meter_pga_mult(sys_pga));
-        } else {
-            ESP_LOGW(TAG, "PGA persist to config failed: %s", esp_err_to_name(pr));
-        }
+    esp_err_t pr = energy_meter_persist_pga_to_config(sys_pga);
+    if (pr == ESP_OK) {
+        ESP_LOGI(TAG, "persisted fixed PGA=4× into config snapshot");
+    } else {
+        ESP_LOGW(TAG, "PGA persist to config failed: %s", esp_err_to_name(pr));
     }
 
     s_current_calib = calib;
@@ -607,6 +520,29 @@ static void energy_meter_task(void *arg)
         xSemaphoreGive(s_meter_mutex);
 
         if (ret == ESP_OK) {
+            /* CT ratio rescale: if operator swapped CT since calibration, rescale
+             * measurements digitally. PGA=4 fixed → Igain stays valid; only NCT changes.
+             * ct_ratio_calib=0 (legacy/unset) → no rescale (1.0×). */
+            config_manager_t *cfg = malloc(sizeof(*cfg));
+            if (cfg != NULL && config_manager_get(cfg) == ESP_OK) {
+                if (cfg->ct_ratio_calib >= 1000U && cfg->ct_ratio >= 1000U &&
+                    cfg->ct_ratio != cfg->ct_ratio_calib) {
+                    float nct_scale = (float)cfg->ct_ratio / (float)cfg->ct_ratio_calib;
+                    for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+                        measurements.current[i] *= nct_scale;
+                        measurements.current_peak[i] *= nct_scale;
+                        /* Power rescale: P=V×I, I rescaled → P rescaled */
+                        measurements.active_power[i] *= nct_scale;
+                        measurements.reactive_power[i] *= nct_scale;
+                        measurements.apparent_power[i] *= nct_scale;
+                    }
+                    measurements.total_active_power *= nct_scale;
+                    measurements.total_reactive_power *= nct_scale;
+                    measurements.total_apparent_power *= nct_scale;
+                }
+            }
+            free(cfg);
+
             xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
             s_latest_measurements = measurements;
             s_measurements_valid = true;
@@ -924,28 +860,20 @@ esp_err_t energy_meter_set_calibration(const atm90e32as_calib_t *calib)
 
 esp_err_t energy_meter_set_pga_gain(atm90e32as_pga_gain_t pga, bool apply)
 {
-    ESP_RETURN_ON_FALSE(pga >= ATM90E32AS_PGA_GAIN_1X && pga <= ATM90E32AS_PGA_GAIN_4X,
-                        ESP_ERR_INVALID_ARG, TAG, "invalid pga");
     ESP_RETURN_ON_FALSE(s_meter != NULL && s_meter_mutex != NULL, ESP_ERR_INVALID_STATE, TAG,
                         "meter not initialized");
 
-    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
-    energy_meter_stamp_chipwide_locked(pga, s_current_calib.line_freq);
-    esp_err_t ret = ESP_OK;
-    if (apply) {
-        ret = energy_meter_apply_locked(&s_current_calib);
+    /* PGA is fixed at 4× per thesis requirement. Console path kept for legacy
+     * script compatibility; 4× request is idempotent no-op, others rejected. */
+    if (pga != ATM90E32AS_PGA_GAIN_4X) {
+        ESP_LOGW(TAG, "PGA is fixed at 4×; requested %ux ignored", 1 << pga);
+        return ESP_ERR_NOT_SUPPORTED;
     }
-    xSemaphoreGive(s_meter_mutex);
-    if (ret == ESP_OK) {
-        /* Dev console path: still persist system PGA to config (authoritative). */
-        esp_err_t pr = energy_meter_persist_pga_to_config(pga);
-        if (pr != ESP_OK) {
-            ESP_LOGW(TAG, "PGA set chip OK but config persist failed: %s",
-                     esp_err_to_name(pr));
-        }
-        ESP_LOGI(TAG, "PGA set to x%d%s (config-owned)", 1 << pga, apply ? " (applied)" : "");
-    }
-    return ret;
+
+    /* PGA=4 request is idempotent no-op; config already has 4. */
+    (void)apply;
+    ESP_LOGI(TAG, "PGA already 4× (fixed)");
+    return ESP_OK;
 }
 
 esp_err_t energy_meter_set_line_freq(atm90e32as_line_freq_t freq, bool apply)
@@ -1999,21 +1927,29 @@ esp_err_t energy_meter_auto_calibrate_power_offset(
  * updated by the chip once every ~16 line cycles, so we sample every 100 ms to
  * capture independent averages. Integer mW keeps the PQGain math deterministic
  * and free of float rounding. */
-static esp_err_t energy_meter_average_active_power(atm90e32as_phase_t phase,
-                                                   uint16_t samples,
-                                                   int64_t *average_mw)
+esp_err_t energy_meter_get_average_active_power(atm90e32as_phase_t phase,
+                                                uint16_t samples,
+                                                uint16_t interval_ms,
+                                                int64_t *average_mw)
 {
     if (samples == 0) samples = 1;
+    if (interval_ms == 0) interval_ms = 100;
+    if (interval_ms > 1000) interval_ms = 1000;  /* Cap at 1s */
+
     int64_t sum = 0;
     for (uint16_t n = 0; n < samples; n++) {
         atm90e32as_measurements_t measurement;
-        ESP_RETURN_ON_ERROR(atm90e32as_read_measurements(s_meter, &measurement), TAG,
+        /* Read from cached measurements (updated by task every 100ms),
+         * not directly from SPI bus — avoids race condition */
+        ESP_RETURN_ON_ERROR(energy_meter_get_latest(&measurement), TAG,
                             "active power sample failed");
         float value = measurement.active_power[phase];
         ESP_RETURN_ON_FALSE(isfinite(value), ESP_ERR_INVALID_RESPONSE, TAG,
                             "invalid active power sample");
         sum += llround((double)value * 1000.0);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        if (n < samples - 1) {  /* Don't delay after last sample */
+            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+        }
     }
     /* Round-half-away-from-zero; safe for a negative sum too. */
     int64_t q = sum / samples;
@@ -2039,7 +1975,8 @@ esp_err_t energy_meter_auto_calibrate_pq_gain(const energy_meter_pq_gain_request
 
     uint16_t samples = request->samples ? request->samples : 3;
     uint32_t settle_ms = request->settle_ms ? request->settle_ms : 700;
-    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent : 1.0f;
+    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent
+                            : (float)CONFIG_APP_ATM90E32AS_CALIB_TOLERANCE_PERCENT;
 
     /* Step 1: collect every value needed for the gain calculation before any
      * chip write, using integer milliwatts to avoid float arithmetic drift. */
@@ -2053,7 +1990,7 @@ esp_err_t energy_meter_auto_calibrate_pq_gain(const energy_meter_pq_gain_request
     int16_t old_pq = original.phase[request->phase].pq_gain;
 
     int64_t pchip_mw = 0;
-    esp_err_t ret = energy_meter_average_active_power(request->phase, samples, &pchip_mw);
+    esp_err_t ret = energy_meter_get_average_active_power(request->phase, samples, 100, &pchip_mw);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "PQ gain: failed to read P_chip");
     } else if (pchip_mw <= 0) {
@@ -2079,7 +2016,10 @@ esp_err_t energy_meter_auto_calibrate_pq_gain(const energy_meter_pq_gain_request
         int64_t numerator = (32768LL + (int64_t)old_pq) * pref_mw;
         int64_t quotient = numerator / pchip_mw;
         int64_t remainder = numerator % pchip_mw;
-        if (2 * remainder >= pchip_mw) quotient++;
+        /* Round half-away-from-zero (symmetric for positive and negative numerator) */
+        if (2 * llabs(remainder) >= pchip_mw) {
+            quotient += (numerator >= 0 ? 1 : -1);
+        }
 
         int64_t new_pq64 = quotient - 32768LL;
         if (new_pq64 < INT16_MIN || new_pq64 > INT16_MAX) {
@@ -2103,7 +2043,7 @@ esp_err_t energy_meter_auto_calibrate_pq_gain(const energy_meter_pq_gain_request
     if (ret == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(settle_ms));
         int64_t after_mw = 0;
-        ret = energy_meter_average_active_power(request->phase, samples, &after_mw);
+        ret = energy_meter_get_average_active_power(request->phase, samples, 100, &after_mw);
         if (ret == ESP_OK) {
             result->measured_after = (float)after_mw / 1000.0f;
 
@@ -2155,7 +2095,8 @@ esp_err_t energy_meter_auto_calibrate_phase(const energy_meter_phase_calib_reque
 
     uint16_t samples = request->samples ? request->samples : 3;
     uint32_t settle_ms = request->settle_ms ? request->settle_ms : 700;
-    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent : 1.0f;
+    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent
+                            : (float)CONFIG_APP_ATM90E32AS_CALIB_TOLERANCE_PERCENT;
 
     int64_t pref_mw = llround((double)request->reference_w * 1000.0);
     ESP_RETURN_ON_FALSE(pref_mw > 0 && pref_mw <= 1000000000LL,
@@ -2183,7 +2124,7 @@ esp_err_t energy_meter_auto_calibrate_phase(const energy_meter_phase_calib_reque
     result->gphase_x1000 = gphase_x1000;
 
     int64_t pchip_mw = 0;
-    esp_err_t ret = energy_meter_average_active_power(request->phase, samples, &pchip_mw);
+    esp_err_t ret = energy_meter_get_average_active_power(request->phase, samples, 100, &pchip_mw);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "phase calib: failed to read P_chip");
     } else if (pchip_mw <= 0) {
@@ -2236,7 +2177,7 @@ esp_err_t energy_meter_auto_calibrate_phase(const energy_meter_phase_calib_reque
     if (ret == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(settle_ms));
         int64_t after_mw = 0;
-        ret = energy_meter_average_active_power(request->phase, samples, &after_mw);
+        ret = energy_meter_get_average_active_power(request->phase, samples, 100, &after_mw);
         if (ret == ESP_OK) {
             result->measured_after = (float)after_mw / 1000.0f;
 

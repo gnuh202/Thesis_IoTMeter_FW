@@ -32,7 +32,7 @@ Ranh giới quyết định file nằm ở `main/app/` hay `components/`:
 | `ethernet_driver.c` | `ethernet_driver` | W5500 (SPI) bring-up + ETH/IP event → còn ở app vì phụ thuộc net infra |
 | `wifi_manager.c` | `wifi_manager` | WiFi STA + SoftAP, event, credential runtime |
 | `network_comm_task.c` | `network_comm` | Task ping kiểm tra reachability trên interface active |
-| `mqtt_manager.c` | `mqtt_mgr` | MQTT client: profiles, TLS, publish telemetry, LWT |
+| `mqtt_manager.c` | `mqtt_mgr` | MQTT client: broker duy nhất, TLS, publish telemetry, LWT |
 | `app_main.c` | `app_main` | entry `app_main()` → gọi `app_tasks_start()` |
 
 ### driver / BSP — `components/`
@@ -107,7 +107,7 @@ Chi tiết failover / AP on-demand / auto-AP: xem [ESP32_Network_Manager_Design.
 
 ## 6. Cấu hình & build
 
-- **Cấu hình runtime** (broker, WiFi cred, chu kỳ publish): lưu NVS qua `config_store`, chỉnh bằng `net-cfg` / `mqtt-cfg` (xem [console_commands.md](console_commands.md)). Đổi xong cần **reboot** để áp.
+- **Cấu hình runtime** (broker MQTT duy nhất, WiFi cred, chu kỳ publish): lưu NVS qua `config_store`, chỉnh bằng `net-cfg` / `mqtt-cfg` (xem [console_commands.md](console_commands.md)), Web portal hoặc LCD. Portal là "Save and restart" — lưu rồi reboot. LCD apply live (`config_apply`, MQTT rebuild client bất đồng bộ). Lệnh console chỉ sửa RAM → thay đổi mất khi reboot vì không xuống NVS. Bật/tắt MQTT theo đường sản phẩm nằm ở **LCD Settings ▸ MQTT** (portal không còn control này).
 - **Cấu hình build** (GPIO, timeout, default): `main/Kconfig.projbuild` → giá trị vào `sdkconfig`. Những gì cần sống qua regenerate nằm trong `sdkconfig.defaults` (flash 16MB, partition, TLS cert bundle, log max level).
 - **Build:** `idf.py build flash monitor`.
 - `sdkconfig` **không** commit (sinh ra); `sdkconfig.defaults` thì có.
@@ -122,8 +122,8 @@ Chi tiết failover / AP on-demand / auto-AP: xem [ESP32_Network_Manager_Design.
 | Modbus RTU slave / master | Xong |
 | Network: ETH+WiFi failover, AP on-demand, auto-AP | Xong |
 | config_store (NVS) | Xong |
-| MQTT: profiles, TLS, publish telemetry/energy/io/heartbeat, LWT | Xong |
-| MQTT: subscribe điều khiển relay | **Chưa** (bước kế tiếp) |
-| Web Config Portal | Chưa (TODO-SAU) |
-| LCD 2004 + nút | Chưa (chờ phần cứng) |
+| MQTT: broker duy nhất, TLS, publish telemetry/energy/io/heartbeat, LWT | Xong |
+| MQTT: subscribe điều khiển relay (`cmd/out0`, `cmd/out1`) | Xong |
+| Web Config Portal (mạng/MQTT/RTU master/danh tính; cert upload) | Xong |
+| LCD 2004 + nút (menu Settings, RTU, Alarm, DISPLAY & KEYS, MQTT) | Xong |
 | Modbus TCP | Chưa (TODO-SAU) |

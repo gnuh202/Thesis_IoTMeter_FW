@@ -1,8 +1,10 @@
 #include "home_screen.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "boot_manager.h"
 #include "config_apply.h"
 #include "config_manager.h"
 #include "energy_meter_task.h"
@@ -336,9 +338,11 @@ static void render_total(void)
 
     snprintf(line, sizeof(line), "%.2f A", m.current_neutral);
     put_kv(1, "I", line);
-    snprintf(line, sizeof(line), "%.0f W", m.total_active_power);
+    float kw = roundf(m.total_active_power / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kW", kw);
     put_kv(2, "P", line);
-    snprintf(line, sizeof(line), "%.0f var", m.total_reactive_power);
+    float kvar = roundf(m.total_reactive_power / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kvar", kvar);
     put_kv(3, "Q", line);
 }
 
@@ -356,11 +360,14 @@ static void render_active_power(void)
         put_kv(3, "L3", status);
         return;
     }
-    snprintf(line, sizeof(line), "%.0f W", m.active_power[0]);
+    float kw_a = roundf(m.active_power[0] / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kW", kw_a);
     put_kv(1, "L1", line);
-    snprintf(line, sizeof(line), "%.0f W", m.active_power[1]);
+    float kw_b = roundf(m.active_power[1] / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kW", kw_b);
     put_kv(2, "L2", line);
-    snprintf(line, sizeof(line), "%.0f W", m.active_power[2]);
+    float kw_c = roundf(m.active_power[2] / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kW", kw_c);
     put_kv(3, "L3", line);
 }
 
@@ -423,7 +430,8 @@ static void render_power_quality(void)
     put_kv(1, "PF Total", line);
     snprintf(line, sizeof(line), "%.2f Hz", m.frequency);
     put_kv(2, "Freq", line);
-    snprintf(line, sizeof(line), "%.0f VA", m.total_apparent_power);
+    float kva = roundf(m.total_apparent_power / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kVA", kva);
     put_kv(3, "S Total", line);
 }
 
@@ -672,9 +680,9 @@ static void lcd_settings_reload(void)
     s_buzzer_alarm_val = cfg->buzzer_alarm_enable;
     s_autocycle = cfg->lcd_autocycle;
     s_cycle_time_ms = (cfg->lcd_cycle_time_ms > 0) ? cfg->lcd_cycle_time_ms : HOME_AUTOCYCLE_MS;
-    config_mqtt_profile_t mqtt_profile;
-    s_mqtt_enabled = (config_manager_get_active_mqtt_profile(&mqtt_profile, NULL) == ESP_OK) &&
-                     mqtt_profile.enable;
+    /* The snapshot is already in hand, so read the enable flag straight off it
+     * rather than taking a second lock via config_manager_get_mqtt(). */
+    s_mqtt_enabled = cfg->mqtt.enable;
     free(cfg);
 
     s_asleep = false;
@@ -735,6 +743,13 @@ static uint8_t s_led_mask_written = 0xFF;  /* 0xFF = never written, forces first
 
 static void update_leds(void)
 {
+    /* In engineering mode: LED status pattern is disabled (calibration is
+     * isolated from all background tasks and visual indicators).
+     * boot_manager_engineering_mode() is cached at boot, constant for session. */
+    if (boot_manager_engineering_mode()) {
+        return;
+    }
+
     bool blink = status_blink_phase();
     uint8_t mask = 0;
 
@@ -980,21 +995,98 @@ static void show_info(const char *l0, const char *l1, const char *l2, const char
 static esp_err_t menu_device_info(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
 {
     (void)menu; (void)item; (void)ctx;
-    char fw[HOME_LCD_WIDTH + 1];
-    const esp_app_desc_t *desc = esp_app_get_description();
-    /* Version string can be up to 32 chars; truncate to fit LCD line. */
-    snprintf(fw, sizeof(fw), "FW: %.14s", desc ? desc->version : "?");
-    put_line_centre(0, "DEVICE INFO");
-    put_line(1, s_device_name);
-    put_line(2, fw);
-    put_line(3, "IoT Power Meter");
-    (void)wait_modal_ok_or_back();
-    return ESP_OK;
+
+    config_manager_t cfg;
+    if (config_manager_get(&cfg) != ESP_OK) {
+        show_info("DEVICE INFO", "Config Error", "", "");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Prepare info lines */
+    char lines[3][HOME_LCD_WIDTH + 1];
+    int total_lines = 0;
+
+    /* Line 0: Device Name (truncate to fit) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Name: %.13s", cfg.device_name);
+
+    /* Line 1: Firmware build (OTA tracking from NVS) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "FW: %.15s", cfg.ota_fw_build);
+
+    /* Line 2: Version (OTA tracking from NVS) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Ver: %.14s", cfg.ota_version);
+
+    /* Single-page display (all 3 lines fit), but use same navigation pattern */
+    int cursor = 0;
+    int top = 0;
+    uint8_t previous = 0;
+    wait_buttons_released();
+
+    while (1) {
+        put_line_centre(0, "DEVICE INFO");
+
+        /* Display all 3 lines (no pagination needed, but reserve 2 chars anyway) */
+        for (int row = 0; row < 3; row++) {
+            int idx = top + row;
+            uint8_t lcd_row = (uint8_t)(row + 1);
+
+            if (idx >= total_lines) {
+                put_line(lcd_row, "");
+                continue;
+            }
+
+            /* Build display line with cursor and indent */
+            char display[HOME_LCD_WIDTH + 1];
+            char cursor_char = (idx == cursor) ? '>' : ' ';
+
+            /* Cursor + 1 space indent + content (truncate to fit 18 chars total) */
+            snprintf(display, sizeof(display), "%c %.16s", cursor_char, lines[idx]);
+
+            put_line(lcd_row, display);
+        }
+
+        /* Button handling */
+        uint8_t buttons = 0;
+        if (hmi_bsp_read_buttons(&buttons) != ESP_OK) {
+            buttons = 0;
+        }
+        uint8_t edges = buttons & ~previous;
+        previous = buttons;
+
+        if (edges & HMI_BSP_BUTTON_TOP) {
+            if (cursor > 0) {
+                cursor--;
+                if (cursor < top) {
+                    top = cursor;
+                }
+            }
+            button_click();
+        } else if (edges & HMI_BSP_BUTTON_BOTTOM) {
+            if (cursor < total_lines - 1) {
+                cursor++;
+                if (cursor >= top + 3) {
+                    top = cursor - 2;
+                }
+            }
+            button_click();
+        } else if (edges & HMI_BSP_BUTTON_CENTER) {
+            /* CENTER = exit */
+            button_click();
+            wait_buttons_released();
+            return ESP_OK;
+        } else if (edges & HMI_BSP_BUTTON_LEFT) {
+            /* LEFT = back/exit */
+            button_click();
+            wait_buttons_released();
+            return ESP_OK;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 }
 
 /* ---- Cached config snapshot for inline VALUE menu rows ----
  * The engine calls each VALUE row's value_get() on every render (which happens
- * after every key). config_manager_get() copies the whole ~2.2 KB snapshot under
+ * after every key). config_manager_get() copies the whole ~1.2 KB snapshot under
  * a lock, so reading it per row per render would churn the heap and the bus.
  * Instead keep one static snapshot, refreshed lazily: the first provider in a
  * render reads it, the rest reuse it. It is invalidated after any local write
@@ -1120,12 +1212,28 @@ static void line_freq_value(lcd_menu_t *menu, const lcd_menu_item_t *item, char 
  *            No=discard draft and exit
  *   clean → exit, no prompt.
  * Device clamp of Expected alone does not count as user edit for Igain reset. */
+/* CT configuration constants */
 #define CT_RATIO_MIN  1000U
 #define CT_RATIO_MAX  6000U
 #define CT_RATIO_STEP 100U
+#define CT_PRIMARY_MIN  1000U
+#define CT_PRIMARY_MAX  6000U
+#define CT_PRIMARY_STEP 100U
+#define CT_SECONDARY_FIXED 1U  /* Secondary always 1 (1:N format) */
 #define CT_I_EDIT_MIN 1U
 #define CT_I_EDIT_MAX 10000U
 #define CT_I_EDIT_STEP 1U
+
+/* CT I_max calculation: V_ADC_max=180mV (720mV/PGA4), R_burden=4.4Ω
+ * I_max(A) = (V_ADC_max / R_burden) × NCT
+ *          = (0.180V / 4.4Ω) × NCT
+ *          = 0.040909091 × NCT
+ *
+ * Optimized integer formula to avoid division in display path:
+ * I_max_mA = (NCT × 40909) / 1000  (result in milliamps)
+ * This way: only ONE division by constant 1000, MCU handles efficiently */
+#define CT_IMAX_COEFF_MA  40909UL  /* 0.040909 A/ratio × 1000 mA/A */
+#define CT_CALC_IMAX_MA(nct)  (((uint32_t)(nct) * CT_IMAX_COEFF_MA) / 1000UL)
 
 static uint32_t setting_repeat_interval_ms(uint32_t held_ms);
 
@@ -1185,83 +1293,6 @@ static uint16_t wrap_step_u16(uint16_t value, bool increment,
     return (uint16_t)(value - step);
 }
 
-static bool edit_ct_u16(const char *title, const char *unit, uint16_t initial, uint16_t *result,
-                        uint16_t min_v, uint16_t max_v, uint16_t step)
-{
-    uint16_t value = clamp_step_u16(initial, min_v, max_v, step);
-
-    wait_buttons_released();
-    uint8_t previous = 0;
-    uint8_t held_key = 0;
-    TickType_t pressed_at = 0;
-    TickType_t repeat_at = 0;
-    bool redraw = true;
-
-    while (1) {
-        if (redraw) {
-            char line[HOME_LCD_WIDTH + 1];
-            put_line_centre(0, title);
-            put_line(1, "");
-            if (unit && unit[0]) {
-                snprintf(line, sizeof(line), "%u %s", (unsigned)value, unit);
-            } else {
-                snprintf(line, sizeof(line), "%u", (unsigned)value);
-            }
-            put_line_centre(2, line);
-            put_line(3, "");
-            redraw = false;
-        }
-
-        uint8_t buttons = 0;
-        if (hmi_bsp_read_buttons(&buttons) != ESP_OK) buttons = 0;
-        uint8_t edges = buttons & ~previous;
-        previous = buttons;
-
-        if (edges & HMI_BSP_BUTTON_LEFT) {
-            button_click();
-            wait_buttons_released();
-            return false;
-        }
-        if (edges & HMI_BSP_BUTTON_CENTER) {
-            button_click();
-            wait_buttons_released();
-            *result = value;
-            return true;
-        }
-
-        const uint8_t adjust_mask = HMI_BSP_BUTTON_TOP | HMI_BSP_BUTTON_BOTTOM;
-        uint8_t direction = buttons & adjust_mask;
-        uint8_t direction_edges = edges & adjust_mask;
-        TickType_t now = xTaskGetTickCount();
-
-        if ((direction_edges == HMI_BSP_BUTTON_TOP ||
-             direction_edges == HMI_BSP_BUTTON_BOTTOM) &&
-            direction == direction_edges) {
-            value = wrap_step_u16(value, direction_edges == HMI_BSP_BUTTON_TOP,
-                                  min_v, max_v, step);
-            held_key = direction_edges;
-            pressed_at = now;
-            repeat_at = now + pdMS_TO_TICKS(HOME_SETTING_HOLD_MS);
-            redraw = true;
-            button_click();
-        } else if (direction == held_key && held_key != 0) {
-            if ((int32_t)(now - repeat_at) >= 0) {
-                value = wrap_step_u16(value, held_key == HMI_BSP_BUTTON_TOP,
-                                      min_v, max_v, step);
-                uint32_t held_ms = (uint32_t)((now - pressed_at) * portTICK_PERIOD_MS);
-                repeat_at = now + pdMS_TO_TICKS(setting_repeat_interval_ms(held_ms));
-                redraw = true;
-            }
-        } else {
-            held_key = 0;
-        }
-
-        alarm_tick();
-        update_leds();
-        vTaskDelay(pdMS_TO_TICKS(HOME_POLL_MS));
-    }
-}
-
 static esp_err_t menu_current_ct(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
 {
     (void)menu; (void)item; (void)ctx;
@@ -1279,36 +1310,30 @@ static esp_err_t menu_current_ct(lcd_menu_t *menu, const lcd_menu_item_t *item, 
 
     uint16_t draft_nct = clamp_step_u16(cfg->ct_ratio ? cfg->ct_ratio : CT_RATIO_MIN,
                                         CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
-    uint16_t draft_rated = cfg->i_rated_a ? cfg->i_rated_a : 1U;
-    uint16_t draft_exp = cfg->i_expected_a ? cfg->i_expected_a : 1U;
-    if (draft_rated < CT_I_EDIT_MIN) draft_rated = CT_I_EDIT_MIN;
-    if (draft_rated > CT_I_EDIT_MAX) draft_rated = CT_I_EDIT_MAX;
-    if (draft_exp < CT_I_EDIT_MIN) draft_exp = CT_I_EDIT_MIN;
-    if (draft_exp > CT_I_EDIT_MAX) draft_exp = CT_I_EDIT_MAX;
     uint16_t orig_nct = draft_nct;
-    uint16_t orig_rated = draft_rated;
-    uint16_t orig_exp = draft_exp;
 
-    int cursor = 0;
     bool redraw = true;
     uint8_t previous = 0;
+    uint8_t held_key = 0;
+    TickType_t pressed_at = 0;
+    TickType_t repeat_at = 0;
 
     wait_buttons_released();
     while (1) {
         if (redraw) {
             char l1[HOME_LCD_WIDTH + 1];
             char l2[HOME_LCD_WIDTH + 1];
-            char l3[HOME_LCD_WIDTH + 1];
             put_line_centre(0, "CURRENT CT");
-            snprintf(l1, sizeof(l1), "%c CT Ratio %u:1",
-                     cursor == 0 ? '>' : ' ', (unsigned)draft_nct);
-            snprintf(l2, sizeof(l2), "%c I Rated  %uA",
-                     cursor == 1 ? '>' : ' ', (unsigned)draft_rated);
-            snprintf(l3, sizeof(l3), "%c I Expect %uA",
-                     cursor == 2 ? '>' : ' ', (unsigned)draft_exp);
+
+            /* Calculate I_max for display */
+            uint32_t i_max_ma = CT_CALC_IMAX_MA(draft_nct);
+            float i_max_a = (float)i_max_ma / 1000.0f;
+
+            snprintf(l1, sizeof(l1), "> Ratio  <%u:1>  ", (unsigned)draft_nct);
+            snprintf(l2, sizeof(l2), "  I max  %.1f A", i_max_a);
             put_line(1, l1);
             put_line(2, l2);
-            put_line(3, l3);
+            put_line(3, "");
             redraw = false;
         }
 
@@ -1319,59 +1344,45 @@ static esp_err_t menu_current_ct(lcd_menu_t *menu, const lcd_menu_item_t *item, 
 
         if (edges & HMI_BSP_BUTTON_TOP) {
             button_click();
-            cursor = (cursor + 2) % 3;
+            draft_nct = wrap_step_u16(draft_nct, true, CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
+            held_key = HMI_BSP_BUTTON_TOP;
+            pressed_at = xTaskGetTickCount();
+            repeat_at = pressed_at + pdMS_TO_TICKS(HOME_SETTING_HOLD_MS);
             redraw = true;
         } else if (edges & HMI_BSP_BUTTON_BOTTOM) {
             button_click();
-            cursor = (cursor + 1) % 3;
+            draft_nct = wrap_step_u16(draft_nct, false, CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
+            held_key = HMI_BSP_BUTTON_BOTTOM;
+            pressed_at = xTaskGetTickCount();
+            repeat_at = pressed_at + pdMS_TO_TICKS(HOME_SETTING_HOLD_MS);
             redraw = true;
         } else if (edges & HMI_BSP_BUTTON_CENTER) {
             button_click();
             wait_buttons_released();
-            uint16_t edited = 0;
-            bool ok = false;
-            if (cursor == 0) {
-                ok = edit_ct_u16("CT RATIO", ":1", draft_nct, &edited,
-                                 CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
-                if (ok) draft_nct = edited;
-            } else if (cursor == 1) {
-                ok = edit_ct_u16("I RATED", "A", draft_rated, &edited,
-                                 CT_I_EDIT_MIN, CT_I_EDIT_MAX, CT_I_EDIT_STEP);
-                if (ok) draft_rated = edited;
-            } else {
-                ok = edit_ct_u16("I EXPECTED", "A", draft_exp, &edited,
-                                 CT_I_EDIT_MIN, CT_I_EDIT_MAX, CT_I_EDIT_STEP);
-                if (ok) draft_exp = edited;
-            }
-            previous = 0;
-            redraw = true;
-            (void)ok;
-        } else if (edges & HMI_BSP_BUTTON_LEFT) {
-            button_click();
-            wait_buttons_released();
 
-            bool dirty = (draft_nct != orig_nct) ||
-                         (draft_rated != orig_rated) ||
-                         (draft_exp != orig_exp);
+            bool dirty = (draft_nct != orig_nct);
             if (!dirty) {
                 free(cfg);
                 return ESP_OK;
             }
 
             put_line_centre(0, "APPLY CT?");
-            put_line_centre(1, "Save PGA / range");
+            put_line_centre(1, "Save ratio");
+            put_line(2, "");
             put_line(3, "");
             if (!wait_confirm_cancel()) {
                 free(cfg);
                 return ESP_OK;
             }
 
-            /* User changed any of the 3 fields → reset Igain to 0x8000.
-             * Device clamp of Expected alone does not count (handled inside apply
-             * after this flag is set from pre-apply draft vs orig). */
+            /* Get current I_rated */
+            uint16_t i_rated = cfg->i_rated_a ? cfg->i_rated_a : 1U;
+            if (i_rated < CT_I_EDIT_MIN) i_rated = CT_I_EDIT_MIN;
+            if (i_rated > CT_I_EDIT_MAX) i_rated = CT_I_EDIT_MAX;
+
+            /* Apply CT ratio */
             energy_meter_ct_apply_result_t result;
-            esp_err_t ret = energy_meter_ct_apply(draft_nct, draft_rated, draft_exp,
-                                                  true /* reset_igain */, true, &result);
+            esp_err_t ret = energy_meter_ct_apply(draft_nct, i_rated, 0, true, &result);
             if (ret == ESP_OK) {
                 cfg->ct_ratio = result.ct_ratio;
                 cfg->i_rated_a = result.i_rated_a;
@@ -1384,34 +1395,37 @@ static esp_err_t menu_current_ct(lcd_menu_t *menu, const lcd_menu_item_t *item, 
 
             if (ret != ESP_OK) {
                 show_action_result(false);
-                previous = 0;
-                redraw = true;
-                continue;
-            }
-
-            /* Stay in menu with applied (possibly clamped) values as new baseline. */
-            draft_nct = result.ct_ratio;
-            draft_rated = result.i_rated_a;
-            draft_exp = result.i_expected_a;
-            orig_nct = draft_nct;
-            orig_rated = draft_rated;
-            orig_exp = draft_exp;
-            previous = 0;
-            redraw = true;
-            if (result.expected_clamped) {
-                /* Even PGA=1 cannot cover I_Expected. */
-                char note[HOME_LCD_WIDTH + 1];
-                snprintf(note, sizeof(note), "Clamped %uA", (unsigned)draft_exp);
-                show_info("RANGE WARN", note, "PGA=1x", "Reduce I Exp");
-            } else if (result.rated_truncated) {
-                /* PGA=4 keeps I_Expected but clips I_Rated headroom. */
-                char note[HOME_LCD_WIDTH + 1];
-                snprintf(note, sizeof(note), "PGA=%ux Ilim=%.0fA",
-                         energy_meter_pga_mult(result.pga), (double)result.ilim_a);
-                show_info("TRADE-OFF", note, "Rated headroom", "reduced");
+                draft_nct = orig_nct;  /* Rollback on error */
             } else {
+                /* Success - update baseline */
+                orig_nct = result.ct_ratio;
+                draft_nct = orig_nct;
                 show_action_result(true);
             }
+            previous = 0;
+            redraw = true;
+        } else if (edges & HMI_BSP_BUTTON_LEFT) {
+            button_click();
+            wait_buttons_released();
+            free(cfg);
+            return ESP_OK;
+        } else if (edges & HMI_BSP_BUTTON_RIGHT) {
+            /* RIGHT button has no function here, but still beep for consistency */
+            button_click();
+        }
+
+        /* Key repeat for ratio adjustment */
+        if (held_key != 0 && (buttons & held_key)) {
+            TickType_t now = xTaskGetTickCount();
+            if ((int32_t)(now - repeat_at) >= 0) {
+                draft_nct = wrap_step_u16(draft_nct, held_key == HMI_BSP_BUTTON_TOP,
+                                          CT_RATIO_MIN, CT_RATIO_MAX, CT_RATIO_STEP);
+                uint32_t held_ms = (uint32_t)((now - pressed_at) * portTICK_PERIOD_MS);
+                repeat_at = now + pdMS_TO_TICKS(setting_repeat_interval_ms(held_ms));
+                redraw = true;
+            }
+        } else {
+            held_key = 0;
         }
 
         alarm_tick();
@@ -1598,7 +1612,7 @@ static esp_err_t menu_rtu_slave_set_id(lcd_menu_t *menu, const lcd_menu_item_t *
     config_manager_t *cfg = malloc(sizeof(*cfg));
     if (cfg == NULL || config_manager_get(cfg) != ESP_OK) {
         free(cfg);
-        show_info("SLAVE ID", "Config unavailable", "", "OK: Back");
+        show_info("SLAVE ID", "Config unavailable", "", "");
         return ESP_OK;
     }
 
@@ -1632,7 +1646,7 @@ static esp_err_t menu_rtu_slave_set_baud(lcd_menu_t *menu, const lcd_menu_item_t
     config_manager_t *cfg = malloc(sizeof(*cfg));
     if (cfg == NULL || config_manager_get(cfg) != ESP_OK) {
         free(cfg);
-        show_info("SLAVE BAUD", "Config unavailable", "", "OK: Back");
+        show_info("SLAVE BAUD", "Config unavailable", "", "");
         return ESP_OK;
     }
 
@@ -1673,10 +1687,14 @@ static esp_err_t menu_tcp_server(lcd_menu_t *menu, const lcd_menu_item_t *item, 
     return ESP_OK;
 }
 
-static uint32_t wrap_setting_seconds(uint32_t value, bool increment)
+/* Step one second within [min,max], wrapping at both ends. The wrap is what
+ * makes the editor usable with three buttons: from the floor, DOWN lands on the
+ * ceiling instead of sticking. */
+static uint32_t wrap_setting_seconds(uint32_t value, bool increment,
+                                     uint32_t min, uint32_t max)
 {
-    if (increment) return value >= HOME_SETTING_MAX_S ? HOME_SETTING_MIN_S : value + 1U;
-    return value <= HOME_SETTING_MIN_S ? HOME_SETTING_MAX_S : value - 1U;
+    if (increment) return value >= max ? min : value + 1U;
+    return value <= min ? max : value - 1U;
 }
 
 static uint32_t setting_repeat_interval_ms(uint32_t held_ms)
@@ -1690,10 +1708,16 @@ static uint32_t setting_repeat_interval_ms(uint32_t held_ms)
     return HOME_SETTING_REPEAT_SLOW_MS;
 }
 
-static bool edit_setting_seconds(const char *title, uint32_t initial, uint32_t *result)
+/* Seconds editor shared by every timed setting. The range is a parameter
+ * because the settings do not agree on one: LCD sleep / auto-cycle allow 0
+ * ("Off") up to HOME_SETTING_MAX_S, the MQTT publish period is 1..60.
+ * A stored value outside the range is pulled in before the first draw. */
+static bool edit_setting_seconds(const char *title, uint32_t initial,
+                                 uint32_t min, uint32_t max, uint32_t *result)
 {
     uint32_t value = initial;
-    if (value > HOME_SETTING_MAX_S) value = HOME_SETTING_MAX_S;
+    if (value > max) value = max;
+    if (value < min) value = min;
 
     wait_buttons_released();
     uint8_t previous = 0;
@@ -1742,7 +1766,7 @@ static bool edit_setting_seconds(const char *title, uint32_t initial, uint32_t *
              direction_edges == HMI_BSP_BUTTON_BOTTOM) &&
             direction == direction_edges) {
             value = wrap_setting_seconds(value,
-                                         direction_edges == HMI_BSP_BUTTON_TOP);
+                                         direction_edges == HMI_BSP_BUTTON_TOP, min, max);
             held_key = direction_edges;
             pressed_at = now;
             repeat_at = now + pdMS_TO_TICKS(HOME_SETTING_HOLD_MS);
@@ -1751,7 +1775,7 @@ static bool edit_setting_seconds(const char *title, uint32_t initial, uint32_t *
         } else if (direction == held_key && held_key != 0) {
             if ((int32_t)(now - repeat_at) >= 0) {
                 value = wrap_setting_seconds(value,
-                                             held_key == HMI_BSP_BUTTON_TOP);
+                                             held_key == HMI_BSP_BUTTON_TOP, min, max);
                 uint32_t held_ms = (uint32_t)((now - pressed_at) * portTICK_PERIOD_MS);
                 repeat_at = now + pdMS_TO_TICKS(setting_repeat_interval_ms(held_ms));
                 redraw = true;
@@ -1982,10 +2006,10 @@ static esp_err_t menu_lcd_timed_setting(bool autocycle)
     uint32_t seconds = autocycle
         ? (cfg->lcd_autocycle ? cfg->lcd_cycle_time_ms / 1000U : 0U)
         : cfg->lcd_sleep_timeout_s;
-    if (seconds > HOME_SETTING_MAX_S) seconds = HOME_SETTING_MAX_S;
 
     if (!edit_setting_seconds(autocycle ? "AUTO CYCLE" : "LCD SLEEP TIME",
-                              seconds, &seconds)) {
+                              seconds, HOME_SETTING_MIN_S, HOME_SETTING_MAX_S,
+                              &seconds)) {
         free(cfg);
         return ESP_OK;
     }
@@ -2253,12 +2277,16 @@ static esp_err_t menu_calib_export_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
 {
     (void)menu; (void)item; (void)ctx;
 
+    ESP_LOGI(TAG, "[ENGINEER] Calibration Export SD requested");
+
     if (!sd_card_is_inserted()) {
-        show_info("NO SD CARD", "Insert card", "", "OK: Back");
+        ESP_LOGW(TAG, "[ENGINEER] Export failed: SD card not inserted");
+        show_info("NO SD CARD", "Insert card", "", "");
         return ESP_OK;
     }
     if (!sd_card_is_mounted()) {
-        show_info("SD NOT READY", "Wait or reinsert", "", "OK: Back");
+        ESP_LOGW(TAG, "[ENGINEER] Export failed: SD card not mounted");
+        show_info("SD NOT READY", "Wait or reinsert", "", "");
         return ESP_OK;
     }
 
@@ -2271,8 +2299,10 @@ static esp_err_t menu_calib_export_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
         basename = basename ? basename + 1 : path;
         char display[HOME_LCD_WIDTH + 1];
         snprintf(display, sizeof(display), "%.20s", basename);
-        show_info("EXPORTED", display, "", "OK: Back");
+        ESP_LOGI(TAG, "[ENGINEER] Export succeeded: %s", path);
+        show_info("EXPORTED", display, "", "");
     } else {
+        ESP_LOGE(TAG, "[ENGINEER] Export failed: %s", esp_err_to_name(ret));
         show_action_result(false);
     }
     return ESP_OK;
@@ -2283,12 +2313,16 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
 {
     (void)menu; (void)item; (void)ctx;
 
+    ESP_LOGI(TAG, "[ENGINEER] Calibration Load SD requested");
+
     if (!sd_card_is_inserted()) {
-        show_info("NO SD CARD", "Insert card", "", "OK: Back");
+        ESP_LOGW(TAG, "[ENGINEER] Load failed: SD card not inserted");
+        show_info("NO SD CARD", "Insert card", "", "");
         return ESP_OK;
     }
     if (!sd_card_is_mounted()) {
-        show_info("SD NOT READY", "Wait or reinsert", "", "OK: Back");
+        ESP_LOGW(TAG, "[ENGINEER] Load failed: SD card not mounted");
+        show_info("SD NOT READY", "Wait or reinsert", "", "");
         return ESP_OK;
     }
 
@@ -2297,7 +2331,9 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
     size_t count;
     esp_err_t ret = sd_card_calib_list(files, 16, &count);
     if (ret != ESP_OK || count == 0) {
-        show_info("NO FILES", "/sdcard/calib", "", "OK: Back");
+        ESP_LOGW(TAG, "[ENGINEER] Load failed: no calibration files found (ret=%s, count=%zu)",
+                 esp_err_to_name(ret), count);
+        show_info("NO FILES", "/sdcard/calib", "", "");
         return ESP_OK;
     }
 
@@ -2321,13 +2357,10 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
             size_t idx = window_start + i;
 
             if (idx < count) {
-                /* Display: "[3W] cal_01" or "[4W] cal_02" */
-                const char *mode_str = (files[idx].mode == 1) ? "3W" : "4W";
-
-                /* Build line: pointer + mode + filename, pad to full width */
-                int written = snprintf(line, sizeof(line), "%c [%s] cal_%02d",
+                /* Display: "> Calib 01" (no 3W/4W prefix since we only calibrate 4W) */
+                int written = snprintf(line, sizeof(line), "%c Calib %02d",
                                        (idx == cursor) ? '>' : ' ',
-                                       mode_str, files[idx].num);
+                                       files[idx].num);
 
                 /* Pad remaining space (put_line uses strlen, so must pad explicitly) */
                 if (written < HOME_LCD_WIDTH) {
@@ -2384,7 +2417,8 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
 
     const char *file_mode_str = (files[cursor].mode == 1) ? "3W" : "4W";
     char display[HOME_LCD_WIDTH + 1];
-    snprintf(display, sizeof(display), "[%s] calib_%02d.bin", file_mode_str, files[cursor].num);
+    /* Show the real basename from the card (short 8.3 or legacy long name). */
+    snprintf(display, sizeof(display), "%.20s", files[cursor].filename);
     char confirm_msg[HOME_LCD_WIDTH + 1];
     snprintf(confirm_msg, sizeof(confirm_msg), "Apply to %s mode?", current_mode_str);
 
@@ -2398,7 +2432,16 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
         return ESP_OK;
     }
 
+    ESP_LOGI(TAG, "[ENGINEER] Load calibration: selected '%s' (mode=%s)",
+             files[cursor].filename, file_mode_str);
+
     ret = sd_card_calib_import(files[cursor].filename);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "[ENGINEER] Import succeeded: %s", files[cursor].filename);
+    } else {
+        ESP_LOGE(TAG, "[ENGINEER] Import failed: %s (ret=%s)",
+                 files[cursor].filename, esp_err_to_name(ret));
+    }
     show_action_result(ret == ESP_OK);
     return ESP_OK;
 }
@@ -2649,7 +2692,7 @@ static esp_err_t menu_rtu_info(lcd_menu_t *menu, const lcd_menu_item_t *item, vo
     }
 
     if (n == 0) {
-        show_info("RTU INFO", "No devices", "Add via portal", "OK: Back");
+        show_info("RTU INFO", "No devices", "Add via portal", "");
         return ESP_OK;
     }
 
@@ -3064,6 +3107,219 @@ static const lcd_menu_screen_t s_screen_rtu_slave = {
     .item_count = sizeof(s_items_rtu_slave) / sizeof(s_items_rtu_slave[0]),
 };
 
+/* MQTT: the operator's only control over telemetry. Status is the device-wide
+ * enable (the web portal deliberately has no such control — it configures the
+ * broker, this toggle decides whether it is used at all), and Period is the
+ * publish cadence in whole seconds, 1..60 to match the guard in
+ * config_manager_update(). CONFIG_APPLY_MQTT rebuilds the client
+ * asynchronously, so both rows take effect without a reboot; apply does not
+ * notify the home screen, so Status also refreshes the s_mqtt_enabled mirror
+ * that the home page renders. */
+#define HOME_MQTT_PERIOD_MIN_S (CONFIG_MANAGER_MQTT_PERIOD_MIN_MS / 1000U)
+#define HOME_MQTT_PERIOD_MAX_S (CONFIG_MANAGER_MQTT_PERIOD_MAX_MS / 1000U)
+
+static void mqtt_status_value(lcd_menu_t *m, const lcd_menu_item_t *it,
+                              char *buf, size_t buf_size, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) { snprintf(buf, buf_size, "< ?>  "); return; }
+    snprintf(buf, buf_size, "<%s>  ", c->mqtt.enable ? "ON" : "OFF");
+}
+
+static esp_err_t mqtt_status_toggle(lcd_menu_t *m, const lcd_menu_item_t *it, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) return ESP_ERR_INVALID_STATE;
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) return ESP_ERR_NO_MEM;
+    *cfg = *c;
+    cfg->mqtt.enable = !cfg->mqtt.enable;
+    esp_err_t ret = update_save_apply(cfg, CONFIG_APPLY_MQTT);
+    if (ret == ESP_OK) {
+        /* CONFIG_APPLY_MQTT does not raise s_cfg_pending, and only the
+         * backlight is applied locally — keep the home-page mirror honest. */
+        s_mqtt_enabled = cfg->mqtt.enable;
+    }
+    free(cfg);
+    return ESP_OK;
+}
+
+static void mqtt_period_value(lcd_menu_t *m, const lcd_menu_item_t *it,
+                              char *buf, size_t buf_size, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) { snprintf(buf, buf_size, "< ?>  "); return; }
+    snprintf(buf, buf_size, "<%lus>  ",
+             (unsigned long)(c->mqtt_publish_ms / 1000U));
+}
+
+static esp_err_t mqtt_period_edit(lcd_menu_t *m, const lcd_menu_item_t *it, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) return ESP_ERR_INVALID_STATE;
+    uint32_t seconds = c->mqtt_publish_ms / 1000U;
+    if (!edit_setting_seconds("MQTT PERIOD", seconds,
+                              HOME_MQTT_PERIOD_MIN_S, HOME_MQTT_PERIOD_MAX_S,
+                              &seconds)) {
+        return ESP_OK;   /* LEFT: discard, row keeps the old value */
+    }
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) return ESP_ERR_NO_MEM;
+    *cfg = *c;
+    cfg->mqtt_publish_ms = seconds * 1000U;
+    (void)update_save_apply(cfg, CONFIG_APPLY_MQTT);
+    free(cfg);
+    return ESP_OK;
+}
+
+static const char *mqtt_tls_mode_str(mqtt_tls_mode_t mode)
+{
+    switch (mode) {
+    case MQTT_TLS_DISABLE: return "None";
+    case MQTT_TLS_CA_ONLY: return "TLS (CA)";
+    case MQTT_TLS_MUTUAL: return "TLS (Mutual)";
+    case MQTT_TLS_INSECURE: return "TLS (Insecure)";
+    default: return "Unknown";
+    }
+}
+
+static esp_err_t mqtt_info_show(lcd_menu_t *m, const lcd_menu_item_t *it, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL || config_manager_get(cfg) != ESP_OK) {
+        if (cfg) free(cfg);
+        show_info("MQTT INFO", "Config Error", "", "");
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Prepare info lines (label + value pairs) */
+    char lines[5][HOME_LCD_WIDTH + 1];
+    int total_lines = 0;
+
+    /* Line 0: Broker Name (truncate to fit) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Name: %.13s", cfg->mqtt.name);
+
+    /* Line 1: Server Address (truncate to fit) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Addr: %.13s", cfg->mqtt.broker);
+
+    /* Line 2: Port */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Port: %u", cfg->mqtt.port);
+
+    /* Line 3: TLS Mode */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "TLS: %.14s", mqtt_tls_mode_str(cfg->mqtt.tls_mode));
+
+    /* Line 4: Username */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "User: %.13s",
+             cfg->mqtt.username[0] ? cfg->mqtt.username : "(none)");
+
+    free(cfg);
+
+    /* Multi-page navigation (3 lines per page, reserve 2 chars for indicators) */
+    int cursor = 0;
+    int top = 0;
+    uint8_t previous = 0;
+    wait_buttons_released();
+
+    while (1) {
+        put_line_centre(0, "MQTT INFO");
+
+        /* Calculate pagination */
+        bool has_above = (top > 0);
+        bool has_below = (top + 3 < total_lines);
+
+        for (int row = 0; row < 3; row++) {
+            int idx = top + row;
+            uint8_t lcd_row = (uint8_t)(row + 1);
+
+            if (idx >= total_lines) {
+                put_line(lcd_row, "");
+                continue;
+            }
+
+            /* Build display line with cursor and indent */
+            char display[HOME_LCD_WIDTH + 1];
+            char cursor_char = (idx == cursor) ? '>' : ' ';
+
+            /* Cursor + 1 space indent + content (truncate to fit 18 chars total) */
+            snprintf(display, sizeof(display), "%c %.16s", cursor_char, lines[idx]);
+
+            /* Add indicator if needed (reserve last 2 chars) */
+            bool mark = false;
+            if (row == 0 && has_above) {
+                mark = true;
+            } else if (row == 2 && has_below) {
+                mark = true;
+            }
+
+            if (mark) {
+                display[18] = '|';
+                display[19] = ' ';
+                display[20] = '\0';
+            }
+
+            put_line(lcd_row, display);
+        }
+
+        /* Button handling */
+        uint8_t buttons = 0;
+        if (hmi_bsp_read_buttons(&buttons) != ESP_OK) {
+            buttons = 0;
+        }
+        uint8_t edges = buttons & ~previous;
+        previous = buttons;
+
+        if (edges & HMI_BSP_BUTTON_TOP) {
+            if (cursor > 0) {
+                cursor--;
+                if (cursor < top) {
+                    top = cursor;
+                }
+            }
+            button_click();
+        } else if (edges & HMI_BSP_BUTTON_BOTTOM) {
+            if (cursor < total_lines - 1) {
+                cursor++;
+                if (cursor >= top + 3) {
+                    top = cursor - 2;
+                }
+            }
+            button_click();
+        } else if (edges & HMI_BSP_BUTTON_CENTER) {
+            /* CENTER = exit */
+            button_click();
+            wait_buttons_released();
+            return ESP_OK;
+        } else if (edges & HMI_BSP_BUTTON_LEFT) {
+            /* LEFT = back/exit */
+            button_click();
+            wait_buttons_released();
+            return ESP_OK;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+static const lcd_menu_item_t s_items_mqtt[] = {
+    {.label = "Info",   .type = LCD_MENU_ITEM_ACTION, .action = mqtt_info_show},
+    {.label = "Status", .type = LCD_MENU_ITEM_VALUE,
+     .value_get = mqtt_status_value, .action = mqtt_status_toggle},
+    {.label = "Period", .type = LCD_MENU_ITEM_VALUE,
+     .value_get = mqtt_period_value, .action = mqtt_period_edit},
+    {.label = "Back",   .type = LCD_MENU_ITEM_BACK},
+};
+static const lcd_menu_screen_t s_screen_mqtt = {
+    .title = "MQTT",
+    .items = s_items_mqtt,
+    .item_count = sizeof(s_items_mqtt) / sizeof(s_items_mqtt[0]),
+};
+
 /* Settings root — order matches agreed IA.
  * Config Portal, TCP Server and Factory Reset are direct ACTIONs, not submenus:
  * each has exactly one real destination, so the submenu level only added a
@@ -3076,6 +3332,7 @@ static const lcd_menu_item_t s_items_settings[] = {
     {.label = "Config Portal",   .type = LCD_MENU_ITEM_ACTION,  .action = menu_portal_start},
     {.label = "RTU Master",      .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_rtu_master},
     {.label = "RTU Slave",       .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_rtu_slave},
+    {.label = "MQTT",            .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_mqtt},
     {.label = "TCP Server",      .type = LCD_MENU_ITEM_ACTION,  .action = menu_tcp_server},
     {.label = "Alarm Settings",  .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_settings},
     {.label = "Display & Keys",  .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_display},

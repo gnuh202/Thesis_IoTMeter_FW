@@ -184,7 +184,7 @@ esp_err_t ethernet_driver_apply_ip(void)
 {
     ESP_RETURN_ON_FALSE(s_eth_netif != NULL, ESP_ERR_INVALID_STATE, TAG, "Ethernet netif not created yet");
 
-    /* config_manager_t is ~2.2 KB — allocate on heap to avoid stack overflow. */
+    /* config_manager_t is ~1.2 KB — allocate on heap to avoid stack overflow. */
     config_manager_t *cfg = malloc(sizeof(config_manager_t));
     if (cfg == NULL) {
         ESP_LOGE(TAG, "out of memory reading network config; leaving DHCP enabled");

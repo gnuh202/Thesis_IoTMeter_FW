@@ -33,7 +33,12 @@ static config_manager_t s_cfg;
 static bool s_loaded;
 
 #define CONFIG_SNAPSHOT_MAGIC 0x43464753U  /* "CFGS" */
-#define CONFIG_SNAPSHOT_VERSION 1U
+/* Transport layout of the full-snapshot DTO below. v2 rewrites the MQTT region
+ * from "3 profiles + active index + duplicate legacy scalars" to one broker
+ * struct, so the region's size and offsets change: v1 blobs are rejected rather
+ * than partially decoded, and the device starts from defaults. Accepted because
+ * the product is not shipped and NVS is re-provisioned. */
+#define CONFIG_SNAPSHOT_VERSION 2U
 
 typedef struct {
     uint8_t enable;
@@ -69,9 +74,10 @@ typedef struct {
     char firmware_version[CONFIG_MANAGER_VERSION_LEN];
     char hardware_version[CONFIG_MANAGER_VERSION_LEN];
 
+    char ota_fw_build[16];
+    char ota_version[16];
+
     uint8_t dhcp_enable;
-    uint8_t mqtt_enable;
-    uint8_t mqtt_active_profile;
     uint8_t mb_slave_id;
     char static_ip[CONFIG_MANAGER_IP_LEN];
     char gateway[CONFIG_MANAGER_IP_LEN];
@@ -80,14 +86,8 @@ typedef struct {
     char wifi_ssid[CONFIG_MANAGER_SSID_LEN];
     char wifi_pass[CONFIG_MANAGER_PASS_LEN];
 
-    char mqtt_broker[CONFIG_MANAGER_URI_LEN];
-    uint16_t mqtt_port;
-    uint16_t reserved0;
-    char mqtt_user[CONFIG_MANAGER_USER_LEN];
-    char mqtt_pass[CONFIG_MANAGER_PASS_LEN];
     uint32_t mqtt_publish_ms;
-    char mqtt_client_id[CONFIG_MANAGER_CLIENT_ID_LEN];
-    config_snapshot_mqtt_profile_t mqtt_profiles[CONFIG_MANAGER_MQTT_PROFILE_COUNT];
+    config_snapshot_mqtt_profile_t mqtt;
 
     uint8_t mb_baud_code;
     uint8_t mb_parity_code;
@@ -240,6 +240,10 @@ static void snapshot_to_dto(config_snapshot_dto_t *dto, const config_manager_t *
                           cfg->firmware_version, sizeof(cfg->firmware_version));
     copy_persisted_string(dto->hardware_version, sizeof(dto->hardware_version),
                           cfg->hardware_version, sizeof(cfg->hardware_version));
+    copy_persisted_string(dto->ota_fw_build, sizeof(dto->ota_fw_build),
+                          cfg->ota_fw_build, sizeof(cfg->ota_fw_build));
+    copy_persisted_string(dto->ota_version, sizeof(dto->ota_version),
+                          cfg->ota_version, sizeof(cfg->ota_version));
     dto->dhcp_enable = cfg->dhcp_enable ? 1U : 0U;
     copy_persisted_string(dto->static_ip, sizeof(dto->static_ip), cfg->static_ip, sizeof(cfg->static_ip));
     copy_persisted_string(dto->gateway, sizeof(dto->gateway), cfg->gateway, sizeof(cfg->gateway));
@@ -248,19 +252,8 @@ static void snapshot_to_dto(config_snapshot_dto_t *dto, const config_manager_t *
     copy_persisted_string(dto->wifi_ssid, sizeof(dto->wifi_ssid), cfg->wifi_ssid, sizeof(cfg->wifi_ssid));
     copy_persisted_string(dto->wifi_pass, sizeof(dto->wifi_pass), cfg->wifi_pass, sizeof(cfg->wifi_pass));
 
-    dto->mqtt_enable = cfg->mqtt_enable ? 1U : 0U;
-    copy_persisted_string(dto->mqtt_broker, sizeof(dto->mqtt_broker),
-                          cfg->mqtt_broker, sizeof(cfg->mqtt_broker));
-    dto->mqtt_port = cfg->mqtt_port;
-    copy_persisted_string(dto->mqtt_user, sizeof(dto->mqtt_user), cfg->mqtt_user, sizeof(cfg->mqtt_user));
-    copy_persisted_string(dto->mqtt_pass, sizeof(dto->mqtt_pass), cfg->mqtt_pass, sizeof(cfg->mqtt_pass));
     dto->mqtt_publish_ms = cfg->mqtt_publish_ms;
-    copy_persisted_string(dto->mqtt_client_id, sizeof(dto->mqtt_client_id),
-                          cfg->mqtt_client_id, sizeof(cfg->mqtt_client_id));
-    dto->mqtt_active_profile = cfg->mqtt_active_profile;
-    for (size_t i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT; i++) {
-        mqtt_profile_to_dto(&dto->mqtt_profiles[i], &cfg->mqtt_profiles[i]);
-    }
+    mqtt_profile_to_dto(&dto->mqtt, &cfg->mqtt);
 
     dto->mb_slave_id = cfg->mb_slave_id;
     dto->mb_baud_code = cfg->mb_baud_code;
@@ -322,12 +315,19 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
         stored_size > sizeof(*dto)) {
         return ESP_ERR_INVALID_VERSION;
     }
-    if (dto->mqtt_active_profile >= CONFIG_MANAGER_MQTT_PROFILE_COUNT ||
-        dto->dhcp_enable > 1U || dto->mqtt_enable > 1U ||
+    if (dto->mqtt.enable > 1U || dto->mqtt.tls_mode > MQTT_TLS_INSECURE ||
+        dto->dhcp_enable > 1U ||
         dto->lcd_backlight > 1U || dto->buzzer_enable > 1U ||
         dto->lcd_autocycle > 1U ||
         dto->line_freq > 1U ||
         dto->wiring_mode > 1U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Reject an out-of-range period outright: config_manager_update() refuses
+     * to store one, so accepting it here would leave the device unable to save
+     * any configuration change until a re-provision. */
+    if (dto->mqtt_publish_ms < CONFIG_MANAGER_MQTT_PERIOD_MIN_MS ||
+        dto->mqtt_publish_ms > CONFIG_MANAGER_MQTT_PERIOD_MAX_MS) {
         return ESP_ERR_INVALID_ARG;
     }
     /* Appended-field guard: a blob written by older firmware stops before these,
@@ -378,12 +378,6 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
           dto->alarm_nominal_frequency_hz != 60U))) {
         return ESP_ERR_INVALID_ARG;
     }
-    for (size_t i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT; i++) {
-        if (dto->mqtt_profiles[i].enable > 1U ||
-            dto->mqtt_profiles[i].tls_mode > MQTT_TLS_INSECURE) {
-            return ESP_ERR_INVALID_ARG;
-        }
-    }
 
     memset(cfg, 0, sizeof(*cfg));
     cfg->config_version = CONFIG_MANAGER_VERSION;
@@ -393,6 +387,10 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
                           dto->firmware_version, sizeof(dto->firmware_version));
     copy_persisted_string(cfg->hardware_version, sizeof(cfg->hardware_version),
                           dto->hardware_version, sizeof(dto->hardware_version));
+    copy_persisted_string(cfg->ota_fw_build, sizeof(cfg->ota_fw_build),
+                          dto->ota_fw_build, sizeof(dto->ota_fw_build));
+    copy_persisted_string(cfg->ota_version, sizeof(cfg->ota_version),
+                          dto->ota_version, sizeof(dto->ota_version));
     cfg->dhcp_enable = dto->dhcp_enable != 0;
     copy_persisted_string(cfg->static_ip, sizeof(cfg->static_ip), dto->static_ip, sizeof(dto->static_ip));
     copy_persisted_string(cfg->gateway, sizeof(cfg->gateway), dto->gateway, sizeof(dto->gateway));
@@ -401,19 +399,8 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
     copy_persisted_string(cfg->wifi_ssid, sizeof(cfg->wifi_ssid), dto->wifi_ssid, sizeof(dto->wifi_ssid));
     copy_persisted_string(cfg->wifi_pass, sizeof(cfg->wifi_pass), dto->wifi_pass, sizeof(dto->wifi_pass));
 
-    cfg->mqtt_enable = dto->mqtt_enable != 0;
-    copy_persisted_string(cfg->mqtt_broker, sizeof(cfg->mqtt_broker),
-                          dto->mqtt_broker, sizeof(dto->mqtt_broker));
-    cfg->mqtt_port = dto->mqtt_port;
-    copy_persisted_string(cfg->mqtt_user, sizeof(cfg->mqtt_user), dto->mqtt_user, sizeof(dto->mqtt_user));
-    copy_persisted_string(cfg->mqtt_pass, sizeof(cfg->mqtt_pass), dto->mqtt_pass, sizeof(dto->mqtt_pass));
     cfg->mqtt_publish_ms = dto->mqtt_publish_ms;
-    copy_persisted_string(cfg->mqtt_client_id, sizeof(cfg->mqtt_client_id),
-                          dto->mqtt_client_id, sizeof(dto->mqtt_client_id));
-    cfg->mqtt_active_profile = dto->mqtt_active_profile;
-    for (size_t i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT; i++) {
-        mqtt_profile_from_dto(&cfg->mqtt_profiles[i], &dto->mqtt_profiles[i]);
-    }
+    mqtt_profile_from_dto(&cfg->mqtt, &dto->mqtt);
 
     cfg->mb_slave_id = dto->mb_slave_id;
     cfg->mb_baud_code = dto->mb_baud_code;
@@ -616,62 +603,15 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
     return ESP_OK;
 }
 
-/* Fill one config_mqtt_profile_t default: disabled, TLS off, everything else
- * empty/zero. Used for slots the legacy blob has no data for. */
-static void mqtt_profile_default(config_mqtt_profile_t *p)
+/* Fill the broker struct with its factory state: switched off, TLS off, no
+ * address. The label/credentials stay empty until the operator fills the MQTT
+ * section of the web portal. */
+static void mqtt_broker_default(config_mqtt_profile_t *p)
 {
     memset(p, 0, sizeof(*p));
+    p->port = 1883;          /* Default non-TLS port */
+    p->keepalive_s = 60;     /* MQTT standard default: 60 seconds */
     p->tls_mode = MQTT_TLS_DISABLE;
-}
-
-/* Backward compatibility (Feature 12, extended by Feature 12A): the firmware
- * used to have only config_store's config_mqtt_t (3 legacy profiles + one
- * active index). Feature 12A makes mqtt_profiles[mqtt_active_profile] the
- * single source of truth the MQTT runtime reads, so every legacy slot is
- * mapped here (not just slot 0), and mqtt_active_profile mirrors the legacy
- * active index instead of being fixed at 0.
- *
- * legacy may be NULL (malloc failure in the caller); default everything. */
-static void mqtt_profiles_from_legacy(config_manager_t *c, const config_mqtt_t *legacy)
-{
-    for (size_t i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT; i++) {
-        mqtt_profile_default(&c->mqtt_profiles[i]);
-    }
-    c->mqtt_active_profile = 0;
-
-    if (legacy == NULL) {
-        return;
-    }
-
-    c->mqtt_active_profile = legacy->active < CONFIG_STORE_MQTT_PROFILE_COUNT ? legacy->active : 0;
-
-    for (size_t i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT && i < CONFIG_STORE_MQTT_PROFILE_COUNT; i++) {
-        const mqtt_profile_t *src = &legacy->profiles[i];
-        config_mqtt_profile_t *dst = &c->mqtt_profiles[i];
-
-        /* enabled/keepalive_s are shared across profiles in the legacy blob;
-         * mirrored into every slot so whichever becomes active carries them. */
-        dst->enable = legacy->enabled;
-        strlcpy(dst->name, src->name, sizeof(dst->name));
-        strlcpy(dst->broker, src->uri, sizeof(dst->broker));
-        dst->port = src->port;
-        dst->keepalive_s = legacy->keepalive_s;
-        strlcpy(dst->username, src->username, sizeof(dst->username));
-        strlcpy(dst->password, src->password, sizeof(dst->password));
-        /* client_id / publish_topic / subscribe_topic: generated/fixed at
-         * runtime by mqtt_manager, not stored in the legacy blob. Left empty
-         * (RESERVED, matches mqtt_client_id's treatment above). */
-        /* The legacy blob has no client-cert concept (no mutual TLS), only
-         * tls_enable + an optional custom CA — either way that is CA-only
-         * verification from the new enum's point of view. */
-        dst->tls_mode = src->tls_enable ? MQTT_TLS_CA_ONLY : MQTT_TLS_DISABLE;
-        /* ca_path/cert_path/key_path: the legacy blob holds the CA as an
-         * inline PEM (ca_cert[2048]), not a path, and Feature 12's security
-         * requirement forbids holding PEM content in this RAM config — so
-         * there is nothing to migrate into a *_path field. Left empty; a
-         * profile migrated with a custom CA loses TLS verification until a
-         * future TLS Runtime feature re-supplies a cert path. */
-    }
 }
 
 /*
@@ -902,6 +842,10 @@ static esp_err_t snapshot_from_store(config_manager_t *c)
     }
     strlcpy(c->hardware_version, "1.0", sizeof(c->hardware_version));
 
+    /* OTA tracking: default values before any OTA update */
+    strlcpy(c->ota_fw_build, "000000-00", sizeof(c->ota_fw_build));
+    strlcpy(c->ota_version, "0.0.0", sizeof(c->ota_version));
+
     /* Network + WiFi */
     config_network_t net;
     config_store_get_network(&net);
@@ -913,27 +857,13 @@ static esp_err_t snapshot_from_store(config_manager_t *c)
     strlcpy(c->wifi_ssid, net.wifi_ssid, sizeof(c->wifi_ssid));
     strlcpy(c->wifi_pass, net.wifi_pass, sizeof(c->wifi_pass));
 
-    /* MQTT (active profile). config_mqtt_t is ~6.7 KB (3 profiles x 2 KB CA);
-     * keep it off the stack — main_task's stack cannot hold it. */
-    config_mqtt_t *mqtt = malloc(sizeof(*mqtt));
-    if (mqtt == NULL) {
-        ESP_LOGE(TAG, "no memory for legacy MQTT migration");
-        return ESP_ERR_NO_MEM;
-    }
-    config_store_get_mqtt(mqtt);
-    uint8_t idx = mqtt->active < CONFIG_STORE_MQTT_PROFILE_COUNT ? mqtt->active : 0;
-    c->mqtt_enable = mqtt->enabled;
-    c->mqtt_port = mqtt->profiles[idx].port;
-    c->mqtt_publish_ms = mqtt->publish_period_ms;
-    strlcpy(c->mqtt_broker, mqtt->profiles[idx].uri, sizeof(c->mqtt_broker));
-    strlcpy(c->mqtt_user, mqtt->profiles[idx].username, sizeof(c->mqtt_user));
-    strlcpy(c->mqtt_pass, mqtt->profiles[idx].password, sizeof(c->mqtt_pass));
-
-    /* MQTT profiles (Feature 12, extended view): no NVS backing of their
-     * own yet, so rebuilt from this same legacy blob every load. */
-    mqtt_profiles_from_legacy(c, mqtt);
-    free(mqtt);
-    c->mqtt_client_id[0] = '\0';   /* RESERVED: generated at runtime */
+    /* MQTT: one broker, factory-off. The legacy config_store mqtt domain is
+     * NOT read here anymore: it stored 3 profiles + PEM blobs with no
+     * counterpart in this snapshot (v7 dropped the model), and the device is
+     * re-provisioned from an empty NVS — the broker comes from the web portal,
+     * it is not migrated. */
+    mqtt_broker_default(&c->mqtt);
+    c->mqtt_publish_ms = CONFIG_APP_MQTT_PUBLISH_PERIOD_MS;
 
     /* Modbus bus from legacy ext_meter. Only synthesize slot[0] when a real
      * downstream address was stored — factory default is empty slots. */
@@ -1063,8 +993,8 @@ esp_err_t config_manager_load(void)
 {
     ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
-    /* config_manager_t grew past 2 KB once mqtt_profiles[3] was added
-     * (Feature 12) — heap it rather than putting it on the caller's stack.
+    /* config_manager_t is >2 KB (broker struct + 8 mb_slots + alarms) — heap it
+     * rather than putting it on the caller's stack.
      * config_manager_init() runs on main_task during boot, whose stack is
      * only CONFIG_ESP_MAIN_TASK_STACK_SIZE (3584 B in this build). */
     config_manager_t *tmp = malloc(sizeof(*tmp));
@@ -1132,23 +1062,18 @@ esp_err_t config_manager_get(config_manager_t *out)
     return loaded ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
-esp_err_t config_manager_get_active_mqtt_profile(config_mqtt_profile_t *out, uint8_t *active_index)
+esp_err_t config_manager_get_mqtt(config_mqtt_profile_t *out)
 {
     ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
     ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
-    /* Copy only the one profile out of the lock (not the whole ~2.2 KB
+    /* Copy only the broker struct out under the lock (not the whole
      * config_manager_t onto the caller's stack, unlike config_manager_get()). */
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool loaded = s_loaded;
-    uint8_t idx = (s_cfg.mqtt_active_profile < CONFIG_MANAGER_MQTT_PROFILE_COUNT)
-                  ? s_cfg.mqtt_active_profile : 0;
-    *out = s_cfg.mqtt_profiles[idx];
+    *out = s_cfg.mqtt;
     xSemaphoreGive(s_lock);
 
-    if (active_index != NULL) {
-        *active_index = idx;
-    }
     return loaded ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
@@ -1243,6 +1168,11 @@ esp_err_t config_manager_update(const config_manager_t *in)
     size_t ap_pass_len = strnlen(in->ap_pass, sizeof(in->ap_pass));
     ESP_RETURN_ON_FALSE(ap_pass_len == 0U || (ap_pass_len >= 8U && ap_pass_len <= 63U),
                         ESP_ERR_INVALID_ARG, TAG, "invalid ap_pass (empty or 8..63)");
+    /* Publish period: 1..60 s, rejected rather than clamped so a frontend bug
+     * surfaces instead of silently persisting a different cadence. */
+    ESP_RETURN_ON_FALSE(in->mqtt_publish_ms >= CONFIG_MANAGER_MQTT_PERIOD_MIN_MS &&
+                        in->mqtt_publish_ms <= CONFIG_MANAGER_MQTT_PERIOD_MAX_MS,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid mqtt_publish_ms (1000..60000)");
     ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
     xSemaphoreTake(s_lock, portMAX_DELAY);

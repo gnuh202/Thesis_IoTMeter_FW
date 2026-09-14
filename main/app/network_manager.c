@@ -182,7 +182,7 @@ static void network_manager_task(void *arg)
 {
     set_state(NETWORK_STATE_LOAD_CONFIG);
 
-    /* config_manager_t is ~2.2 KB — heap, not this task's stack. */
+    /* config_manager_t is ~1.2 KB — heap, not this task's stack. */
     config_manager_t *cfg = malloc(sizeof(config_manager_t));
     if (cfg == NULL) {
         ESP_LOGE(TAG, "out of memory reading network config; STA credentials not primed");

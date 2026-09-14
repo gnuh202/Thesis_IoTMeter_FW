@@ -11,24 +11,28 @@ Tài liệu này mô tả cách cấu hình MQTT cho ESP32-S3 Power Meter, cách
 Đã implement:
 
 - MQTT client dùng `esp-mqtt`.
-- 3 broker profiles trong NVS, 1 profile active.
-- Cấu hình qua console `mqtt-cfg`.
-- Client ID tự sinh: `<device_name>-<MAC suffix>`.
-- Topic prefix: `pm/<device_name>/...`.
+- **Đúng một broker** trong NVS (`cfg.mqtt`). Không còn khái niệm profile / active index.
+- Cấu hình broker qua **Web Config Portal** (mục **MQTT**) hoặc console `mqtt-cfg`.
+- **Bật/tắt MQTT là thao tác sản phẩm trên LCD: Settings ▸ MQTT ▸ Status.** Chu kỳ publish
+  (1–60 s) chỉnh được ở cả LCD (Settings ▸ MQTT ▸ Period) lẫn portal (Publish interval).
+- Client ID tự sinh: `<device_name>-<MAC suffix>` khi `client_id` trống.
+- Topic prefix: `pm/<device_id>/...` khi `publish_topic`/`subscribe_topic` trống.
 - Publish định kỳ: `telemetry`, `energy`, `io`, `heartbeat`.
 - Publish `status=online` khi connect, LWT `offline` khi mất kết nối đột ngột.
 - Subscribe lệnh relay: `pm/<id>/cmd/out0`, `pm/<id>/cmd/out1`.
 - Payload command dạng JSON: `{"state":"on"}` hoặc `{"state":"off"}`.
-- TLS: certificate store trên partition FAT `storage` (mount `/flash`), **mỗi profile một bộ
-  CA/cert/key riêng**, upload bằng file picker ngay trong khối máy chủ của Web Config Portal
-  (mục **MQTT servers**) hoặc bằng curl.
+- TLS: certificate store trên partition FAT `storage` (mount `/flash`), **một bộ
+  CA/cert/key duy nhất** cho broker (`ca0/cert0/key0.pem`), upload bằng file picker ngay trong
+  mục **MQTT** của Web Config Portal hoặc bằng curl.
   Xem [mục 9](#9-tls).
 
 Chưa làm / để sau:
 
 - Command reboot qua MQTT.
 - Alarm topic.
-- Live-apply MQTT config không cần reboot. Hiện tại đổi `mqtt-cfg` xong cần reboot.
+- Live-apply MQTT config: LCD (toggle Status, đổi Period) apply **ngay** không cần reboot
+  (`config_apply(CONFIG_APPLY_MQTT)` rebuild client bất đồng bộ); portal là "Save and restart".
+  Riêng `mqtt-cfg` trên console chỉ sửa RAM → vẫn cần reboot, và giá trị đó mất khi reboot.
 
 ---
 
@@ -171,33 +175,33 @@ wifi-cfg set --ssid "TenWiFi" --pass "MatKhauWiFi"
 wifi-cfg enable
 ```
 
-### 4.3. Cấu hình MQTT profile local
+### 4.3. Cấu hình MQTT broker local
+
+Đường sản phẩm là **Web Config Portal** (mục MQTT) và **LCD** (Settings ▸ MQTT để bật/tắt
+và đặt chu kỳ). Console ở dưới dành cho bring-up khi không có bàn phím/màn hình.
 
 ```text
 mqtt-cfg show
-mqtt-cfg set --idx 0 --name "Local" --uri <BROKER_IP> --port 1883
-mqtt-cfg active --idx 0
+mqtt-cfg set --name "Local" --uri <BROKER_IP> --port 1883
 mqtt-cfg enable
-mqtt-cfg period --period 5000
+mqtt-cfg period --period 5
 mqtt-cfg show
 ```
 
 Ví dụ:
 
 ```text
-mqtt-cfg set --idx 0 --name "Local" --uri 192.168.1.10 --port 1883
-mqtt-cfg active --idx 0
+mqtt-cfg set --name "Local" --uri 192.168.1.10 --port 1883
 mqtt-cfg enable
-mqtt-cfg period --period 5000
+mqtt-cfg period --period 5
+cfg-save
+cfg-apply mqtt
 mqtt-cfg show
 ```
 
-Quan trọng: hiện tại thay đổi MQTT config cần reboot để task MQTT đọc lại NVS:
-
-```text
-reboot
-```
-
+Quan trọng: `mqtt-cfg` một mình chỉ sửa RAM. `cfg-save` đưa snapshot xuống NVS, còn
+`cfg-apply mqtt` làm MQTT client đọc lại config ngay — không cần reboot. Muốn đi đường
+cũ thì reboot sau `cfg-save`.
 Nếu không có lệnh `reboot`, nhấn reset board hoặc power-cycle.
 
 ### 4.4. Bật log MQTT khi debug
@@ -309,12 +313,12 @@ test/hello ok
 ESP console:
 
 ```text
-mqtt-cfg set --idx 0 --name "Local" --uri <BROKER_IP> --port 1883
-mqtt-cfg active --idx 0
+mqtt-cfg set --name "Local" --uri <BROKER_IP> --port 1883
 mqtt-cfg enable
-mqtt-cfg period --period 5000
+mqtt-cfg period --period 5
+cfg-save
+cfg-apply mqtt
 mqtt-cfg show
-reboot
 ```
 
 PC:
@@ -348,12 +352,14 @@ pm/<DEVICE_ID>/heartbeat {...}
 
 ### TC-MQTT-004 — Đổi chu kỳ publish
 
-ESP console:
+Cách sản phẩm: **LCD Settings ▸ MQTT ▸ Period** (quay 1..60 s, áp dụng ngay, tự lưu NVS).
+Cách console:
 
 ```text
-mqtt-cfg period --period 2000
+mqtt-cfg period --period 2
+cfg-save
+cfg-apply mqtt
 mqtt-cfg show
-reboot
 ```
 
 Kỳ vọng telemetry/heartbeat xuất hiện khoảng mỗi 2 giây.
@@ -361,8 +367,9 @@ Kỳ vọng telemetry/heartbeat xuất hiện khoảng mỗi 2 giây.
 Khôi phục:
 
 ```text
-mqtt-cfg period --period 5000
-reboot
+mqtt-cfg period --period 5
+cfg-save
+cfg-apply mqtt
 ```
 
 ### TC-MQTT-005 — Điều khiển relay out0 hợp lệ
@@ -440,21 +447,26 @@ Lưu ý: reset mềm/disconnect sạch có thể không kích hoạt LWT.
 
 ### TC-MQTT-010 — Disable MQTT
 
-ESP console:
+Cách sản phẩm: **LCD Settings ▸ MQTT ▸ Status** chuyển `<ON>` → `<OFF>`; MQTT client
+destroy ngay (áp dụng qua `CONFIG_APPLY_MQTT`), không cần reboot.
+
+Cách console:
 
 ```text
 mqtt-cfg disable
+cfg-save
+cfg-apply mqtt
 mqtt-cfg show
-reboot
 ```
 
-Kỳ vọng ESP không connect/publish MQTT.
+Kỳ vọng ESP không connect/publish MQTT nữa.
 
-Bật lại:
+Bật lại: toggle lại trên LCD, hoặc:
 
 ```text
 mqtt-cfg enable
-reboot
+cfg-save
+cfg-apply mqtt
 ```
 
 ---
@@ -484,10 +496,10 @@ mosquitto -c mosquitto_auth.conf -v
 Cấu hình ESP:
 
 ```text
-mqtt-cfg set --idx 0 --name "LocalAuth" --uri <BROKER_IP> --port 1883 --user meter --pass meter123
-mqtt-cfg active --idx 0
+mqtt-cfg set --name "LocalAuth" --uri <BROKER_IP> --port 1883 --user meter --pass meter123
 mqtt-cfg enable
-reboot
+cfg-save
+cfg-apply mqtt
 ```
 
 Test từ PC:
@@ -509,38 +521,39 @@ Certificate nằm trên partition FAT `storage` (1 MB, khai báo trong `partitio
 `/flash` khi boot. Không dùng SD card. Không lưu PEM vào NVS — NVS chỉ giữ *đường dẫn* trong
 snapshot của Configuration Manager.
 
-**Mỗi MQTT profile có bộ ca/cert/key riêng.** 3 profile là 3 broker độc lập, thường không dùng
-chung CA; nếu dùng chung một `ca.pem` thì đổi profile active sẽ âm thầm verify bằng CA của
-broker trước. File đặt tên theo index profile:
+**Broker duy nhất sở hữu một bộ ca/cert/key.** File đặt tên theo index certificate store —
+broker luôn là index 0:
 
-| Slot | Profile 0 | Profile 1 | Profile 2 | Dùng cho |
-|---|---|---|---|---|
-| `ca` | `/flash/ca0.pem` | `/flash/ca1.pem` | `/flash/ca2.pem` | CA của broker (CA_ONLY, MUTUAL) |
-| `cert` | `/flash/cert0.pem` | `/flash/cert1.pem` | `/flash/cert2.pem` | client certificate (MUTUAL) |
-| `key` | `/flash/key0.pem` | `/flash/key1.pem` | `/flash/key2.pem` | client private key (MUTUAL) |
+| Slot | Đường dẫn | Dùng cho |
+|---|---|---|
+| `ca` | `/flash/ca0.pem` | CA của broker (CA_ONLY, MUTUAL) |
+| `cert` | `/flash/cert0.pem` | client certificate (MUTUAL) |
+| `key` | `/flash/key0.pem` | client private key (MUTUAL) |
 
 Partition được format tự động ở lần boot đầu. Tên file phải nằm trong 8.3 vì project đặt
 `CONFIG_FATFS_LFN_NONE=y` — tên dài nhất là `cert0` (5 ký tự), vẫn thoải mái.
 
-> Nếu board đã từng upload theo cách cũ (một bộ `ca.pem`/`cert.pem`/`key.pem` dùng chung) thì
-> các file đó thành mồ côi: firmware không đọc chúng nữa. Upload lại cho từng profile rồi chạy
-> `mqtt-cfg set --idx N --tls ca` để `ca_path` trỏ đúng `ca<N>.pem`.
+> Nếu board đã từng upload theo cách cũ (nhiều bộ `ca<N>.pem` cho 3 profile) thì các file
+> `ca1/ca2/cert1/cert2/key1/key2.pem` thành mồ côi: firmware không đọc chúng nữa, có thể xoá.
+> Chạy `mqtt-cfg set --tls ca|mutual` (hoặc chọn **Connection security** trên portal rồi
+> Save and restart) để `ca_path`/`cert_path`/`key_path` trỏ đúng bộ `...0.pem`.
 
 ### 9.2. Upload certificate
 
-Cả hai cách đều dùng cùng một endpoint `POST /api/cert?slot=ca|cert|key&profile=0|1|2` và đều
+Cả hai cách đều dùng cùng một endpoint `POST /api/cert?slot=ca|cert|key&profile=0` và đều
 cần session của Web Config Portal (cùng tài khoản console). Thiếu `profile` thì mặc định là 0;
-`profile` ngoài `0..2` bị từ chối (không clamp) để một cái typo không ghi đè file của profile
-khác.
+`profile` khác `0` bị từ chối (không clamp) để một cái typo không âm thầm ghi vào chỗ khác.
 
 **Cách 1 — chọn file trong portal (thường dùng).** Mở `http://192.168.4.1/`, login, vào mục
-**MQTT servers**. Giao diện portal là tiếng Anh, nên tên nút/mục dưới đây trích đúng chuỗi đang
-hiển thị. Mỗi profile là một khối gập/mở "Server 1..3" (máy chủ đang dùng mở sẵn) chứa
-*toàn bộ* thông tin của máy chủ đó: địa chỉ, cổng, tài khoản, mức bảo mật, và 3 file chứng chỉ
-ca/cert/key. Không còn mục "Certs" riêng — nhờ vậy không thể upload nhầm sang máy chủ khác. Mỗi
-slot có một nút chọn file: chọn file từ máy rồi bấm **Upload file**, có hiệu lực ngay không cần
-bấm Save. Slot nào đã có file thì hiện `Loaded` + size + 16 hex đầu của SHA-256 kèm nút
-**Delete file**; slot rỗng hiện `Not loaded`.
+**MQTT**. Giao diện portal là tiếng Anh, nên tên nút/mục dưới đây trích đúng chuỗi đang
+hiển thị. Mục MQTT là **một broker duy nhất**: Label, Publish interval (seconds), Server
+address, Port, Keep-alive, Username, Password, dropdown **Connection security**, rồi tới các slot
+chứng chỉ ca/cert/key nằm ngay bên dưới — không còn mục "Certs" riêng, nên không thể upload nhầm
+sang máy chủ khác. Các slot **chỉ hiện khi cần**: chọn `No encryption (port 1883)` thì ẩn cả 3;
+chọn `TLS (port 8883) — typical` thì chỉ hiện CA; chọn `TLS with device certificate` thì hiện cả 3.
+Mỗi slot có một nút chọn file: chọn file từ máy rồi bấm **Upload file**, có
+hiệu lực ngay không cần bấm Save. Slot nào đã có file thì hiện `Loaded` + size + 16 hex đầu của
+SHA-256 kèm nút **Delete file**; slot rỗng hiện `Not loaded`.
 
 Upload và delete **không reload trang**: dòng trạng thái của riêng slot đó tự cập nhật,
 mọi ô text đang nhập dở vẫn còn nguyên.
@@ -548,8 +561,8 @@ mọi ô text đang nhập dở vẫn còn nguyên.
 Các ô text (địa chỉ, cổng, tài khoản, mức bảo mật, chu kỳ gửi, tên thiết bị, WiFi) dùng chung
 **một** nút duy nhất ở cuối trang: `Save and restart`. Chỉ một nút vì hầu như không field nào
 áp được khi đang chạy — lưu mà không reboot chỉ trông như đã có hiệu lực. Chọn mức bảo mật ở
-dropdown **Connection security** thì firmware tự trỏ đường dẫn certificate theo đúng profile,
-không cần gõ `mqtt-cfg set --tls` nữa. Dropdown chỉ có 3 mức an toàn (`No encryption (port 1883)`,
+dropdown **Connection security** thì firmware tự trỏ đường dẫn certificate vào bộ `...0.pem`
+của broker, không cần gõ `mqtt-cfg set --tls` nữa. Dropdown chỉ có 3 mức an toàn (`No encryption (port 1883)`,
 `TLS (port 8883) — typical`, `TLS with device certificate`); `insecure` là chế độ debug nên
 không xuất hiện trên web.
 
@@ -567,18 +580,15 @@ openssl x509 -inform der -in ca.der -out ca.pem
 # login lấy cookie session (portal dùng cookie wp_session, không phải HTTP Basic)
 curl -c cookies.txt -d "user=<user>&pass=<pass>" http://192.168.4.1/login
 
-# upload cho profile 0
+# upload bộ chứng chỉ của broker (profile luôn là 0)
 curl -b cookies.txt --data-binary @ca.pem   "http://192.168.4.1/api/cert?slot=ca&profile=0"
 curl -b cookies.txt --data-binary @cert.pem "http://192.168.4.1/api/cert?slot=cert&profile=0"
 curl -b cookies.txt --data-binary @key.pem  "http://192.168.4.1/api/cert?slot=key&profile=0"
 
-# broker khác thì đổi profile
-curl -b cookies.txt --data-binary @ca2.pem  "http://192.168.4.1/api/cert?slot=ca&profile=1"
-
-# trạng thái tất cả profile: chỉ có/không + size + 16 hex đầu của SHA-256
+# trạng thái tất cả slot: chỉ có/không + size + 16 hex đầu của SHA-256
 curl -b cookies.txt "http://192.168.4.1/api/cert"
 
-# xoá theo profile + slot
+# xoá theo slot
 curl -b cookies.txt -X POST "http://192.168.4.1/api/cert/delete?slot=key&profile=0"
 ```
 
@@ -593,18 +603,17 @@ editor Windows vẫn dùng được. Upload ghi ra file tạm rồi rename, nên
 ### 9.3. Chọn TLS mode
 
 ```
-mqtt-cfg set --idx 0 --uri broker.example.com --port 8883 --tls ca
+mqtt-cfg set --uri broker.example.com --port 8883 --tls ca
 cfg-save
-cfg-apply mqtt        # hoặc reboot
+cfg-apply mqtt
 ```
 
-`--tls` nhận `off|ca|mutual|insecure` và tự điền path theo **profile `--idx`** (profile 0 lấy
-`ca0.pem`, profile 1 lấy `ca1.pem`...):
+`--tls` nhận `off|ca|mutual|insecure` và tự điền path vào bộ certificate của broker:
 
-- `ca` — nếu chưa upload `ca<N>.pem` thì `ca_path` để trống và firmware verify bằng
+- `ca` — nếu chưa upload `ca0.pem` thì `ca_path` để trống và firmware verify bằng
   **certificate bundle** dựng sẵn trong image (đủ cho broker dùng CA public như HiveMQ Cloud,
-  EMQX Cloud). Nếu đã upload `ca<N>.pem` thì dùng file đó. Cả hai đều là verify đầy đủ.
-- `mutual` — yêu cầu đủ cả `ca<N>.pem` + `cert<N>.pem` + `key<N>.pem`; thiếu một file là từ chối
+  EMQX Cloud). Nếu đã upload `ca0.pem` thì dùng file đó. Cả hai đều là verify đầy đủ.
+- `mutual` — yêu cầu đủ cả `ca0.pem` + `cert0.pem` + `key0.pem`; thiếu một file là từ chối
   connect, không tự tụt xuống verify một chiều.
 - `insecure` — chỉ để debug và build hiện tại **không** bật
   `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY`, nên chọn mode này sẽ bị từ chối connect kèm log
@@ -717,12 +726,12 @@ mosquitto_sub -h <BROKER_IP> -p 1883 -t 'pm/<DEVICE_ID>/#' -v
 ESP console:
 
 ```text
-mqtt-cfg set --idx 0 --name "Local" --uri <BROKER_IP> --port 1883
-mqtt-cfg active --idx 0
+mqtt-cfg set --name "Local" --uri <BROKER_IP> --port 1883
 mqtt-cfg enable
-mqtt-cfg period --period 5000
+mqtt-cfg period --period 5
+cfg-save
+cfg-apply mqtt
 mqtt-cfg show
-reboot
 ```
 
 PC command relay:

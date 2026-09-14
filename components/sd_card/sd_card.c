@@ -1,8 +1,10 @@
 #include "sd_card.h"
 
+#include <ctype.h>   /* tolower: case-insensitive filename match */
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h> /* strcasecmp: short/long calib filename match */
 #include <sys/stat.h>
 #include <dirent.h>
 #include "driver/gpio.h"
@@ -283,56 +285,48 @@ esp_err_t sd_card_calib_export_current(char *path_out, size_t path_cap)
         return ret;
     }
 
-    /* Parse wiring_mode from file header to determine filename prefix.
-     * Single-profile header (new layout, no file_version):
-     *   magic(4) header_len(2) wiring_mode(2) reserved(2) payload_len(4) crc32(4) */
-    typedef struct __attribute__((packed)) {
-        uint32_t magic;
-        uint16_t header_len;
-        uint16_t wiring_mode;
-        uint16_t reserved;
-        uint32_t payload_len;
-        uint32_t crc32;
-    } file_header_t;
-
-    file_header_t header;
-    memcpy(&header, buf, sizeof(header));
-
-    const char *mode_str;
-    if (header.wiring_mode == 1) {
-        mode_str = "3W";
-    } else if (header.wiring_mode == 0) {
-        mode_str = "4W";
-    } else {
-        ESP_LOGE(TAG, "unknown wiring_mode %u in header", header.wiring_mode);
-        return ESP_ERR_INVALID_ARG;
-    }
-
     xSemaphoreTake(s_lock, portMAX_DELAY);
 
-    /* Scan existing files to find max NN for this mode */
+    /* Scan existing calib_NN.bin files to find max NN (no 3W/4W prefix since we only calib 4W).
+     * FATFS uppercases 8.3 filenames → lowercase before pattern match. */
     DIR *dir = opendir(SD_CALIB_DIR);
     int max_num = 0;
     if (dir != NULL) {
         struct dirent *entry;
         while ((entry = readdir(dir)) != NULL) {
-            if (entry->d_type != DT_REG) {
+            /* Check extension first (d_type may be DT_UNKNOWN on FATFS) */
+            const char *ext = strrchr(entry->d_name, '.');
+            if (ext == NULL || strcasecmp(ext, ".bin") != 0) {
                 continue;
             }
-            char file_mode[4];
+            /* Lowercase for case-insensitive pattern match */
+            char name_lower[32];
+            for (size_t i = 0; i < sizeof(name_lower) - 1 && entry->d_name[i]; i++) {
+                name_lower[i] = tolower((unsigned char)entry->d_name[i]);
+            }
+            name_lower[sizeof(name_lower) - 1] = '\0';
+
             int num;
-            if (sscanf(entry->d_name, "calib_%3[^_]_%d.bin", file_mode, &num) == 2) {
-                if (strcmp(file_mode, mode_str) == 0 && num > max_num) {
+            if (sscanf(name_lower, "calib_%d.bin", &num) == 1) {
+                if (num > max_num) {
                     max_num = num;
                 }
+            }
+            /* Legacy c4w_NN / c3w_NN / calib_4W_NN also count */
+            char mode_str[4];
+            if (sscanf(name_lower, "c%3[^_]_%d.bin", mode_str, &num) == 2 && num > max_num) {
+                max_num = num;
+            } else if (sscanf(name_lower, "calib_%3[^_]_%d.bin", mode_str, &num) == 2 && num > max_num) {
+                max_num = num;
             }
         }
         closedir(dir);
     }
 
     int next_num = max_num + 1;
+    /* 8.3 short names: basename <= 8 chars ("calib_01" = 8) */
     char filename[32];
-    snprintf(filename, sizeof(filename), "calib_%s_%02d.bin", mode_str, next_num);
+    snprintf(filename, sizeof(filename), "calib_%02d.bin", next_num);
     char full_path[64];
     snprintf(full_path, sizeof(full_path), "%s/%s", SD_CALIB_DIR, filename);
 
@@ -360,9 +354,9 @@ esp_err_t sd_card_calib_export_current(char *path_out, size_t path_cap)
                 }
                 ESP_LOGI(TAG, "exported calibration to %s (%zu bytes)", filename, len);
 
-                /* Also create CSV metadata file with same prefix */
+                /* Also create CSV metadata file with same number */
                 char json_filename[32];
-                snprintf(json_filename, sizeof(json_filename), "calib_%s_%02d.csv", mode_str, next_num);
+                snprintf(json_filename, sizeof(json_filename), "calib_%02d.csv", next_num);
                 char json_path[64];
                 snprintf(json_path, sizeof(json_path), "%s/%s", SD_CALIB_DIR, json_filename);
 
@@ -415,6 +409,8 @@ esp_err_t sd_card_calib_list(sd_calib_entry_t *out, size_t max, size_t *count)
         return ESP_OK;  /* empty list, not an error */
     }
 
+    ESP_LOGI(TAG, "sd_card_calib_list: scanning %s", SD_CALIB_DIR);
+
     /* Collect all matching files */
     typedef struct {
         char name[32];
@@ -426,29 +422,67 @@ esp_err_t sd_card_calib_list(sd_calib_entry_t *out, size_t max, size_t *count)
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL && temp_count < 32) {
-        if (entry->d_type != DT_REG) {
+        ESP_LOGI(TAG, "  readdir: '%s' type=%d", entry->d_name, entry->d_type);
+
+        /* Skip . and .. */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
-        char mode_str[4];
+
+        /* d_type may be DT_UNKNOWN(0) on some FATFS configs; check extension instead.
+         * FATFS 8.3 uppercases filenames, so compare case-insensitive. */
+        const char *ext = strrchr(entry->d_name, '.');
+        if (ext == NULL || strcasecmp(ext, ".bin") != 0) {
+            ESP_LOGD(TAG, "    skip: not .bin file");
+            continue;
+        }
+
+        /* Pattern: calib_NN.bin (4W only, no 3W/4W prefix).
+         * FATFS uppercases → compare lowercase copy. */
+        char name_lower[32];
+        for (size_t i = 0; i < sizeof(name_lower) - 1 && entry->d_name[i]; i++) {
+            name_lower[i] = tolower((unsigned char)entry->d_name[i]);
+        }
+        name_lower[sizeof(name_lower) - 1] = '\0';
+
         int num;
-        /* Match "calib_3W_NN.bin" or "calib_4W_NN.bin" */
-        if (sscanf(entry->d_name, "calib_%3[^_]_%d.bin", mode_str, &num) == 2) {
-            /* Verify extension */
-            const char *ext = strrchr(entry->d_name, '.');
-            if (ext && strcmp(ext, ".bin") == 0) {
-                uint8_t mode;
-                if (strcmp(mode_str, "3W") == 0) {
-                    mode = 1;  /* ATM90E32AS_WIRING_3P3W */
-                } else if (strcmp(mode_str, "4W") == 0) {
-                    mode = 0;  /* ATM90E32AS_WIRING_3P4W */
-                } else {
-                    continue;  /* unknown mode, skip */
+        if (sscanf(name_lower, "calib_%d.bin", &num) == 1) {
+            ESP_LOGI(TAG, "    matched: calib_%d.bin", num);
+            strncpy(temp[temp_count].name, entry->d_name, sizeof(temp[temp_count].name) - 1);
+            temp[temp_count].name[sizeof(temp[temp_count].name) - 1] = '\0';
+            temp[temp_count].mode = 0;  /* always 4W */
+            temp[temp_count].num = num;
+            temp_count++;
+        } else {
+            /* Legacy patterns for backward compat: c4w_NN.bin, c3w_NN.bin, calib_4W_NN.bin */
+            char mode_str[4];
+            bool matched = false;
+            if (sscanf(name_lower, "c%3[^_]_%d.bin", mode_str, &num) == 2) {
+                ESP_LOGI(TAG, "    legacy c-pattern: mode='%s' num=%d", mode_str, num);
+                if (strcmp(mode_str, "4w") == 0) {
+                    matched = true;
+                    temp[temp_count].mode = 0;
+                } else if (strcmp(mode_str, "3w") == 0) {
+                    matched = true;
+                    temp[temp_count].mode = 1;
                 }
+            } else if (sscanf(name_lower, "calib_%3[^_]_%d.bin", mode_str, &num) == 2) {
+                ESP_LOGI(TAG, "    legacy long pattern: mode='%s' num=%d", mode_str, num);
+                if (strcmp(mode_str, "4w") == 0) {
+                    matched = true;
+                    temp[temp_count].mode = 0;
+                } else if (strcmp(mode_str, "3w") == 0) {
+                    matched = true;
+                    temp[temp_count].mode = 1;
+                }
+            }
+            if (matched) {
                 strncpy(temp[temp_count].name, entry->d_name, sizeof(temp[temp_count].name) - 1);
                 temp[temp_count].name[sizeof(temp[temp_count].name) - 1] = '\0';
-                temp[temp_count].mode = mode;
                 temp[temp_count].num = num;
                 temp_count++;
+            } else {
+                ESP_LOGD(TAG, "    no pattern match, skip");
             }
         }
     }

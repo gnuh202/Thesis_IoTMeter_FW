@@ -26,6 +26,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
@@ -38,6 +39,39 @@ static bool s_dns_running;
 static TaskHandle_t s_dns_task;
 static int s_dns_sock = -1;
 static char s_session_token[17];
+static esp_timer_handle_t s_reboot_timer;
+
+/* Deferred restart runs on the esp_timer task, not on a private FreeRTOS task:
+ * esp_restart() walks the registered shutdown handlers (USB console flush,
+ * NVS, WiFi, ...) on the caller's stack, so a small throwaway task is exactly
+ * the wrong place to call it from. The timer fires once ~900 ms after the
+ * reply page is queued, giving the browser time to receive it before the
+ * device drops off the network. */
+static void reboot_timer_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGW(TAG, "rebooting to apply web portal config");
+    esp_restart();
+}
+
+static void schedule_reboot(void)
+{
+    if (s_reboot_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = reboot_timer_cb,
+            .name = "web_reboot",
+        };
+        if (esp_timer_create(&args, &s_reboot_timer) != ESP_OK) {
+            ESP_LOGE(TAG, "create reboot timer failed");
+            return;
+        }
+    } else {
+        esp_timer_stop(s_reboot_timer); /* ESP_ERR_INVALID_STATE if idle: harmless */
+    }
+    if (esp_timer_start_once(s_reboot_timer, 900 * 1000ULL) != ESP_OK) {
+        ESP_LOGE(TAG, "start reboot timer failed");
+    }
+}
 
 #define DNS_PORT 53
 #define DNS_MAX_PACKET 512
@@ -200,19 +234,14 @@ static const char *HTML_STYLE =
     "h1{margin:10px 0 4px;font-size:22px;font-weight:600;line-height:1.25}"
     "h2{margin:0 0 6px;font-size:16px;font-weight:600}h3{margin:0 0 4px;font-size:14px;font-weight:600}"
     "p{margin:6px 0;color:var(--body)}.muted{color:var(--muted);font-size:12px}"
+    /* Small hint under a field label: same muted tone as .muted, but tied to the
+     * field so it reads as part of the label, not page prose. */
+    ".hint{display:block;margin:2px 0 0;font-size:12px;font-weight:400;color:var(--muted)}"
     "code{background:var(--inset);border:1px solid var(--line-s);border-radius:6px;padding:1px 5px;"
     "font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}"
     /* Primer Label: outlined, not filled. */
     ".badge{display:inline-block;background:var(--acc-sub);color:var(--acc);border:1px solid var(--acc-bd);"
     "border-radius:999px;padding:1px 10px;font-size:12px;font-weight:500}"
-    ".pill{display:inline-block;background:var(--acc-sub);color:var(--acc);border:1px solid var(--acc-bd);"
-    "border-radius:999px;padding:0 8px;font-size:12px;font-weight:500}"
-    /* State next to a heading: a dot plus a word. */
-    ".tag{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;"
-    "padding:1px 10px;font-size:12px;font-weight:500;vertical-align:middle}"
-    ".tag::before{content:'';width:8px;height:8px;border-radius:50%;background:currentColor}"
-    ".tag.on{background:#dafbe1;color:#1a7f37;border-color:#1f883d40}"
-    ".tag.off{background:var(--inset);color:var(--muted)}"
     ".nav{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}"
     ".nav a{color:var(--body);background:var(--card);border:1px solid var(--line);border-radius:6px;"
     "padding:5px 12px;font-size:13px;font-weight:500;text-decoration:none;"
@@ -220,6 +249,24 @@ static const char *HTML_STYLE =
     ".nav a:hover{background:var(--inset-h);border-color:var(--muted);color:var(--ink)}"
     ".nav a:active{background:var(--inset-a)}"
     ".section{margin-top:20px;padding-top:16px;border-top:1px solid var(--line-s)}"
+    /* Collapsible sections: <details> with the same card border as .profile, but
+     * full-width and without the per-device margin. The summary is the section
+     * heading; the body is the section content. */
+    "details.section{margin-top:20px;padding:0;border:1px solid var(--line-s);border-radius:6px;"
+    "background:var(--card);transition:border-color var(--t),box-shadow var(--t)}"
+    "details.section:hover{border-color:var(--line)}"
+    "details.section[open]{box-shadow:0 1px 3px #1f23280f}"
+    "details.section>summary{display:flex;align-items:center;gap:8px;padding:16px 16px 12px;"
+    "font-size:16px;font-weight:600;color:var(--ink);cursor:pointer;list-style:none;"
+    "transition:background var(--t)}"
+    "details.section>summary:hover{background:var(--inset)}"
+    "details.section>summary:active{background:var(--inset-a)}"
+    "details.section>summary::-webkit-details-marker{display:none}"
+    "details.section>summary::before{content:'\\25B8';display:inline-block;color:var(--muted);"
+    "font-size:11px;transition:transform var(--t)}"
+    "details.section[open]>summary::before{transform:rotate(90deg)}"
+    "details.section[open]>summary{border-bottom:1px solid var(--line-s);border-radius:6px 6px 0 0}"
+    "details.section>.sbody{padding:16px}"
     /* One column by default; two only when there is room for two. */
     ".row{display:grid;grid-template-columns:1fr;gap:14px;margin-top:14px}"
     ".field{min-width:0}.field.wide{grid-column:1/-1}"
@@ -376,6 +423,22 @@ static const char *HTML_SCRIPT =
     "if(f.dataset.calib)calibApplyPhaseUi();});})"
     ".catch(function(){if(s){s.className='st bad';s.textContent='Lost connection to the device.';}});"
     "});"
+    /* MQTT cert slots follow the Connection security dropdown: hidden for "off",
+     * CA only for "ca", all three for "mutual". Runs on load (the server already
+     * pre-hides the right blocks; this keeps them in sync) and on every change. */
+    "function mqttApplyCertUi(){"
+    "var sel=document.querySelector('select[name=\"mqtt_tls\"]');"
+    "var all=document.getElementById('mqtt-certs');"
+    "var mut=document.getElementById('mqtt-certs-mutual');"
+    "if(!sel||!all)return;"
+    "var v=sel.value;"
+    "all.hidden=(v==='off');"
+    "if(mut)mut.hidden=(v!=='mutual');}"
+    "document.addEventListener('DOMContentLoaded',function(){"
+    "mqttApplyCertUi();"
+    "var sel=document.querySelector('select[name=\"mqtt_tls\"]');"
+    "if(sel)sel.addEventListener('change',mqttApplyCertUi);"
+    "});"
     "document.addEventListener('click',function(e){"
     "var b=e.target.closest('[data-del]');if(!b)return;e.preventDefault();"
     "if(!confirm('Delete this file from the device?'))return;"
@@ -386,48 +449,13 @@ static const char *HTML_SCRIPT =
     "if(r.ok)b.hidden=true;});})"
     ".catch(function(){s.className='st bad';s.textContent='Lost connection to the device.';});"
     "});"
-    /* MQTT brokers: cards are rendered server-side (each holds certificate slots
-     * whose state only the device knows), so unlike the RTU list this only
-     * reveals/hides existing cards and flips the hidden p{N}_used flag the save
-     * handler reads. A removed card is hidden, not destroyed, so its typed fields
-     * survive until the page is reloaded. */
-    "function mqttCards(){return document.querySelectorAll('.mqtt-broker');}"
-    "function mqttUsedCount(){var c=mqttCards(),n=0;"
-    "for(var i=0;i<c.length;i++){if(!c[i].hidden)n++;}return n;}"
-    "function mqttRefreshEmpty(){var e=document.getElementById('mqtt-empty');"
-    "if(!e)return;e.hidden=mqttUsedCount()>0;}"
-    "function mqttSetUsed(card,used){var f=card.querySelector('input[name$=\"_used\"]');"
-    "if(f)f.value=used?'1':'0';}"
-    "function mqttFirstHidden(){var c=mqttCards();"
-    "for(var i=0;i<c.length;i++){if(c[i].hidden)return c[i];}return null;}"
-    /* If the removed card was the one in use, hand "Use this broker" to another
-     * visible card so the save always has an active profile to point at. */
-    "function mqttReassignActive(){"
-    "var any=document.querySelector('input[name=\"active\"]:checked');"
-    "if(any&&!any.closest('.mqtt-broker').hidden)return;"
-    "var c=mqttCards();"
-    "for(var i=0;i<c.length;i++){if(!c[i].hidden){"
-    "var r=c[i].querySelector('input[name=\"active\"]');if(r){r.checked=true;return;}}}}"
-    "document.addEventListener('DOMContentLoaded',function(){"
-    "var add=document.getElementById('mqtt-add');"
-    "if(add)add.addEventListener('click',function(e){e.preventDefault();"
-    "var card=mqttFirstHidden();"
-    "if(!card){alert('All broker slots are in use. Remove one first.');return;}"
-    "card.hidden=false;card.open=true;mqttSetUsed(card,true);mqttRefreshEmpty();});"
-    "document.addEventListener('click',function(e){"
-    "var b=e.target.closest('[data-mqtt-del]');if(!b)return;e.preventDefault();"
-    "var card=document.getElementById('mqtt-broker-'+b.getAttribute('data-mqtt-del'));"
-    "if(!card)return;card.hidden=true;card.open=false;mqttSetUsed(card,false);"
-    "mqttReassignActive();mqttRefreshEmpty();});"
-    "mqttRefreshEmpty();"
-    "});"
     /* RTU master: dynamic device cards (portal = settings only; Active is LCD). */
     "function rtuList(){return document.getElementById('rtu-list');}"
     "function rtuEmpty(){return document.getElementById('rtu-empty');}"
     "function rtuUsedCount(){return rtuList()?rtuList().querySelectorAll('.rtu-dev').length:0;}"
     "function rtuRefreshEmpty(){var e=rtuEmpty();if(!e)return;e.hidden=rtuUsedCount()>0;}"
     "function rtuNextSlot(){"
-    "for(var i=0;i<8;i++){if(!document.getElementById('rtu-dev-'+i))return i;}"
+    "for(var i=0;i<5;i++){if(!document.getElementById('rtu-dev-'+i))return i;}"
     "return -1;}"
     "function rtuField(label,node){"
     "var d=document.createElement('div');d.className='field';"
@@ -435,7 +463,7 @@ static const char *HTML_SCRIPT =
     "function rtuAddDevice(pre){"
     "pre=pre||{};var list=rtuList();if(!list)return;"
     "var i=('slot' in pre)?pre.slot:rtuNextSlot();"
-    "if(i<0){alert('Maximum 8 devices on this bus.');return;}"
+    "if(i<0){alert('Maximum 5 devices allowed (MQTT telemetry limit).');return;}"
     "if(document.getElementById('rtu-dev-'+i))return;"
     "var name=pre.name||('M'+i);"
     "var id=pre.id||String(i+1);"
@@ -686,10 +714,33 @@ static esp_err_t send_escaped(httpd_req_t *req, const char *s)
  * two lines and knock the row out of alignment.
  */
 static esp_err_t send_input_ex(httpd_req_t *req, const char *label, const char *name,
-                               const char *value, bool wide)
+                               const char *value, bool wide, const char *placeholder)
 {
     httpd_resp_sendstr_chunk(req, wide ? "<div class=\"field wide\"><label>" : "<div class=\"field\"><label>");
     httpd_resp_sendstr_chunk(req, label);
+    httpd_resp_sendstr_chunk(req, "</label><input class=\"input\" form=\"" CFG_FORM_ID "\" name=\"");
+    httpd_resp_sendstr_chunk(req, name);
+    httpd_resp_sendstr_chunk(req, "\" value=\"");
+    send_escaped(req, value != NULL ? value : "");
+    httpd_resp_sendstr_chunk(req, "\"");
+    if (placeholder != NULL && placeholder[0] != '\0') {
+        httpd_resp_sendstr_chunk(req, " placeholder=\"");
+        httpd_resp_sendstr_chunk(req, placeholder);
+        httpd_resp_sendstr_chunk(req, "\"");
+    }
+    return httpd_resp_sendstr_chunk(req, "></div>");
+}
+
+static esp_err_t send_input_with_hint(httpd_req_t *req, const char *label, const char *hint,
+                                      const char *name, const char *value, bool wide)
+{
+    httpd_resp_sendstr_chunk(req, wide ? "<div class=\"field wide\"><label>" : "<div class=\"field\"><label>");
+    httpd_resp_sendstr_chunk(req, label);
+    if (hint != NULL && hint[0] != '\0') {
+        httpd_resp_sendstr_chunk(req, "<span class=\"hint\">");
+        httpd_resp_sendstr_chunk(req, hint);
+        httpd_resp_sendstr_chunk(req, "</span>");
+    }
     httpd_resp_sendstr_chunk(req, "</label><input class=\"input\" form=\"" CFG_FORM_ID "\" name=\"");
     httpd_resp_sendstr_chunk(req, name);
     httpd_resp_sendstr_chunk(req, "\" value=\"");
@@ -699,7 +750,7 @@ static esp_err_t send_input_ex(httpd_req_t *req, const char *label, const char *
 
 static esp_err_t send_input(httpd_req_t *req, const char *label, const char *name, const char *value)
 {
-    return send_input_ex(req, label, name, value, false);
+    return send_input_ex(req, label, name, value, false, NULL);
 }
 
 /*
@@ -719,7 +770,7 @@ static esp_err_t send_secret_input(httpd_req_t *req, const char *label, const ch
     httpd_resp_sendstr_chunk(req, name);
     httpd_resp_sendstr_chunk(req, "\" placeholder=\"");
     httpd_resp_sendstr_chunk(req, has_value ? "Password set — leave blank to keep it"
-                                            : "No password set");
+                                            : "Optional - leave empty if not required");
     return httpd_resp_sendstr_chunk(req, "\"></div>");
 }
 
@@ -753,14 +804,6 @@ static void send_field_end(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, "</div>");
 }
 
-static void reboot_task(void *arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(900));
-    ESP_LOGW(TAG, "rebooting to apply web portal config");
-    esp_restart();
-}
-
 /* Three choices, not four: MQTT_TLS_INSECURE skips server verification and is a
  * console-only bring-up mode, so it is never selectable here. */
 static bool tls_mode_from_form(const char *s, mqtt_tls_mode_t *out)
@@ -772,15 +815,17 @@ static bool tls_mode_from_form(const char *s, mqtt_tls_mode_t *out)
 }
 
 /*
- * Bind a profile's cert paths to its own files, like the console's
- * `mqtt-cfg set --tls`: profile N uses ca<N>/cert<N>/key<N>. Paths only, never PEM
+ * Bind the broker's cert paths to the certificate store, like the console's
+ * `mqtt-cfg set --tls`: the device has one broker and it owns store index 0, so
+ * it uses ca/cert/key at that index. Paths only, never PEM
  * content. An empty ca_path in CA_ONLY is meaningful — the runtime then verifies
  * against the certificate bundle built into the image, which is what a broker with
  * a public CA needs.
  */
-static void profile_bind_cert_paths(config_mqtt_profile_t *p, int profile)
+static void profile_bind_cert_paths(config_mqtt_profile_t *p)
 {
     char path[CERT_STORE_PATH_MAX];
+    const int profile = 0;   /* the single broker's certificate-store index */
 
     p->ca_path[0] = '\0';
     p->cert_path[0] = '\0';
@@ -821,8 +866,8 @@ static esp_err_t save_all_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* config_manager_t is ~2.2 KB since Feature 12 (mqtt_profiles[3]); keep it
-     * off the httpd task stack. */
+    /* config_manager_t is ~1.2 KB (one MQTT broker); keep it off the httpd task
+     * stack. */
     config_manager_t *cfg = malloc(sizeof(*cfg));
     if (cfg == NULL) {
         free(body);
@@ -851,90 +896,46 @@ static esp_err_t save_all_post_handler(httpd_req_t *req)
         strlcpy(cfg->ap_pass, secret, sizeof(cfg->ap_pass));
     }
 
-    /* MQTT: master enable switch, publish period, then the per-broker list.
+    /* MQTT: the single broker, plus the publish interval.
      *
-     * "active" now arrives as a radio value (the chosen broker's profile index)
-     * rather than a dropdown — same field name, same parse.
+     * No enable parse: mqtt.enable is owned by the LCD (Settings > MQTT) and the
+     * page sends no key for it, so the value already in the snapshot is written
+     * back unchanged by update() below.
      *
-     * "mqtt_enable" is the master switch the page renders as a checkbox + hidden
-     * fallback. form_get_value() returns the FIRST match: the checkbox (=1) sits
-     * before the hidden field (=0) in the DOM, so a checked box reads "1" and an
-     * unchecked one (checkbox omitted) reads "0".
-     *
-     * Each broker card carries a hidden p{i}_used flag set by the Add/Remove JS.
-     * A card that was removed arrives used=0 and is cleared here, mirroring the
-     * mb{i}_used rebuild of the RTU slot table. */
+     * The period is submitted in whole seconds and stored in milliseconds;
+     * anything outside 1..60 is ignored so a bad edit cannot make the whole
+     * save fail — the stored value simply survives the attempt. */
     uint32_t v = 0;
-    bool mqtt_master_on = false;
-    char en_s[8];
-    if (form_get_value(body, "mqtt_enable", en_s, sizeof(en_s))) {
-        mqtt_master_on = (strcmp(en_s, "1") == 0 || strcmp(en_s, "on") == 0);
-    }
-    if (form_get_u32(body, "active", &v) && v < CONFIG_MANAGER_MQTT_PROFILE_COUNT) {
-        cfg->mqtt_active_profile = (uint8_t)v;
-    }
-    if (form_get_u32(body, "publish_period_ms", &v) && v >= 1000) {
-        cfg->mqtt_publish_ms = v;
+    if (form_get_u32(body, "publish_period_s", &v) &&
+        v >= CONFIG_MANAGER_MQTT_PERIOD_MIN_MS / 1000U &&
+        v <= CONFIG_MANAGER_MQTT_PERIOD_MAX_MS / 1000U) {
+        cfg->mqtt_publish_ms = v * 1000U;
     }
 
-    for (int i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT; i++) {
-        config_mqtt_profile_t *p = &cfg->mqtt_profiles[i];
-        char key[24];
-        char used_s[8];
+    {
+        config_mqtt_profile_t *p = &cfg->mqtt;
 
-        snprintf(key, sizeof(key), "p%d_used", i);
-        bool used = form_get_value(body, key, used_s, sizeof(used_s)) &&
-                    (strcmp(used_s, "1") == 0 || strcmp(used_s, "on") == 0);
-        if (!used) {
-            /* Card removed from the page. Clear the profile; its uploaded
-             * certificates stay in the cert store (removing a broker from the
-             * list is not a key wipe) and rebind on the next TLS save if the
-             * broker is added back at the same index. */
-            memset(p, 0, sizeof(*p));
-            p->tls_mode = MQTT_TLS_DISABLE;
-            continue;
-        }
-
-        snprintf(key, sizeof(key), "p%d_name", i);
-        form_get_value(body, key, p->name, sizeof(p->name));
-        snprintf(key, sizeof(key), "p%d_uri", i);
-        form_get_value(body, key, p->broker, sizeof(p->broker));
-        snprintf(key, sizeof(key), "p%d_port", i);
-        if (form_get_u32(body, key, &v) && v > 0 && v <= UINT16_MAX) {
+        form_get_value(body, "mqtt_name", p->name, sizeof(p->name));
+        form_get_value(body, "mqtt_uri", p->broker, sizeof(p->broker));
+        if (form_get_u32(body, "mqtt_port", &v) && v > 0 && v <= UINT16_MAX) {
             p->port = (uint16_t)v;
         }
-        snprintf(key, sizeof(key), "p%d_keepalive", i);
-        if (form_get_u32(body, key, &v) && v > 0 && v <= UINT16_MAX) {
+        if (form_get_u32(body, "mqtt_keepalive", &v) && v > 0 && v <= UINT16_MAX) {
             p->keepalive_s = (uint16_t)v;
         }
-        snprintf(key, sizeof(key), "p%d_user", i);
-        form_get_value(body, key, p->username, sizeof(p->username));
-        snprintf(key, sizeof(key), "p%d_pass", i);
-        if (form_get_value(body, key, secret, sizeof(secret)) && secret[0] != '\0') {
+        form_get_value(body, "mqtt_user", p->username, sizeof(p->username));
+        if (form_get_value(body, "mqtt_pass", secret, sizeof(secret)) && secret[0] != '\0') {
             strlcpy(p->password, secret, sizeof(p->password));
         }
 
-        snprintf(key, sizeof(key), "p%d_tls", i);
         char mode_str[16];
         mqtt_tls_mode_t mode;
-        if (form_get_value(body, key, mode_str, sizeof(mode_str)) &&
+        if (form_get_value(body, "mqtt_tls", mode_str, sizeof(mode_str)) &&
             tls_mode_from_form(mode_str, &mode)) {
             p->tls_mode = mode;
-            profile_bind_cert_paths(p, i);
+            profile_bind_cert_paths(p);
         }
     }
-
-    /* Mirror the master switch into the legacy mqtt_enable field AND every
-     * profile's enable flag. The runtime gates on mqtt_profiles[active].enable
-     * (mqtt_manager.c), and the legacy migration already copies one enabled value
-     * into all slots (config_manager.c), so writing it everywhere keeps whichever
-     * profile is active consistent with the switch the operator just set — and
-     * fixes the old page that displayed mqtt_enable as a tag while never writing
-     * the flag the runtime actually reads. */
-    for (int i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT; i++) {
-        cfg->mqtt_profiles[i].enable = mqtt_master_on;
-    }
-    cfg->mqtt_enable = mqtt_master_on;
 
     /* RTU master bus params + device table (settings only).
      * mb_enabled / per-slot enabled are owned by LCD Active — never written here. */
@@ -1042,16 +1043,17 @@ static esp_err_t save_all_post_handler(httpd_req_t *req)
         "Wait a few seconds, then reconnect.</p>");
     send_page_end(req);
 
-    if (xTaskCreate(reboot_task, "web_reboot", 2048, NULL, 5, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "create reboot task failed");
-    }
+    schedule_reboot();
     return ESP_OK;
 }
 
 /*
  * MQTT TLS certificate upload / delete / status (Feature 13B).
  *
- * Target: ?slot=ca|cert|key&profile=0..2 — every profile owns its own triple.
+ * Target: ?slot=ca|cert|key&profile=0 — the device's single broker owns the one
+ * certificate triple. The profile parameter is kept so cert_store needs no
+ * knowledge of how many brokers the configuration layer supports; 0 is the only
+ * valid value.
  * Body: raw PEM for curl, or multipart/form-data for the portal's file pickers.
  * The extension is never inspected; cert_store_write() checks the PEM envelope,
  * so .pem/.crt/.cer all work and DER is rejected.
@@ -1075,7 +1077,8 @@ static bool cert_target_from_query(httpd_req_t *req, int *profile, cert_slot_t *
 
     /* Missing profile means 0: the portal's forms always send it, and a
      * single-broker curl setup uses profile 0. An out-of-range value is rejected
-     * rather than clamped, so a typo cannot overwrite another profile's file. */
+     * rather than clamped, so a typo fails loudly instead of writing somewhere
+     * unexpected. */
     *profile = 0;
     if (httpd_query_key_value(query, "profile", value, sizeof(value)) == ESP_OK) {
         char *end = NULL;
@@ -1217,7 +1220,7 @@ static esp_err_t cert_upload_post_handler(httpd_req_t *req)
     cert_slot_t slot;
     if (!cert_target_from_query(req, &profile, &slot)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "need slot=ca|cert|key and profile=0..2");
+                            "need slot=ca|cert|key and profile=0");
         return ESP_OK;
     }
 
@@ -1311,7 +1314,7 @@ static esp_err_t cert_delete_post_handler(httpd_req_t *req)
     cert_slot_t slot;
     if (!cert_target_from_query(req, &profile, &slot)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "need slot=ca|cert|key and profile=0..2");
+                            "need slot=ca|cert|key and profile=0");
         return ESP_OK;
     }
 
@@ -1573,10 +1576,7 @@ static esp_err_t reboot_post_handler(httpd_req_t *req)
         "<p>Wait a few seconds, then reconnect.</p>");
     send_page_end(req);
 
-    BaseType_t ok = xTaskCreate(reboot_task, "web_reboot", 2048, NULL, 5, NULL);
-    if (ok != pdPASS) {
-        ESP_LOGE(TAG, "create reboot task failed");
-    }
+    schedule_reboot();
     return ESP_OK;
 }
 
@@ -1635,77 +1635,37 @@ static void send_cert_slot(httpd_req_t *req, int profile, cert_slot_t slot,
 }
 
 /*
- * One collapsible block per MQTT broker: connection fields, security choice and
- * its own certificate files together, so an upload cannot land on the wrong
- * broker.
+ * The device's ONE MQTT broker: connection fields, security choice and its
+ * certificate files inline in the MQTT section — there is no broker list, no
+ * add/remove, and no enable control here (the LCD's Settings > MQTT owns that).
  *
- * Shaped like the RTU master list (common settings once, then Add/Remove per
- * entry) but the cards are rendered server-side, not built in JS: each carries
- * certificate slots whose presence and fingerprint only the device knows. All
- * CONFIG_MANAGER_MQTT_PROFILE_COUNT cards are always emitted; unconfigured ones
- * start hidden and "Add broker" reveals the next. A hidden p{i}_used flag tells
- * the save handler which cards to keep and which to clear, mirroring mb{i}_used.
- *
- * The "Use this broker" radio (name="active") replaces the old separate "Server
- * in use" dropdown — a dropdown cannot be server-rendered against a list the
- * operator adds to and removes from, while a radio group is natively
- * single-select and travels with its card.
+ * Emitted as plain fields, not a collapsible card: with a single broker a
+ * summary heading would only add a click between the operator and the settings.
+ * The certificate slots belong to cert-store index 0, the only one that exists.
  */
-static void send_mqtt_server_block(httpd_req_t *req, const config_manager_t *cfg, int profile)
+static void send_mqtt_broker_block(httpd_req_t *req, const config_mqtt_profile_t *p,
+                                   const char *period_s)
 {
-    const config_mqtt_profile_t *p = &cfg->mqtt_profiles[profile];
-    bool in_use = (profile == cfg->mqtt_active_profile);
-    /* Configured = has a broker address, or is the active one (so the in-use card
-     * is shown even on a fresh device where nothing is filled in yet). */
-    bool used = (p->broker[0] != '\0') || in_use;
     char buf[224];
-    char key[24];
-
-    snprintf(buf, sizeof(buf), "<details class=\"profile mqtt-broker\" id=\"mqtt-broker-%d\"%s%s><summary>Broker %d",
-             profile, used ? "" : " hidden", in_use ? " open" : "", profile + 1);
-    httpd_resp_sendstr_chunk(req, buf);
-    if (p->name[0] != '\0') {
-        httpd_resp_sendstr_chunk(req, " — ");
-        send_escaped(req, p->name);
-    }
-    if (in_use) {
-        httpd_resp_sendstr_chunk(req, " <span class=\"pill\">in use</span>");
-    }
-    httpd_resp_sendstr_chunk(req, "</summary><div class=\"pbody\">");
-
-    /* Hidden keep/clear flag + the active-broker radio. Both join the page form. */
-    snprintf(buf, sizeof(buf),
-             "<input type=\"hidden\" name=\"p%d_used\" value=\"%d\" form=\"" CFG_FORM_ID "\">",
-             profile, used ? 1 : 0);
-    httpd_resp_sendstr_chunk(req, buf);
-    snprintf(buf, sizeof(buf),
-             "<div class=\"field wide\"><label class=\"pick\">"
-             "<input type=\"radio\" name=\"active\" value=\"%d\" form=\"" CFG_FORM_ID "\"%s>"
-             "<span>Use this broker</span></label></div>",
-             profile, in_use ? " checked" : "");
-    httpd_resp_sendstr_chunk(req, buf);
 
     httpd_resp_sendstr_chunk(req, "<div class=\"row\">");
-    snprintf(key, sizeof(key), "p%d_name", profile);
-    send_input(req, "Label", key, p->name);
-    snprintf(key, sizeof(key), "p%d_uri", profile);
-    send_input_ex(req, "Server address", key, p->broker, true);
-    snprintf(key, sizeof(key), "p%d_port", profile);
+    /* The interval sits beside the label, not the port, so the wide server address
+     * below does not split the remaining half-width fields: that leaves
+     * Port|Keep-alive and Username|Password each on a full row. */
+    send_input_ex(req, "Broker name", "mqtt_name", p->name, false, "Eg. Main-Broker");
+    send_input(req, "Publish interval (seconds)", "publish_period_s", period_s);
+    send_input_ex(req, "Server address", "mqtt_uri", p->broker, true, "Eg. 192.168.1.100 or broker.example.com");
     snprintf(buf, sizeof(buf), "%u", (unsigned)p->port);
-    send_input(req, "Port", key, buf);
-    snprintf(key, sizeof(key), "p%d_keepalive", profile);
+    send_input(req, "Port", "mqtt_port", buf);
     snprintf(buf, sizeof(buf), "%u", (unsigned)p->keepalive_s);
-    send_input(req, "Keep-alive (seconds)", key, buf);
-    snprintf(key, sizeof(key), "p%d_user", profile);
-    send_input(req, "Username", key, p->username);
-    snprintf(key, sizeof(key), "p%d_pass", profile);
-    send_secret_input(req, "Password", key, p->password[0] != '\0', false);
+    send_input(req, "Keep-alive (seconds)", "mqtt_keepalive", buf);
+    send_input_ex(req, "Username", "mqtt_user", p->username, false, "Optional - leave empty if not required");
+    send_secret_input(req, "Password", "mqtt_pass", p->password[0] != '\0', false);
 
     /* MQTT_TLS_INSECURE is intentionally not offered: it skips server
-     * verification and belongs to console bring-up only. A profile already set to
+     * verification and belongs to console bring-up only. A broker already set to
      * it on the console keeps that value until the operator picks one of these. */
-    snprintf(key, sizeof(key), "p%d_tls", profile);
-    send_select_start(req, "Connection security", key, true);
+    send_select_start(req, "Connection security", "mqtt_tls", true);
     send_option(req, "off", "No encryption (port 1883)", p->tls_mode == MQTT_TLS_DISABLE);
     send_option(req, "ca", "TLS (port 8883) — typical", p->tls_mode == MQTT_TLS_CA_ONLY);
     send_option(req, "mutual", "TLS with device certificate", p->tls_mode == MQTT_TLS_MUTUAL);
@@ -1717,27 +1677,45 @@ static void send_mqtt_server_block(httpd_req_t *req, const config_manager_t *cfg
     send_field_end(req);
     httpd_resp_sendstr_chunk(req, "</div>");
 
+    httpd_resp_sendstr_chunk(req, "<script>"
+        "document.addEventListener('DOMContentLoaded',function(){"
+        "var s=document.querySelector('select[name=\"mqtt_tls\"]');"
+        "var p=document.querySelector('input[name=\"mqtt_port\"]');"
+        "if(s&&p){"
+        "var autoFill=function(){"
+        "var newPort=s.value==='off'?'1883':'8883';"
+        "if(!p.value||p.value==='0'||p.value==='1883'||p.value==='8883'){"
+        "p.value=newPort;"
+        "}"
+        "};"
+        "s.addEventListener('change',autoFill);"
+        "autoFill();"
+        "}"
+        "});"
+        "</script>");
+
     if (!cert_store_ready()) {
         httpd_resp_sendstr_chunk(req, "<div class=\"err\">The certificate store is not ready, so files "
                                       "cannot be uploaded. Check the boot log at the \"Cert Store\" "
                                       "step.</div>");
     } else {
-        send_cert_slot(req, profile, CERT_SLOT_CA, "Server certificate (CA)",
+        /* Cert slots are only relevant when TLS is on. They are wrapped in
+         * #mqtt-certs so the dropdown can show/hide them without a reload.
+         * Server-side they are always rendered (so no-script still works); JS
+         * hides them on load when the current value is "off". */
+        bool show_certs = (p->tls_mode != MQTT_TLS_DISABLE);
+        httpd_resp_sendstr_chunk(req, show_certs ? "<div id=\"mqtt-certs\">" : "<div id=\"mqtt-certs\" hidden>");
+        send_cert_slot(req, 0, CERT_SLOT_CA, "Server certificate (CA)",
                        "Enough for TLS mode.");
-        send_cert_slot(req, profile, CERT_SLOT_CERT, "Device certificate",
+        bool show_mutual = (p->tls_mode == MQTT_TLS_MUTUAL);
+        httpd_resp_sendstr_chunk(req, show_mutual ? "<div id=\"mqtt-certs-mutual\">" : "<div id=\"mqtt-certs-mutual\" hidden>");
+        send_cert_slot(req, 0, CERT_SLOT_CERT, "Device certificate",
                        "Only needed when the server asks the device to present one.");
-        send_cert_slot(req, profile, CERT_SLOT_KEY, "Device private key",
+        send_cert_slot(req, 0, CERT_SLOT_KEY, "Device private key",
                        "Goes with the device certificate.");
+        httpd_resp_sendstr_chunk(req, "</div>");
+        httpd_resp_sendstr_chunk(req, "</div>");
     }
-
-    /* Remove hides the card and flips p{profile}_used to 0 so the next save
-     * clears it. Uploaded certificates for that profile are left in the cert
-     * store — removing a broker from the page is not a destructive key wipe. */
-    snprintf(buf, sizeof(buf),
-             "<div class=\"line\"><button type=\"button\" class=\"btn alt sm\" "
-             "data-mqtt-del=\"%d\">Remove broker</button></div>", profile);
-    httpd_resp_sendstr_chunk(req, buf);
-    httpd_resp_sendstr_chunk(req, "</div></details>");
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -1749,7 +1727,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
     /* Everything on this page now reads through the Configuration Manager,
      * including the WiFi credentials (the password only to say whether one
-     * exists). config_manager_t is ~2.2 KB; keep it off the httpd task stack. */
+     * exists). config_manager_t is ~1.2 KB; keep it off the httpd task stack. */
     config_manager_t *mcfg = malloc(sizeof(*mcfg));
     if (mcfg == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
@@ -1762,94 +1740,60 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<span class=\"badge\">Settings</span>"
         "<h1>Power Meter Setting</h1>"
-        "<div class=\"nav\"><a href=\"#device\">Device &amp; network</a><a href=\"#mqtt\">MQTT brokers</a>"
+        "<div class=\"nav\"><a href=\"#device\">Device &amp; network</a><a href=\"#mqtt\">MQTT</a>"
         "<a href=\"#rtu\">RTU master</a>");
 #if CONFIG_APP_WEB_CALIB_ENABLE
     httpd_resp_sendstr_chunk(req, "<a href=\"#calib\">Calibration</a>");
 #endif
     httpd_resp_sendstr_chunk(req, "<a href=\"#save\">Save</a></div>");
 
-    /* Identity and the network it joins are one thing to the operator, so one
-     * section — this was previously "Network" and "System" with a Save button each.
-     * No network-mode or DHCP line: the operator cannot act on either from here. */
-    httpd_resp_sendstr_chunk(req, "<section class=\"section\" id=\"device\"><h2>Device &amp; network</h2>"
-                                  "<div class=\"row\">");
-    send_input(req, "Device name", "device_name", mcfg->device_name);
-    send_input(req, "WiFi name (SSID)", "wifi_ssid", mcfg->wifi_ssid);
-    send_secret_input(req, "WiFi password", "wifi_pass", strlen(mcfg->wifi_pass) > 0, true);
-    httpd_resp_sendstr_chunk(req, "</div>"
-        "<h3>Config Portal AP</h3>"
-        "<div class=\"row\">");
-    send_input(req, "Portal AP SSID", "ap_ssid", mcfg->ap_ssid);
-    send_secret_input(req, "Portal AP password", "ap_pass", strlen(mcfg->ap_pass) > 0, true);
-    httpd_resp_sendstr_chunk(req, "</div></section>");
-
-    /* MQTT: common settings once (Use-MQTT master switch + publish interval), then
-     * a per-broker list with Add/Remove, mirroring the RTU master section.
+    /* One .row, auto-placed on a 1fr/1fr grid (2 columns from 640px up):
+     * device name is wide so it takes a row of its own, then WiFi SSID + password
+     * pair up side by side, then the portal-AP pair below them. The AP fields are
+     * self-identifying by their labels, so no "Config Portal AP" subheading.
+     * Both password fields are half-width, which is also what makes their muted
+     * placeholder text render identically (it is generated by send_secret_input).
+     * No network-mode or DHCP line: the operator cannot act on either from here.
      *
-     * "Use MQTT" is a real control now. It used to be a passive Enabled/Disabled
-     * tag reading the legacy mqtt_enable field — but the runtime gates on
-     * mqtt_profiles[active].enable (mqtt_manager.c), which nothing on this page
-     * ever wrote, so a broker configured here could show "Enabled" and still never
-     * connect. The checkbox writes both: the legacy mirror (for the dp/console
-     * readers) and the active profile's enable flag (for the runtime). */
-    unsigned mqtt_used_n = 0;
-    for (int i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT; i++) {
-        if (mcfg->mqtt_profiles[i].broker[0] != '\0' ||
-            i == mcfg->mqtt_active_profile) {
-            mqtt_used_n++;
-        }
-    }
+     * The section is a <details> so the operator can collapse it; it ships open
+     * because device identity is the first thing to check on a fresh board. */
+    httpd_resp_sendstr_chunk(req, "<details class=\"section\" id=\"device\" open>"
+                                  "<summary>Device &amp; network</summary>"
+                                  "<div class=\"sbody\"><div class=\"row\">");
+    send_input_with_hint(req, "Device name",
+                         "Used for MQTT topics and client ID (sanitized: / + # and spaces become _)",
+                         "device_name", mcfg->device_name, true);
+    send_input(req, "WiFi name (SSID)", "wifi_ssid", mcfg->wifi_ssid);
+    send_secret_input(req, "WiFi password", "wifi_pass", strlen(mcfg->wifi_pass) > 0, false);
+    send_input(req, "Portal AP SSID", "ap_ssid", mcfg->ap_ssid);
+    send_secret_input(req, "Portal AP password", "ap_pass", strlen(mcfg->ap_pass) > 0, false);
+    httpd_resp_sendstr_chunk(req, "</div></div></details>");
 
-    httpd_resp_sendstr_chunk(req, "<section class=\"section\" id=\"mqtt\"><h2>MQTT brokers</h2>"
-        "<p class=\"muted\">Add up to " );
-    {
-        char nbuf[8];
-        snprintf(nbuf, sizeof(nbuf), "%d", CONFIG_MANAGER_MQTT_PROFILE_COUNT);
-        httpd_resp_sendstr_chunk(req, nbuf);
-    }
+    /* MQTT: exactly one broker, configured here and switched on or off on the
+     * device. The publish interval is shared with the LCD and entered in whole
+     * seconds (1..60) on both frontends; the snapshot stores milliseconds.
+     *
+     * There is deliberately no enable control on this page. Writing it from the
+     * portal would let a settings save silently turn telemetry on or off under
+     * an operator who only came to change a topic, so the flag stays the LCD's.
+     *
+     * Collapsible like the other sections; ships open because the broker is the
+     * most-edited part of this page. */
+    httpd_resp_sendstr_chunk(req, "<details class=\"section\" id=\"mqtt\" open>"
+                                  "<summary>MQTT</summary><div class=\"sbody\">");
     httpd_resp_sendstr_chunk(req,
-        " brokers. The device publishes to the one marked \"Use this broker\". "
-        "Turn MQTT on or off with the switch below.</p><div class=\"row\">");
+        "<p class=\"muted\">The device publishes to this one broker. MQTT is turned on or "
+        "off from the device LCD: Settings &#8594; MQTT &#8594; Status.</p>");
 
-    /* Master enable. form_get_value() returns the FIRST match for a key, so the
-     * hidden =0 must come AFTER the checkbox =1: when the box is checked the body
-     * is "mqtt_enable=1&mqtt_enable=0" (first wins → on), and when unchecked the
-     * checkbox is omitted so only the hidden =0 is present (→ off). Without the
-     * hidden field an unchecked box submits nothing and the handler could not tell
-     * "off" from "absent". */
-    httpd_resp_sendstr_chunk(req,
-        "<div class=\"field\"><label class=\"pick\">"
-        "<input type=\"checkbox\" name=\"mqtt_enable\" value=\"1\" form=\"" CFG_FORM_ID "\"");
-    if (mcfg->mqtt_enable) {
-        httpd_resp_sendstr_chunk(req, " checked");
-    }
-    httpd_resp_sendstr_chunk(req,
-        "><span>Use MQTT (publish telemetry)</span></label>"
-        "<input type=\"hidden\" name=\"mqtt_enable\" value=\"0\" form=\"" CFG_FORM_ID "\"></div>");
-
-    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)mcfg->mqtt_publish_ms);
-    send_input(req, "Publish interval (ms)", "publish_period_ms", tmp);
-    httpd_resp_sendstr_chunk(req, "</div>");
-
-    httpd_resp_sendstr_chunk(req,
-        "<div class=\"rtu-toolbar\">"
-        "<button type=\"button\" class=\"btn sm\" id=\"mqtt-add\">Add broker</button>"
-        "</div>"
-        "<p class=\"rtu-empty\" id=\"mqtt-empty\"");
-    if (mqtt_used_n > 0) {
-        httpd_resp_sendstr_chunk(req, " hidden");
-    }
-    httpd_resp_sendstr_chunk(req,
-        ">No brokers yet. Press Add broker to configure one.</p>");
-
-    for (int i = 0; i < CONFIG_MANAGER_MQTT_PROFILE_COUNT; i++) {
-        send_mqtt_server_block(req, mcfg, i);
-    }
-    httpd_resp_sendstr_chunk(req, "</section>");
+    snprintf(tmp, sizeof(tmp), "%lu",
+             (unsigned long)(mcfg->mqtt_publish_ms / 1000U));
+    send_mqtt_broker_block(req, &mcfg->mqtt, tmp);
+    httpd_resp_sendstr_chunk(req, "</div></details>");
 
     /* RTU master: bus settings + dynamic device list (Add device).
-     * Master/slot Active is LCD-only — portal never offers enable toggles. */
+     * Master/slot Active is LCD-only — portal never offers enable toggles.
+     * Collapsible; ships closed because the bus is configured less often than
+     * network/MQTT. */
     {
         char tmpb[24];
         unsigned used_n = 0;
@@ -1859,7 +1803,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             }
         }
 
-        httpd_resp_sendstr_chunk(req, "<section class=\"section\" id=\"rtu\"><h2>RTU master</h2>");
+        httpd_resp_sendstr_chunk(req, "<details class=\"section\" id=\"rtu\">"
+                                      "<summary>RTU master</summary><div class=\"sbody\">");
         httpd_resp_sendstr_chunk(req,
             "<p class=\"muted\">Configure the master bus (downstream meters) here. Turn the "
             "master on or off from the device LCD: Settings → RTU Master → Active.<br>"
@@ -1931,7 +1876,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             first = false;
             httpd_resp_sendstr_chunk(req, js);
         }
-        httpd_resp_sendstr_chunk(req, "]</script></section>");
+        httpd_resp_sendstr_chunk(req, "]</script></div></details>");
     }
 
     /* Calibration: enter true V/I; check result on the device LCD. Persist via Save and restart.
@@ -1948,7 +1893,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             hide_phase_b_v = true; /* default channel is V → hide B on first paint */
         }
         httpd_resp_sendstr_chunk(req,
-            "<section class=\"section\" id=\"calib\"><h2>Calibration</h2>"
+            "<details class=\"section\" id=\"calib\"><summary>Calibration</summary><div class=\"sbody\">"
             "<p class=\"muted\">Enter the real voltage (V) or current (A) you applied. "
             "Keep changes with Save and restart below.</p>"
             "<p>Active profile: <span id=\"calib-profile\" class=\"st\">");
@@ -1980,7 +1925,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             "<input class=\"input\" name=\"value\" placeholder=\"230 or 5.000\" required>"
             "</div></div>"
             "<button class=\"btn\" type=\"submit\">Calibrate</button>"
-            "</form></section>");
+            "</form></div></details>");
     }
 #endif /* CONFIG_APP_WEB_CALIB_ENABLE */
 

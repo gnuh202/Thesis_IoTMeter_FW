@@ -63,6 +63,14 @@ static void wifi_manager_event_handler(void *arg, esp_event_base_t event_base, i
         s_sta_fail_count = 0;
         xEventGroupSetBits(s_event_group, WIFI_MANAGER_STA_GOT_IP_BIT);
         system_status_set(SYS_MODULE_WIFI, SYS_STATUS_READY);
+
+        /* Disable WiFi power save to prevent TCP packet delays that cause MQTT keepalive timeouts */
+        esp_err_t ps_ret = esp_wifi_set_ps(WIFI_PS_NONE);
+        if (ps_ret == ESP_OK) {
+            ESP_LOGI(TAG, "WiFi power save disabled for stable MQTT connection");
+        } else {
+            ESP_LOGW(TAG, "failed to disable WiFi power save: %s", esp_err_to_name(ps_ret));
+        }
     }
 }
 
