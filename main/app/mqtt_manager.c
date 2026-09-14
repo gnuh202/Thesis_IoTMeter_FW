@@ -1,6 +1,7 @@
 #include "mqtt_manager.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +17,9 @@
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "io_expander.h"
+#include "modbus_master_task.h"
 #include "mqtt_client.h"
+#include "mqtt_telemetry.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -690,34 +693,140 @@ static void publish_json(const char *topic, cJSON *root, int qos, int retain)
     cJSON_free(payload);
 }
 
-/* pm/<id>/telemetry — instantaneous measurements (QoS0, no retain). */
-static void publish_telemetry(void)
+static void prepare_main_telemetry(mqtt_telemetry_main_t *out)
 {
+    memset(out, 0, sizeof(*out));
+
     atm90e32as_measurements_t m;
     if (energy_meter_get_latest(&m) != ESP_OK) {
         return;
     }
+
+    energy_meter_energy_t e = {0};
+    energy_meter_get_energy(&e);
+
+    memcpy(out->voltage, m.voltage, sizeof(out->voltage));
+    memcpy(out->current, m.current, sizeof(out->current));
+    out->current_neutral = m.current_neutral;
+    memcpy(out->power_factor, m.power_factor, sizeof(out->power_factor));
+    out->total_power_factor = m.total_power_factor;
+    out->frequency = m.frequency;
+    out->temperature = m.temperature;
+
+    out->active_power_kw = roundf(m.total_active_power / 10.0f) / 100.0f;
+    out->reactive_power_kvar = roundf(m.total_reactive_power / 10.0f) / 100.0f;
+    out->apparent_power_kva = roundf(m.total_apparent_power / 10.0f) / 100.0f;
+
+    out->active_energy_kwh = e.active_import_kwh;
+
+    io_expander_get_out0(&out->relay_out0);
+    io_expander_get_out1(&out->relay_out1);
+    io_expander_get_in0(&out->digital_in0);
+    io_expander_get_in1(&out->digital_in1);
+
+    out->warning_flags = 0;
+}
+
+static uint8_t prepare_slave_telemetry(mqtt_telemetry_slave_t slaves[MQTT_TELEMETRY_MAX_SLAVES])
+{
+    uint8_t count = 0;
+
+    for (uint8_t slot = 0; slot < MODBUS_MASTER_SLOT_COUNT && count < MQTT_TELEMETRY_MAX_SLAVES; slot++) {
+        modbus_master_slot_status_t status;
+        if (modbus_master_get_slot_status(slot, &status) != ESP_OK || !status.used) {
+            continue;
+        }
+
+        mqtt_telemetry_slave_t *s = &slaves[count++];
+        memset(s, 0, sizeof(*s));
+
+        strlcpy(s->device_name, status.name, sizeof(s->device_name));
+        s->slave_id = status.slave_id;
+        s->device_type = status.type;
+        s->online = status.online;
+
+        meter_readings_t r = {0};
+        if (modbus_master_get_readings_slot(slot, &r) == ESP_OK) {
+            memcpy(s->voltage, r.voltage, sizeof(s->voltage));
+            memcpy(s->current, r.current, sizeof(s->current));
+
+            s->active_power_kw = roundf(r.active_power / 10.0f) / 100.0f;
+            s->reactive_power_kvar = roundf(r.reactive_power / 10.0f) / 100.0f;
+            s->apparent_power_kva = roundf(r.apparent_power / 10.0f) / 100.0f;
+            s->power_factor = r.power_factor;
+            s->frequency = r.frequency;
+            s->active_energy_kwh = r.active_energy;
+        }
+    }
+
+    return count;
+}
+
+/* pm/<id>/telemetry — instantaneous measurements (QoS0, no retain). */
+static void publish_telemetry(void)
+{
+    mqtt_telemetry_main_t main;
+    mqtt_telemetry_slave_t slaves[MQTT_TELEMETRY_MAX_SLAVES];
+
+    prepare_main_telemetry(&main);
+    uint8_t slave_count = prepare_slave_telemetry(slaves);
 
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
         return;
     }
 
-    cJSON *v = cJSON_AddArrayToObject(root, "v");
-    cJSON *i = cJSON_AddArrayToObject(root, "i");
-    cJSON *pf = cJSON_AddArrayToObject(root, "pf");
-    for (int ph = 0; ph < ATM90E32AS_PHASE_COUNT; ph++) {
-        cJSON_AddItemToArray(v, cJSON_CreateNumber(m.voltage[ph]));
-        cJSON_AddItemToArray(i, cJSON_CreateNumber(m.current[ph]));
-        cJSON_AddItemToArray(pf, cJSON_CreateNumber(m.power_factor[ph]));
+    cJSON *main_obj = cJSON_AddObjectToObject(root, "main");
+    cJSON *v = cJSON_AddArrayToObject(main_obj, "v");
+    cJSON *i = cJSON_AddArrayToObject(main_obj, "i");
+    cJSON *pf = cJSON_AddArrayToObject(main_obj, "pf");
+    for (int ph = 0; ph < 3; ph++) {
+        cJSON_AddItemToArray(v, cJSON_CreateNumber(main.voltage[ph]));
+        cJSON_AddItemToArray(i, cJSON_CreateNumber(main.current[ph]));
+        cJSON_AddItemToArray(pf, cJSON_CreateNumber(main.power_factor[ph]));
     }
-    cJSON_AddNumberToObject(root, "in", m.current_neutral);
-    cJSON_AddNumberToObject(root, "p", m.total_active_power);
-    cJSON_AddNumberToObject(root, "q", m.total_reactive_power);
-    cJSON_AddNumberToObject(root, "s", m.total_apparent_power);
-    cJSON_AddNumberToObject(root, "pf_total", m.total_power_factor);
-    cJSON_AddNumberToObject(root, "freq", m.frequency);
-    cJSON_AddNumberToObject(root, "temp", m.temperature);
+    cJSON_AddNumberToObject(main_obj, "in", main.current_neutral);
+    cJSON_AddNumberToObject(main_obj, "p_kw", main.active_power_kw);
+    cJSON_AddNumberToObject(main_obj, "q_kvar", main.reactive_power_kvar);
+    cJSON_AddNumberToObject(main_obj, "s_kva", main.apparent_power_kva);
+    cJSON_AddNumberToObject(main_obj, "pf_total", main.total_power_factor);
+    cJSON_AddNumberToObject(main_obj, "freq", main.frequency);
+    cJSON_AddNumberToObject(main_obj, "temp", main.temperature);
+    cJSON_AddNumberToObject(main_obj, "energy_kwh", main.active_energy_kwh);
+    cJSON_AddBoolToObject(main_obj, "relay1", main.relay_out0);
+    cJSON_AddBoolToObject(main_obj, "relay2", main.relay_out1);
+    cJSON_AddBoolToObject(main_obj, "input1", main.digital_in0);
+    cJSON_AddBoolToObject(main_obj, "input2", main.digital_in1);
+    cJSON_AddNumberToObject(main_obj, "warnings", main.warning_flags);
+
+    if (slave_count > 0) {
+        cJSON *slaves_arr = cJSON_AddArrayToObject(root, "slaves");
+        for (uint8_t i = 0; i < slave_count; i++) {
+            mqtt_telemetry_slave_t *s = &slaves[i];
+            cJSON *slave_obj = cJSON_CreateObject();
+
+            cJSON_AddStringToObject(slave_obj, "name", s->device_name);
+            cJSON_AddNumberToObject(slave_obj, "id", s->slave_id);
+            cJSON_AddStringToObject(slave_obj, "type",
+                s->device_type == METER_DEV_PM710 ? "PM710" : "EM07K");
+            cJSON_AddBoolToObject(slave_obj, "online", s->online);
+
+            cJSON *sv = cJSON_AddArrayToObject(slave_obj, "v");
+            cJSON *si = cJSON_AddArrayToObject(slave_obj, "i");
+            for (int ph = 0; ph < 3; ph++) {
+                cJSON_AddItemToArray(sv, cJSON_CreateNumber(s->voltage[ph]));
+                cJSON_AddItemToArray(si, cJSON_CreateNumber(s->current[ph]));
+            }
+            cJSON_AddNumberToObject(slave_obj, "p_kw", s->active_power_kw);
+            cJSON_AddNumberToObject(slave_obj, "q_kvar", s->reactive_power_kvar);
+            cJSON_AddNumberToObject(slave_obj, "s_kva", s->apparent_power_kva);
+            cJSON_AddNumberToObject(slave_obj, "pf", s->power_factor);
+            cJSON_AddNumberToObject(slave_obj, "freq", s->frequency);
+            cJSON_AddNumberToObject(slave_obj, "energy_kwh", s->active_energy_kwh);
+
+            cJSON_AddItemToArray(slaves_arr, slave_obj);
+        }
+    }
 
     publish_json(s_topic_telemetry, root, 0, 0);
 }

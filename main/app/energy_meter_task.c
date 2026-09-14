@@ -1927,21 +1927,29 @@ esp_err_t energy_meter_auto_calibrate_power_offset(
  * updated by the chip once every ~16 line cycles, so we sample every 100 ms to
  * capture independent averages. Integer mW keeps the PQGain math deterministic
  * and free of float rounding. */
-static esp_err_t energy_meter_average_active_power(atm90e32as_phase_t phase,
-                                                   uint16_t samples,
-                                                   int64_t *average_mw)
+esp_err_t energy_meter_get_average_active_power(atm90e32as_phase_t phase,
+                                                uint16_t samples,
+                                                uint16_t interval_ms,
+                                                int64_t *average_mw)
 {
     if (samples == 0) samples = 1;
+    if (interval_ms == 0) interval_ms = 100;
+    if (interval_ms > 1000) interval_ms = 1000;  /* Cap at 1s */
+
     int64_t sum = 0;
     for (uint16_t n = 0; n < samples; n++) {
         atm90e32as_measurements_t measurement;
-        ESP_RETURN_ON_ERROR(atm90e32as_read_measurements(s_meter, &measurement), TAG,
+        /* Read from cached measurements (updated by task every 100ms),
+         * not directly from SPI bus — avoids race condition */
+        ESP_RETURN_ON_ERROR(energy_meter_get_latest(&measurement), TAG,
                             "active power sample failed");
         float value = measurement.active_power[phase];
         ESP_RETURN_ON_FALSE(isfinite(value), ESP_ERR_INVALID_RESPONSE, TAG,
                             "invalid active power sample");
         sum += llround((double)value * 1000.0);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        if (n < samples - 1) {  /* Don't delay after last sample */
+            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+        }
     }
     /* Round-half-away-from-zero; safe for a negative sum too. */
     int64_t q = sum / samples;
@@ -1967,7 +1975,8 @@ esp_err_t energy_meter_auto_calibrate_pq_gain(const energy_meter_pq_gain_request
 
     uint16_t samples = request->samples ? request->samples : 3;
     uint32_t settle_ms = request->settle_ms ? request->settle_ms : 700;
-    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent : 1.0f;
+    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent
+                            : (float)CONFIG_APP_ATM90E32AS_CALIB_TOLERANCE_PERCENT;
 
     /* Step 1: collect every value needed for the gain calculation before any
      * chip write, using integer milliwatts to avoid float arithmetic drift. */
@@ -1981,7 +1990,7 @@ esp_err_t energy_meter_auto_calibrate_pq_gain(const energy_meter_pq_gain_request
     int16_t old_pq = original.phase[request->phase].pq_gain;
 
     int64_t pchip_mw = 0;
-    esp_err_t ret = energy_meter_average_active_power(request->phase, samples, &pchip_mw);
+    esp_err_t ret = energy_meter_get_average_active_power(request->phase, samples, 100, &pchip_mw);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "PQ gain: failed to read P_chip");
     } else if (pchip_mw <= 0) {
@@ -2007,7 +2016,10 @@ esp_err_t energy_meter_auto_calibrate_pq_gain(const energy_meter_pq_gain_request
         int64_t numerator = (32768LL + (int64_t)old_pq) * pref_mw;
         int64_t quotient = numerator / pchip_mw;
         int64_t remainder = numerator % pchip_mw;
-        if (2 * remainder >= pchip_mw) quotient++;
+        /* Round half-away-from-zero (symmetric for positive and negative numerator) */
+        if (2 * llabs(remainder) >= pchip_mw) {
+            quotient += (numerator >= 0 ? 1 : -1);
+        }
 
         int64_t new_pq64 = quotient - 32768LL;
         if (new_pq64 < INT16_MIN || new_pq64 > INT16_MAX) {
@@ -2031,7 +2043,7 @@ esp_err_t energy_meter_auto_calibrate_pq_gain(const energy_meter_pq_gain_request
     if (ret == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(settle_ms));
         int64_t after_mw = 0;
-        ret = energy_meter_average_active_power(request->phase, samples, &after_mw);
+        ret = energy_meter_get_average_active_power(request->phase, samples, 100, &after_mw);
         if (ret == ESP_OK) {
             result->measured_after = (float)after_mw / 1000.0f;
 
@@ -2083,7 +2095,8 @@ esp_err_t energy_meter_auto_calibrate_phase(const energy_meter_phase_calib_reque
 
     uint16_t samples = request->samples ? request->samples : 3;
     uint32_t settle_ms = request->settle_ms ? request->settle_ms : 700;
-    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent : 1.0f;
+    float tolerance_percent = request->tolerance_percent > 0.0f ? request->tolerance_percent
+                            : (float)CONFIG_APP_ATM90E32AS_CALIB_TOLERANCE_PERCENT;
 
     int64_t pref_mw = llround((double)request->reference_w * 1000.0);
     ESP_RETURN_ON_FALSE(pref_mw > 0 && pref_mw <= 1000000000LL,
@@ -2111,7 +2124,7 @@ esp_err_t energy_meter_auto_calibrate_phase(const energy_meter_phase_calib_reque
     result->gphase_x1000 = gphase_x1000;
 
     int64_t pchip_mw = 0;
-    esp_err_t ret = energy_meter_average_active_power(request->phase, samples, &pchip_mw);
+    esp_err_t ret = energy_meter_get_average_active_power(request->phase, samples, 100, &pchip_mw);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "phase calib: failed to read P_chip");
     } else if (pchip_mw <= 0) {
@@ -2164,7 +2177,7 @@ esp_err_t energy_meter_auto_calibrate_phase(const energy_meter_phase_calib_reque
     if (ret == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(settle_ms));
         int64_t after_mw = 0;
-        ret = energy_meter_average_active_power(request->phase, samples, &after_mw);
+        ret = energy_meter_get_average_active_power(request->phase, samples, 100, &after_mw);
         if (ret == ESP_OK) {
             result->measured_after = (float)after_mw / 1000.0f;
 

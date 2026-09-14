@@ -1,6 +1,8 @@
 #include "console_task.h"
 
+#include <inttypes.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,6 +156,9 @@ static struct {
     struct arg_int *q;
     struct arg_int *phi;
     struct arg_str *value;
+    struct arg_dbl *tolerance;
+    struct arg_dbl *error;
+    struct arg_int *interval;
     struct arg_lit *apply;
     struct arg_end *end;
 } s_cal_args;
@@ -351,7 +356,7 @@ static int cmd_meter_cal(int argc, char **argv)
 
     if (strcmp(sub, "auto-pq-gain") == 0) {
         if (s_cal_args.phase->count == 0 || s_cal_args.value->count == 0) {
-            printf("auto-pq-gain requires --phase a|b|c --value <P_ref_W>\n");
+            printf("auto-pq-gain requires --phase a|b|c --value <P_ref_W> [--tolerance <percent>]\n");
             return 1;
         }
         int phase = parse_phase(s_cal_args.phase->sval[0]);
@@ -360,12 +365,15 @@ static int cmd_meter_cal(int argc, char **argv)
             printf("phase must be a|b|c and P_ref must be > 0\n");
             return 1;
         }
+        float tolerance = (s_cal_args.tolerance->count > 0)
+                        ? (float)s_cal_args.tolerance->dval[0]
+                        : (float)CONFIG_APP_ATM90E32AS_CALIB_TOLERANCE_PERCENT;
         energy_meter_pq_gain_request_t request = {
             .phase = (atm90e32as_phase_t)phase,
             .reference_w = ref_w,
             .samples = 3,
             .settle_ms = 700,
-            .tolerance_percent = 2.0f,
+            .tolerance_percent = tolerance,
         };
         energy_meter_pq_gain_result_t result;
         esp_err_t ret = energy_meter_auto_calibrate_pq_gain(&request, &result);
@@ -379,7 +387,7 @@ static int cmd_meter_cal(int argc, char **argv)
 
     if (strcmp(sub, "auto-phi") == 0) {
         if (s_cal_args.phase->count == 0 || s_cal_args.value->count == 0) {
-            printf("auto-phi requires --phase a|b|c --value <P_ref_W> (PF=0.5L)\n");
+            printf("auto-phi requires --phase a|b|c --value <P_ref_W> (PF=0.5L) [--tolerance <percent>]\n");
             return 1;
         }
         int phase = parse_phase(s_cal_args.phase->sval[0]);
@@ -388,12 +396,15 @@ static int cmd_meter_cal(int argc, char **argv)
             printf("phase must be a|b|c and P_ref must be > 0\n");
             return 1;
         }
+        float tolerance = (s_cal_args.tolerance->count > 0)
+                        ? (float)s_cal_args.tolerance->dval[0]
+                        : (float)CONFIG_APP_ATM90E32AS_CALIB_TOLERANCE_PERCENT;
         energy_meter_phase_calib_request_t request = {
             .phase = (atm90e32as_phase_t)phase,
             .reference_w = ref_w,
             .samples = 3,
             .settle_ms = 700,
-            .tolerance_percent = 2.0f,
+            .tolerance_percent = tolerance,
         };
         energy_meter_phase_calib_result_t result;
         esp_err_t ret = energy_meter_auto_calibrate_phase(&request, &result);
@@ -407,6 +418,122 @@ static int cmd_meter_cal(int argc, char **argv)
         }
         if (ret == ESP_OK) printf("verify the result, then run meter-cal save\n");
         return ret == ESP_OK ? 0 : 1;
+    }
+
+    if (strcmp(sub, "phi-err") == 0) {
+        if (s_cal_args.phase->count == 0 || s_cal_args.error->count == 0) {
+            printf("phi-err requires --phase a|b|c --error <percent> [--tolerance <percent>]\n");
+            return 1;
+        }
+        int phase = parse_phase(s_cal_args.phase->sval[0]);
+        float error_percent = (float)s_cal_args.error->dval[0];
+        if (phase < 0) {
+            printf("phase must be a|b|c\n");
+            return 1;
+        }
+        float tolerance = (s_cal_args.tolerance->count > 0)
+                        ? (float)s_cal_args.tolerance->dval[0]
+                        : (float)CONFIG_APP_ATM90E32AS_CALIB_TOLERANCE_PERCENT;
+
+        /* Step 1: Measure P_chip (average over 3 samples, 100ms interval) */
+        int64_t p_chip_mw = 0;
+        esp_err_t ret = energy_meter_get_average_active_power((atm90e32as_phase_t)phase, 3, 100, &p_chip_mw);
+        if (ret != ESP_OK || p_chip_mw <= 0) {
+            printf("Failed to measure P_chip or P_chip <= 0: %s\n", esp_err_to_name(ret));
+            return 1;
+        }
+
+        /* Step 2: Calculate P_ref from error
+         * error_percent = (P_chip - P_ref) / P_ref * 100
+         * P_ref = P_chip / (1 + error_percent/100) */
+        double p_ref_w = ((double)p_chip_mw / 1000.0) / (1.0 + error_percent / 100.0);
+
+        printf("P_chip measured: %.3f W\n", (float)p_chip_mw / 1000.0f);
+        printf("Known error: %.3f%%\n", error_percent);
+        printf("Computed P_ref: %.3f W\n", (float)p_ref_w);
+
+        /* Step 3: Call standard auto-phi with computed P_ref */
+        energy_meter_phase_calib_request_t request = {
+            .phase = (atm90e32as_phase_t)phase,
+            .reference_w = (float)p_ref_w,
+            .samples = 3,
+            .settle_ms = 700,
+            .tolerance_percent = tolerance,
+        };
+
+        energy_meter_phase_calib_result_t result;
+        ret = energy_meter_auto_calibrate_phase(&request, &result);
+
+        printf("\nPhase calibration with known error:\n");
+        printf("  Phase: %c\n", 'A' + phase);
+        printf("  P_ref (computed): %.3f W\n", result.reference);
+        printf("  P_chip before: %.3f W\n", result.measured_before);
+        printf("  P_chip after: %.3f W\n", result.measured_after);
+        printf("  Old Phi: %d\n", result.old_phase_comp);
+        printf("  New Phi: %d\n", result.new_phase_comp);
+        printf("  Gphase: %" PRIu32 "\n", result.gphase_x1000);
+        if (isfinite(result.phase_angle_after)) {
+            printf("  Phase angle: %.1f deg\n", result.phase_angle_after);
+        }
+        printf("  Result: %s\n", ret == ESP_OK ? "PASS" : "FAIL");
+        if (result.rolled_back) {
+            printf("  (rolled back)\n");
+        }
+        if (ret == ESP_ERR_INVALID_STATE) {
+            printf("phase_comp not at baseline; run: meter-cal default --field phi --phase <a|b|c>, then re-run\n");
+        }
+        if (ret == ESP_OK) printf("verify the result, then run meter-cal save\n");
+
+        return (ret == ESP_OK) ? 0 : 1;
+    }
+
+    if (strcmp(sub, "get-p") == 0) {
+        if (s_cal_args.phase->count == 0) {
+            printf("get-p requires --phase a|b|c [--value <samples>] [--interval <ms>]\n");
+            return 1;
+        }
+        int phase = parse_phase(s_cal_args.phase->sval[0]);
+        if (phase < 0) {
+            printf("phase must be a|b|c\n");
+            return 1;
+        }
+
+        /* Parse samples (optional, default 3, max 50) */
+        uint16_t samples = 3;
+        if (s_cal_args.value->count > 0) {
+            samples = (uint16_t)strtoul(s_cal_args.value->sval[0], NULL, 10);
+            if (samples == 0 || samples > 50) {
+                printf("Invalid samples count (1-50)\n");
+                return 1;
+            }
+        }
+
+        /* Parse interval (optional, default 100ms, max 1000ms) */
+        uint16_t interval_ms = 100;
+        if (s_cal_args.interval->count > 0) {
+            interval_ms = (uint16_t)s_cal_args.interval->ival[0];
+            if (interval_ms < 1 || interval_ms > 1000) {
+                printf("Invalid interval (1-1000 ms)\n");
+                return 1;
+            }
+        }
+
+        printf("Measuring phase %c active power (%u samples, %u ms interval)...\n",
+               'A' + phase, samples, interval_ms);
+
+        int64_t average_mw = 0;
+        esp_err_t ret = energy_meter_get_average_active_power((atm90e32as_phase_t)phase,
+                                                              samples,
+                                                              interval_ms,
+                                                              &average_mw);
+        if (ret != ESP_OK) {
+            printf("Failed to measure: %s\n", esp_err_to_name(ret));
+            return 1;
+        }
+
+        printf("Average active power: %.3f W (%.0f mW)\n",
+               (float)average_mw / 1000.0f, (float)average_mw);
+        return 0;
     }
 
     if (strcmp(sub, "auto") == 0) {
@@ -645,11 +772,16 @@ static int cmd_meter_cal(int argc, char **argv)
             "       meter-cal default --field phi --phase a     (Phi -> 0; keeps PQGain/gain)\n"
             "       meter-cal default --field pqgain --phase a\n"
             "     (precondition: U/I gain calibrated, current ~ Ib)\n"
-            "     PQGain at PF=1 (auto):    meter-cal auto-pq-gain --phase a --value <P_ref_W>\n"
+            "     PQGain at PF=1 (auto):    meter-cal auto-pq-gain --phase a --value <P_ref_W> [--tolerance <percent>]\n"
             "     PQGain at PF=1 (manual):  meter-cal set --field pq-gain --phase a --value <n>\n"
-            "     Phi at PF=0.5L (auto):    meter-cal auto-phi --phase a --value <P_ref_W>   (requires Phi=0 baseline)\n"
+            "     Phi at PF=0.5L (auto):    meter-cal auto-phi --phase a --value <P_ref_W> [--tolerance <percent>]  (requires Phi=0 baseline)\n"
+            "     Phi with known error:     meter-cal phi-err --phase a --error <percent> [--tolerance <percent>]\n"
+            "       (Use when reference meter unavailable; error from PF=1 baseline)\n"
             "     Phi at PF=0.5L (manual):  meter-cal set --field phase --phase a --phi <n>\n"
+            "     Get power average:        meter-cal get-p --phase a [--value <samples>]\n"
+            "       Returns average active power measured by chip (not reference)\n"
             "     PGainF at PF=1:           meter-cal set --field fundamental-power-gain --phase a --value <n>\n"
+            "     Tolerance: optional, defaults to %d%%%% (Kconfig), overridable per command\n"
             "     Order: default baseline -> U/I gain (all 3) -> PQGain (PF=1) -> Phi (PF=0.5L) -> save\n"
             "6) Verify with: meter latest\n"
             "7) Persist after verification: meter-cal save\n"
@@ -661,7 +793,8 @@ static int cmd_meter_cal(int argc, char **argv)
             "   meter-cal set --field wiring --value 3p4w|3p3w --apply  (drives MODE_SEL relay)\n"
             "   meter-cal set --field freq   --value 50|60 --apply\n"
             "   meter-cal set --field pga    --value 1|2|4 --apply      (DEV: overrides system PGA; re-cal igain after)\n"
-            "   Note: product path sets PGA via LCD Current CT Apply; console is for debug.\n");
+            "   Note: product path sets PGA via LCD Current CT Apply; console is for debug.\n",
+            CONFIG_APP_ATM90E32AS_CALIB_TOLERANCE_PERCENT);
         return 0;
     }
 
@@ -1001,6 +1134,16 @@ static struct {
     struct arg_end *end;
 } s_mb_slave_log_args;
 
+/* mb-master-ref ... */
+static struct {
+    struct arg_str *sub;        /* list | read | compare */
+    struct arg_int *id;         /* --id <slave_id> */
+    struct arg_str *phase;      /* --phase <a|b|c> for compare */
+    struct arg_int *samples;    /* --samples <N> */
+    struct arg_int *interval;   /* --interval <ms> */
+    struct arg_end *end;
+} s_mb_ref_args;
+
 static int cmd_mb_slave_log(int argc, char **argv)
 {
     int nerrors = arg_parse(argc, argv, (void **)&s_mb_slave_log_args);
@@ -1062,6 +1205,264 @@ static int cmd_reboot(int argc, char **argv)
     vTaskDelay(pdMS_TO_TICKS(200));
     esp_restart();
     return 0; /* unreachable */
+}
+
+/* mb-master-ref: read from Modbus reference meter (list slots, read power) */
+static int cmd_mb_master_ref(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&s_mb_ref_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, s_mb_ref_args.end, argv[0]);
+        return 1;
+    }
+
+    if (s_mb_ref_args.sub->count == 0) {
+        printf("Usage: ref <list|read> [--id <N>]\n");
+        return 1;
+    }
+
+    const char *sub = s_mb_ref_args.sub->sval[0];
+
+    if (strcmp(sub, "list") == 0) {
+        /* List all configured slots with slave_id and device type */
+        printf("Configured Modbus Master Slots:\n");
+        printf("%-6s %-10s %-10s %-20s %-10s\n",
+               "Slot", "Slave ID", "Type", "Name", "Status");
+        printf("--------------------------------------------------------------\n");
+
+        for (uint8_t slot = 0; slot < MODBUS_MASTER_SLOT_COUNT; slot++) {
+            modbus_master_slot_status_t status;
+            esp_err_t ret = modbus_master_get_slot_status(slot, &status);
+            if (ret != ESP_OK || !status.used) {
+                continue;  /* Skip unconfigured slots */
+            }
+
+            const char *type_name;
+            if (status.type == METER_DEV_PM710) {
+                type_name = "PM710";
+            } else if (status.type == METER_DEV_EM07K) {
+                type_name = "EM07K";
+            } else {
+                type_name = "UNKNOWN";
+            }
+
+            const char *online_str = status.online ? "ONLINE" : "OFFLINE";
+
+            printf("%-6u %-10u %-10s %-20s %-10s\n",
+                   (unsigned)slot,
+                   (unsigned)status.slave_id,
+                   type_name,
+                   status.name,
+                   online_str);
+        }
+
+        return 0;
+    }
+    else if (strcmp(sub, "read") == 0) {
+        /* Read active power from specific slave_id, optionally average over multiple samples */
+        if (s_mb_ref_args.id->count == 0) {
+            printf("Error: --id <slave_id> is required\n");
+            return 1;
+        }
+
+        uint8_t target_id = (uint8_t)s_mb_ref_args.id->ival[0];
+
+        /* Parse samples (optional, default 1, max 50) */
+        uint16_t samples = 1;
+        if (s_mb_ref_args.samples->count > 0) {
+            samples = (uint16_t)s_mb_ref_args.samples->ival[0];
+            if (samples == 0 || samples > 50) {
+                printf("Invalid samples count (1-50)\n");
+                return 1;
+            }
+        }
+
+        /* Parse interval (optional, default 100ms, max 1000ms) */
+        uint16_t interval_ms = 100;
+        if (s_mb_ref_args.interval->count > 0) {
+            interval_ms = (uint16_t)s_mb_ref_args.interval->ival[0];
+            if (interval_ms < 1 || interval_ms > 1000) {
+                printf("Invalid interval (1-1000 ms)\n");
+                return 1;
+            }
+        }
+
+        /* Find slot with matching slave_id */
+        int found_slot = -1;
+        for (uint8_t slot = 0; slot < MODBUS_MASTER_SLOT_COUNT; slot++) {
+            modbus_master_slot_status_t status;
+            esp_err_t ret = modbus_master_get_slot_status(slot, &status);
+            if (ret == ESP_OK && status.used && status.slave_id == target_id) {
+                found_slot = slot;
+                break;
+            }
+        }
+
+        if (found_slot < 0) {
+            printf("Slave ID %u not found in configured slots\n", (unsigned)target_id);
+            return 1;
+        }
+
+        if (samples > 1) {
+            printf("Measuring slave ID %u active power (%u samples, %u ms interval)...\n",
+                   (unsigned)target_id, samples, interval_ms);
+        }
+
+        /* Read multiple samples and average */
+        double sum_p = 0.0;
+        for (uint16_t n = 0; n < samples; n++) {
+            meter_readings_t readings;
+            esp_err_t ret = modbus_master_get_readings_slot((uint8_t)found_slot, &readings);
+            if (ret != ESP_OK) {
+                printf("Failed to read slot %d sample %u: %s\n",
+                       found_slot, n + 1, esp_err_to_name(ret));
+                return 1;
+            }
+            sum_p += readings.active_power;
+
+            if (n < samples - 1) {  /* Don't delay after last sample */
+                vTaskDelay(pdMS_TO_TICKS(interval_ms));
+            }
+        }
+
+        float avg_p = (float)(sum_p / samples);
+
+        printf("Slave ID %u - Active Power: %.3f W", (unsigned)target_id, avg_p);
+        if (samples > 1) {
+            printf(" (average of %u samples)", samples);
+        }
+        printf("\n");
+
+        /* Show other readings from last sample only */
+        meter_readings_t last_readings;
+        esp_err_t ret = modbus_master_get_readings_slot((uint8_t)found_slot, &last_readings);
+        if (ret == ESP_OK) {
+            printf("  Voltage: L1=%.1fV L2=%.1fV L3=%.1fV\n",
+                   last_readings.voltage[0], last_readings.voltage[1], last_readings.voltage[2]);
+            printf("  Current: L1=%.2fA L2=%.2fA L3=%.2fA\n",
+                   last_readings.current[0], last_readings.current[1], last_readings.current[2]);
+            printf("  Reactive: %.3f var\n", last_readings.reactive_power);
+            printf("  Apparent: %.3f VA\n", last_readings.apparent_power);
+            printf("  PF: %.3f\n", last_readings.power_factor);
+            printf("  Frequency: %.2f Hz\n", last_readings.frequency);
+        }
+
+        return 0;
+    }
+    else if (strcmp(sub, "compare") == 0) {
+        /* Compare P_ref from reference meter with P_meter from DUT, calculate error */
+        if (s_mb_ref_args.id->count == 0 || s_mb_ref_args.phase->count == 0) {
+            printf("Error: compare requires --id <slave_id> --phase <a|b|c> [--samples <N>] [--interval <ms>]\n");
+            return 1;
+        }
+
+        uint8_t target_id = (uint8_t)s_mb_ref_args.id->ival[0];
+        int phase = parse_phase(s_mb_ref_args.phase->sval[0]);
+        if (phase < 0) {
+            printf("phase must be a|b|c\n");
+            return 1;
+        }
+
+        /* Parse samples (optional, default 5, max 50) */
+        uint16_t samples = 5;
+        if (s_mb_ref_args.samples->count > 0) {
+            samples = (uint16_t)s_mb_ref_args.samples->ival[0];
+            if (samples == 0 || samples > 50) {
+                printf("Invalid samples count (1-50)\n");
+                return 1;
+            }
+        }
+
+        /* Parse interval (optional, default 200ms, max 1000ms) */
+        uint16_t interval_ms = 200;
+        if (s_mb_ref_args.interval->count > 0) {
+            interval_ms = (uint16_t)s_mb_ref_args.interval->ival[0];
+            if (interval_ms < 1 || interval_ms > 1000) {
+                printf("Invalid interval (1-1000 ms)\n");
+                return 1;
+            }
+        }
+
+        /* Find reference meter slot */
+        int found_slot = -1;
+        for (uint8_t slot = 0; slot < MODBUS_MASTER_SLOT_COUNT; slot++) {
+            modbus_master_slot_status_t status;
+            esp_err_t ret = modbus_master_get_slot_status(slot, &status);
+            if (ret == ESP_OK && status.used && status.slave_id == target_id) {
+                found_slot = slot;
+                break;
+            }
+        }
+
+        if (found_slot < 0) {
+            printf("Slave ID %u not found in configured slots\n", (unsigned)target_id);
+            return 1;
+        }
+
+        printf("Comparing phase %c: DUT vs Reference meter (slave ID %u)\n",
+               'A' + phase, (unsigned)target_id);
+        printf("Sampling: %u samples, %u ms interval\n", samples, interval_ms);
+        printf("--------------------------------------------------\n");
+
+        /* Read samples alternately: P_ref then P_meter for each iteration */
+        double sum_p_ref = 0.0;
+        double sum_p_meter = 0.0;
+
+        for (uint16_t n = 0; n < samples; n++) {
+            /* Step 1: Read P_ref from reference meter */
+            meter_readings_t ref_readings;
+            esp_err_t ret = modbus_master_get_readings_slot((uint8_t)found_slot, &ref_readings);
+            if (ret != ESP_OK) {
+                printf("Failed to read reference meter sample %u: %s\n",
+                       n + 1, esp_err_to_name(ret));
+                return 1;
+            }
+            float p_ref = ref_readings.active_power;
+            sum_p_ref += p_ref;
+
+            /* Step 2: Immediately read P_meter from DUT chip */
+            atm90e32as_measurements_t meter_meas;
+            ret = energy_meter_get_latest(&meter_meas);
+            if (ret != ESP_OK) {
+                printf("Failed to read DUT meter sample %u: %s\n",
+                       n + 1, esp_err_to_name(ret));
+                return 1;
+            }
+            float p_meter = meter_meas.active_power[phase];
+            sum_p_meter += p_meter;
+
+            printf("Sample %2u: P_ref=%.3f W, P_meter=%.3f W\n",
+                   n + 1, p_ref, p_meter);
+
+            /* Wait before next sample (except after last) */
+            if (n < samples - 1) {
+                vTaskDelay(pdMS_TO_TICKS(interval_ms));
+            }
+        }
+
+        /* Calculate averages and error */
+        float avg_p_ref = (float)(sum_p_ref / samples);
+        float avg_p_meter = (float)(sum_p_meter / samples);
+        float error_percent = 0.0f;
+
+        if (avg_p_ref > 0.001f) {  /* Avoid division by zero */
+            error_percent = ((avg_p_meter - avg_p_ref) / avg_p_ref) * 100.0f;
+        }
+
+        printf("--------------------------------------------------\n");
+        printf("Results:\n");
+        printf("  P_ref average:   %.3f W\n", avg_p_ref);
+        printf("  P_meter average: %.3f W\n", avg_p_meter);
+        printf("  Power error:     %.3f%%\n", error_percent);
+        printf("\nUse this error value for phase calibration:\n");
+        printf("  meter-cal phi-err --phase %c --error %.3f\n", 'a' + phase, error_percent);
+
+        return 0;
+    }
+    else {
+        printf("Unknown subcommand: %s\n", sub);
+        return 1;
+    }
 }
 
 /* ping: ICMP echo to a numeric IPv4 target via esp_ping (lwip app). Runs one
@@ -1948,7 +2349,7 @@ static esp_err_t register_meter_commands(void)
     };
     ESP_RETURN_ON_ERROR(esp_console_cmd_register(&reg_cmd), TAG, "register meter-reg failed");
 
-    s_cal_args.sub = arg_str1(NULL, NULL, "<subcmd>", "show|default|apply|save|load|auto|auto-pq-gain|auto-phi|auto-power-offset|set|guide");
+    s_cal_args.sub = arg_str1(NULL, NULL, "<subcmd>", "show|default|apply|save|load|auto|auto-pq-gain|auto-phi|phi-err|get-p|auto-power-offset|set|guide");
     s_cal_args.field = arg_str0(NULL, "field", "<field>", "auto/set: u|i (auto), uigain|uioffset|gain|offset|power-offset|phase|pq-gain|fundamental-power-gain; chip-wide pga|wiring|freq; default --field: phi|pqgain|uigain|uioffset|power-offset|fundamental|all");
     s_cal_args.phase = arg_str0(NULL, "phase", "<a|b|c|all>", "target phase; auto: omit or 'all' calibrates all 3 phases (set/default: a|b|c only)");
     s_cal_args.u = arg_int0(NULL, "u", "<n>", "voltage-related value");
@@ -1957,8 +2358,11 @@ static esp_err_t register_meter_commands(void)
     s_cal_args.q = arg_int0(NULL, "q", "<n>", "reactive power offset");
     s_cal_args.phi = arg_int0(NULL, "phi", "<n>", "phase compensation");
     s_cal_args.value = arg_str0(NULL, "value", "<v>", "chip-wide value or per-phase scalar (pq-gain, fundamental-power-gain)");
+    s_cal_args.tolerance = arg_dbl0(NULL, "tolerance", "<percent>", "calibration tolerance percent (default: Kconfig)");
+    s_cal_args.error = arg_dbl0(NULL, "error", "<percent>", "known power error from PF=1 baseline");
+    s_cal_args.interval = arg_int0(NULL, "interval", "<ms>", "sampling interval for get-p (1-1000ms, default 100ms)");
     s_cal_args.apply = arg_lit0(NULL, "apply", "apply to chip (required for chip-wide pga/wiring/freq and whole-image default; per-phase calib applies automatically, so this is a no-op there)");
-    s_cal_args.end = arg_end(12);
+    s_cal_args.end = arg_end(15);
     const esp_console_cmd_t cal_cmd = {
         .command = "meter-cal",
         .help = "Calibrate ATM90E32AS. Try: meter-cal guide",
@@ -1981,6 +2385,21 @@ static esp_err_t register_meter_commands(void)
         .argtable = &s_netcfg_args,
     };
     ESP_RETURN_ON_ERROR(esp_console_cmd_register(&netcfg_cmd), TAG, "register net-cfg failed");
+
+    s_mb_ref_args.sub = arg_str1(NULL, NULL, "<list|read|compare>", "subcommand");
+    s_mb_ref_args.id = arg_int0(NULL, "id", "<N>", "slave ID for read/compare");
+    s_mb_ref_args.phase = arg_str0(NULL, "phase", "<a|b|c>", "DUT phase for compare");
+    s_mb_ref_args.samples = arg_int0(NULL, "samples", "<N>", "number of samples (1-50, default: read=1, compare=5)");
+    s_mb_ref_args.interval = arg_int0(NULL, "interval", "<ms>", "sampling interval (1-1000ms, default: read=100, compare=200)");
+    s_mb_ref_args.end = arg_end(6);
+    const esp_console_cmd_t mb_ref_cmd = {
+        .command = "ref",
+        .help = "Reference meter: ref list | ref read --id <N> | ref compare --id <N> --phase <a|b|c>",
+        .hint = NULL,
+        .func = &cmd_mb_master_ref,
+        .argtable = &s_mb_ref_args,
+    };
+    ESP_RETURN_ON_ERROR(esp_console_cmd_register(&mb_ref_cmd), TAG, "register ref failed");
 
     s_ping_args.host = arg_str1(NULL, NULL, "<ip>", "numeric IPv4 target, e.g. 192.168.1.1");
     s_ping_args.count = arg_int0(NULL, "count", "<1..100>", "packets to send (default 4)");

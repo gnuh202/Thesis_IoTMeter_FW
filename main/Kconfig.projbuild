@@ -500,6 +500,22 @@ menu "Application Configuration"
             help
                 Print every measurement to console. Disable to keep console shell clean.
 
+        menu "Calibration Defaults"
+            comment "Auto-calibration tolerance and sample defaults"
+
+            config APP_ATM90E32AS_CALIB_TOLERANCE_PERCENT
+                int "Default calibration tolerance (%)"
+                range 1 100
+                default 2
+                help
+                    Default tolerance for auto-calibration verification (PQGain and Phase).
+                    After calibration, residual power error must be within this percentage
+                    of reference power. Can be overridden via console --tolerance flag.
+                    2% is suitable for industrial metering (stricter than 1% that was
+                    previously hard-coded, matches IEC 62053 requirements better).
+
+        endmenu
+
     endmenu
 
     menu "SD Card"

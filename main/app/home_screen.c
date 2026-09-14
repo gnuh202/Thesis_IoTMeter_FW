@@ -1,5 +1,6 @@
 #include "home_screen.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -337,9 +338,11 @@ static void render_total(void)
 
     snprintf(line, sizeof(line), "%.2f A", m.current_neutral);
     put_kv(1, "I", line);
-    snprintf(line, sizeof(line), "%.0f W", m.total_active_power);
+    float kw = roundf(m.total_active_power / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kW", kw);
     put_kv(2, "P", line);
-    snprintf(line, sizeof(line), "%.0f var", m.total_reactive_power);
+    float kvar = roundf(m.total_reactive_power / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kvar", kvar);
     put_kv(3, "Q", line);
 }
 
@@ -357,11 +360,14 @@ static void render_active_power(void)
         put_kv(3, "L3", status);
         return;
     }
-    snprintf(line, sizeof(line), "%.0f W", m.active_power[0]);
+    float kw_a = roundf(m.active_power[0] / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kW", kw_a);
     put_kv(1, "L1", line);
-    snprintf(line, sizeof(line), "%.0f W", m.active_power[1]);
+    float kw_b = roundf(m.active_power[1] / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kW", kw_b);
     put_kv(2, "L2", line);
-    snprintf(line, sizeof(line), "%.0f W", m.active_power[2]);
+    float kw_c = roundf(m.active_power[2] / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kW", kw_c);
     put_kv(3, "L3", line);
 }
 
@@ -424,7 +430,8 @@ static void render_power_quality(void)
     put_kv(1, "PF Total", line);
     snprintf(line, sizeof(line), "%.2f Hz", m.frequency);
     put_kv(2, "Freq", line);
-    snprintf(line, sizeof(line), "%.0f VA", m.total_apparent_power);
+    float kva = roundf(m.total_apparent_power / 10.0f) / 100.0f;
+    snprintf(line, sizeof(line), "%.2f kVA", kva);
     put_kv(3, "S Total", line);
 }
 
@@ -988,16 +995,93 @@ static void show_info(const char *l0, const char *l1, const char *l2, const char
 static esp_err_t menu_device_info(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
 {
     (void)menu; (void)item; (void)ctx;
-    char fw[HOME_LCD_WIDTH + 1];
-    const esp_app_desc_t *desc = esp_app_get_description();
-    /* Version string can be up to 32 chars; truncate to fit LCD line. */
-    snprintf(fw, sizeof(fw), "FW: %.14s", desc ? desc->version : "?");
-    put_line_centre(0, "DEVICE INFO");
-    put_line(1, s_device_name);
-    put_line(2, fw);
-    put_line(3, "IoT Power Meter");
-    (void)wait_modal_ok_or_back();
-    return ESP_OK;
+
+    config_manager_t cfg;
+    if (config_manager_get(&cfg) != ESP_OK) {
+        show_info("DEVICE INFO", "Config Error", "", "");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Prepare info lines */
+    char lines[3][HOME_LCD_WIDTH + 1];
+    int total_lines = 0;
+
+    /* Line 0: Device Name (truncate to fit) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Name: %.13s", cfg.device_name);
+
+    /* Line 1: Firmware build (OTA tracking from NVS) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "FW: %.15s", cfg.ota_fw_build);
+
+    /* Line 2: Version (OTA tracking from NVS) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Ver: %.14s", cfg.ota_version);
+
+    /* Single-page display (all 3 lines fit), but use same navigation pattern */
+    int cursor = 0;
+    int top = 0;
+    uint8_t previous = 0;
+    wait_buttons_released();
+
+    while (1) {
+        put_line_centre(0, "DEVICE INFO");
+
+        /* Display all 3 lines (no pagination needed, but reserve 2 chars anyway) */
+        for (int row = 0; row < 3; row++) {
+            int idx = top + row;
+            uint8_t lcd_row = (uint8_t)(row + 1);
+
+            if (idx >= total_lines) {
+                put_line(lcd_row, "");
+                continue;
+            }
+
+            /* Build display line with cursor and indent */
+            char display[HOME_LCD_WIDTH + 1];
+            char cursor_char = (idx == cursor) ? '>' : ' ';
+
+            /* Cursor + 1 space indent + content (truncate to fit 18 chars total) */
+            snprintf(display, sizeof(display), "%c %.16s", cursor_char, lines[idx]);
+
+            put_line(lcd_row, display);
+        }
+
+        /* Button handling */
+        uint8_t buttons = 0;
+        if (hmi_bsp_read_buttons(&buttons) != ESP_OK) {
+            buttons = 0;
+        }
+        uint8_t edges = buttons & ~previous;
+        previous = buttons;
+
+        if (edges & HMI_BSP_BUTTON_TOP) {
+            if (cursor > 0) {
+                cursor--;
+                if (cursor < top) {
+                    top = cursor;
+                }
+            }
+            button_click();
+        } else if (edges & HMI_BSP_BUTTON_BOTTOM) {
+            if (cursor < total_lines - 1) {
+                cursor++;
+                if (cursor >= top + 3) {
+                    top = cursor - 2;
+                }
+            }
+            button_click();
+        } else if (edges & HMI_BSP_BUTTON_CENTER) {
+            /* CENTER = exit */
+            button_click();
+            wait_buttons_released();
+            return ESP_OK;
+        } else if (edges & HMI_BSP_BUTTON_LEFT) {
+            /* LEFT = back/exit */
+            button_click();
+            wait_buttons_released();
+            return ESP_OK;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 }
 
 /* ---- Cached config snapshot for inline VALUE menu rows ----
@@ -1528,7 +1612,7 @@ static esp_err_t menu_rtu_slave_set_id(lcd_menu_t *menu, const lcd_menu_item_t *
     config_manager_t *cfg = malloc(sizeof(*cfg));
     if (cfg == NULL || config_manager_get(cfg) != ESP_OK) {
         free(cfg);
-        show_info("SLAVE ID", "Config unavailable", "", "OK: Back");
+        show_info("SLAVE ID", "Config unavailable", "", "");
         return ESP_OK;
     }
 
@@ -1562,7 +1646,7 @@ static esp_err_t menu_rtu_slave_set_baud(lcd_menu_t *menu, const lcd_menu_item_t
     config_manager_t *cfg = malloc(sizeof(*cfg));
     if (cfg == NULL || config_manager_get(cfg) != ESP_OK) {
         free(cfg);
-        show_info("SLAVE BAUD", "Config unavailable", "", "OK: Back");
+        show_info("SLAVE BAUD", "Config unavailable", "", "");
         return ESP_OK;
     }
 
@@ -2197,12 +2281,12 @@ static esp_err_t menu_calib_export_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
 
     if (!sd_card_is_inserted()) {
         ESP_LOGW(TAG, "[ENGINEER] Export failed: SD card not inserted");
-        show_info("NO SD CARD", "Insert card", "", "OK: Back");
+        show_info("NO SD CARD", "Insert card", "", "");
         return ESP_OK;
     }
     if (!sd_card_is_mounted()) {
         ESP_LOGW(TAG, "[ENGINEER] Export failed: SD card not mounted");
-        show_info("SD NOT READY", "Wait or reinsert", "", "OK: Back");
+        show_info("SD NOT READY", "Wait or reinsert", "", "");
         return ESP_OK;
     }
 
@@ -2216,7 +2300,7 @@ static esp_err_t menu_calib_export_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
         char display[HOME_LCD_WIDTH + 1];
         snprintf(display, sizeof(display), "%.20s", basename);
         ESP_LOGI(TAG, "[ENGINEER] Export succeeded: %s", path);
-        show_info("EXPORTED", display, "", "OK: Back");
+        show_info("EXPORTED", display, "", "");
     } else {
         ESP_LOGE(TAG, "[ENGINEER] Export failed: %s", esp_err_to_name(ret));
         show_action_result(false);
@@ -2233,12 +2317,12 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
 
     if (!sd_card_is_inserted()) {
         ESP_LOGW(TAG, "[ENGINEER] Load failed: SD card not inserted");
-        show_info("NO SD CARD", "Insert card", "", "OK: Back");
+        show_info("NO SD CARD", "Insert card", "", "");
         return ESP_OK;
     }
     if (!sd_card_is_mounted()) {
         ESP_LOGW(TAG, "[ENGINEER] Load failed: SD card not mounted");
-        show_info("SD NOT READY", "Wait or reinsert", "", "OK: Back");
+        show_info("SD NOT READY", "Wait or reinsert", "", "");
         return ESP_OK;
     }
 
@@ -2249,7 +2333,7 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
     if (ret != ESP_OK || count == 0) {
         ESP_LOGW(TAG, "[ENGINEER] Load failed: no calibration files found (ret=%s, count=%zu)",
                  esp_err_to_name(ret), count);
-        show_info("NO FILES", "/sdcard/calib", "", "OK: Back");
+        show_info("NO FILES", "/sdcard/calib", "", "");
         return ESP_OK;
     }
 
@@ -2608,7 +2692,7 @@ static esp_err_t menu_rtu_info(lcd_menu_t *menu, const lcd_menu_item_t *item, vo
     }
 
     if (n == 0) {
-        show_info("RTU INFO", "No devices", "Add via portal", "OK: Back");
+        show_info("RTU INFO", "No devices", "Add via portal", "");
         return ESP_OK;
     }
 
@@ -3092,7 +3176,138 @@ static esp_err_t mqtt_period_edit(lcd_menu_t *m, const lcd_menu_item_t *it, void
     return ESP_OK;
 }
 
+static const char *mqtt_tls_mode_str(mqtt_tls_mode_t mode)
+{
+    switch (mode) {
+    case MQTT_TLS_DISABLE: return "None";
+    case MQTT_TLS_CA_ONLY: return "TLS (CA)";
+    case MQTT_TLS_MUTUAL: return "TLS (Mutual)";
+    case MQTT_TLS_INSECURE: return "TLS (Insecure)";
+    default: return "Unknown";
+    }
+}
+
+static esp_err_t mqtt_info_show(lcd_menu_t *m, const lcd_menu_item_t *it, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL || config_manager_get(cfg) != ESP_OK) {
+        if (cfg) free(cfg);
+        show_info("MQTT INFO", "Config Error", "", "");
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Prepare info lines (label + value pairs) */
+    char lines[5][HOME_LCD_WIDTH + 1];
+    int total_lines = 0;
+
+    /* Line 0: Broker Name (truncate to fit) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Name: %.13s", cfg->mqtt.name);
+
+    /* Line 1: Server Address (truncate to fit) */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Addr: %.13s", cfg->mqtt.broker);
+
+    /* Line 2: Port */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Port: %u", cfg->mqtt.port);
+
+    /* Line 3: TLS Mode */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "TLS: %.14s", mqtt_tls_mode_str(cfg->mqtt.tls_mode));
+
+    /* Line 4: Username */
+    snprintf(lines[total_lines++], sizeof(lines[0]), "User: %.13s",
+             cfg->mqtt.username[0] ? cfg->mqtt.username : "(none)");
+
+    free(cfg);
+
+    /* Multi-page navigation (3 lines per page, reserve 2 chars for indicators) */
+    int cursor = 0;
+    int top = 0;
+    uint8_t previous = 0;
+    wait_buttons_released();
+
+    while (1) {
+        put_line_centre(0, "MQTT INFO");
+
+        /* Calculate pagination */
+        bool has_above = (top > 0);
+        bool has_below = (top + 3 < total_lines);
+
+        for (int row = 0; row < 3; row++) {
+            int idx = top + row;
+            uint8_t lcd_row = (uint8_t)(row + 1);
+
+            if (idx >= total_lines) {
+                put_line(lcd_row, "");
+                continue;
+            }
+
+            /* Build display line with cursor and indent */
+            char display[HOME_LCD_WIDTH + 1];
+            char cursor_char = (idx == cursor) ? '>' : ' ';
+
+            /* Cursor + 1 space indent + content (truncate to fit 18 chars total) */
+            snprintf(display, sizeof(display), "%c %.16s", cursor_char, lines[idx]);
+
+            /* Add indicator if needed (reserve last 2 chars) */
+            bool mark = false;
+            if (row == 0 && has_above) {
+                mark = true;
+            } else if (row == 2 && has_below) {
+                mark = true;
+            }
+
+            if (mark) {
+                display[18] = '|';
+                display[19] = ' ';
+                display[20] = '\0';
+            }
+
+            put_line(lcd_row, display);
+        }
+
+        /* Button handling */
+        uint8_t buttons = 0;
+        if (hmi_bsp_read_buttons(&buttons) != ESP_OK) {
+            buttons = 0;
+        }
+        uint8_t edges = buttons & ~previous;
+        previous = buttons;
+
+        if (edges & HMI_BSP_BUTTON_TOP) {
+            if (cursor > 0) {
+                cursor--;
+                if (cursor < top) {
+                    top = cursor;
+                }
+            }
+            button_click();
+        } else if (edges & HMI_BSP_BUTTON_BOTTOM) {
+            if (cursor < total_lines - 1) {
+                cursor++;
+                if (cursor >= top + 3) {
+                    top = cursor - 2;
+                }
+            }
+            button_click();
+        } else if (edges & HMI_BSP_BUTTON_CENTER) {
+            /* CENTER = exit */
+            button_click();
+            wait_buttons_released();
+            return ESP_OK;
+        } else if (edges & HMI_BSP_BUTTON_LEFT) {
+            /* LEFT = back/exit */
+            button_click();
+            wait_buttons_released();
+            return ESP_OK;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 static const lcd_menu_item_t s_items_mqtt[] = {
+    {.label = "Info",   .type = LCD_MENU_ITEM_ACTION, .action = mqtt_info_show},
     {.label = "Status", .type = LCD_MENU_ITEM_VALUE,
      .value_get = mqtt_status_value, .action = mqtt_status_toggle},
     {.label = "Period", .type = LCD_MENU_ITEM_VALUE,

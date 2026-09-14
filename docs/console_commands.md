@@ -44,7 +44,7 @@ meter-reg write 0x61 0x1C89
 ## 3. `meter-cal` — hiệu chỉnh ATM90E32AS
 
 ```
-meter-cal <show|default|apply|save|load|auto|auto-pq-gain|auto-power-offset|set|guide> [tùy chọn]
+meter-cal <show|default|apply|save|load|auto|auto-pq-gain|auto-phi|phi-err|get-p|auto-power-offset|set|guide> [tùy chọn]
 ```
 
 | Subcommand | Việc |
@@ -58,6 +58,9 @@ meter-cal <show|default|apply|save|load|auto|auto-pq-gain|auto-power-offset|set|
 | `guide` | in hướng dẫn quy trình calib |
 | `auto` | auto-cal voltage/current gain hoặc offset (một pha hoặc cả 3 pha) |
 | `auto-pq-gain` | auto-cal active power gain (PQGain) |
+| `auto-phi` | auto-cal phase compensation (Phi) với P_ref trực tiếp |
+| `phi-err` | auto-cal phase compensation với known power error (không cần reference meter trực tiếp) |
+| `get-p` | đọc công suất trung bình từ chip (dùng cho workflow calib thủ công) |
 | `auto-power-offset` | auto-cal active/reactive power offset |
 
 Tham số cho `set` / `auto`:
@@ -71,8 +74,43 @@ Tham số cho `set` / `auto`:
 | `--p <n>` | offset công suất tác dụng |
 | `--q <n>` | offset công suất phản kháng |
 | `--phi <n>` | bù pha |
-| `--value <v>` | `auto`: reference (`<số>\|external\|offset`); `set`: chip-wide `pga 1\|2\|4`, `wiring 3p4w\|3p3w`, `freq 50\|60` |
+| `--value <v>` | `auto`: reference (`<số>\|external\|offset`); `set`: chip-wide `pga 1\|2\|4`, `wiring 3p4w\|3p3w`, `freq 50\|60`; `get-p`: số mẫu (1-50, default 3) |
+| `--interval <ms>` | khoảng thời gian giữa các mẫu cho `get-p` (1-1000ms, default 100ms) |
+| `--error <percent>` | sai số công suất đã biết từ PF=1 baseline (dùng cho `phi-err`) |
 | `--apply` | **Bắt buộc** với chip-wide `pga\|wiring\|freq` và `default` không `--field`. Với calib per-phase (`auto`, `set <field per-phase>`, `default --field`) giá trị **tự áp xuống chip ngay**, `--apply` là no-op |
+
+### Các subcommands mới cho phase calibration
+
+**`phi-err` - Calibrate phase với known power error:**
+
+Dùng khi không thể cấp nguồn đồng thời cho DUT và reference meter. Workflow:
+1. Đo sai số công suất tại PF=1 (dùng `ref compare`)
+2. Dùng `phi-err` với error đó để calibrate phase tại PF=0.5
+
+```bash
+# Sau khi có error từ ref compare
+meter-cal phi-err --phase a --error 1.166 [--tolerance 2.0]
+```
+
+Command sẽ:
+- Đo P_chip hiện tại
+- Tính ngược P_ref = P_chip / (1 + error/100)
+- Chạy thuật toán phase calibration như `auto-phi`
+- Verify residual error trong tolerance
+
+**`get-p` - Đọc công suất trung bình từ chip:**
+
+Đo công suất từ DUT chip (không phải reference meter), hỗ trợ nhiều mẫu:
+
+```bash
+meter-cal get-p --phase a --value 10 --interval 200
+# Output: Average active power: 1234.678 W (12346780 mW)
+```
+
+Dùng cho:
+- Workflow calibration thủ công
+- Verify công suất sau khi calib
+- So sánh với reference meter (dùng `ref compare` để tự động)
 
 Chi tiết quy trình calib: xem [atm90e32as_console_calib.md](atm90e32as_console_calib.md). Bắt đầu nhanh: `meter-cal guide`.
 
@@ -254,6 +292,128 @@ rtt min/avg/max = 1/1/2 ms
 | `did not end in time; stopping` | phiên ping bất thường (lệnh đã chờ quá `count*(interval+timeout) + 3s`); vẫn in tổng kết tới thời điểm đó |
 
 Mã thoát: `0` nếu nhận được ít nhất một gói trả lời, `1` nếu mất toàn bộ.
+
+---
+
+## 8. `ref` — đọc từ reference meter và so sánh với DUT
+
+```
+ref list
+ref read --id <slave_id> [--samples <N>] [--interval <ms>]
+ref compare --id <slave_id> --phase <a|b|c> [--samples <N>] [--interval <ms>]
+```
+
+| Subcommand | Việc |
+|---|---|
+| `list` | liệt kê tất cả các slot Modbus đã cấu hình (slave ID, device type, name, online status) |
+| `read --id <N>` | đọc công suất từ reference meter (hỗ trợ nhiều mẫu để tính trung bình) |
+| `compare --id <N> --phase <a\|b\|c>` | **so sánh đồng thời** P_ref và P_meter, tự động tính error % |
+
+**Tham số:**
+
+| Cờ | Mặc định | Giới hạn | Ý nghĩa |
+|---|---|---|---|
+| `--samples <N>` | `read`: 1, `compare`: 5 | 1-50 | số lần lấy mẫu để tính trung bình |
+| `--interval <ms>` | `read`: 100, `compare`: 200 | 1-1000 | khoảng thời gian giữa các mẫu (ms) |
+| `--phase <a\|b\|c>` | — | — | pha DUT (chỉ dùng cho `compare`) |
+
+**Device types được hỗ trợ:**
+- **PM710** (Schneider): đọc active power từ register 1006 (float32, kW)
+- **EM07K** (TENSE): đọc active power từ registers 4042/4043/4044 (U16 per phase, cần CTR×VTR scale)
+- **UNKNOWN**: hiển thị nếu device type không khớp PM710 hoặc EM07K
+
+### Ví dụ sử dụng
+
+**1. Liệt kê reference meters:**
+```bash
+ref list
+# Output:
+# Slot   Slave ID   Type       Name                 Status
+# 0      1          PM710      Main-Meter           ONLINE
+# 1      2          EM07K      Phase-Meter          OFFLINE
+```
+
+**2. Đọc công suất từ reference meter (1 mẫu):**
+```bash
+ref read --id 1
+# Output:
+# Slave ID 1 - Active Power: 1234.567 W
+#   Voltage: L1=230.0V L2=229.5V L3=230.2V
+#   Current: L1=5.36A L2=5.41A L3=5.38A
+#   ...
+```
+
+**3. Đọc công suất trung bình (nhiều mẫu):**
+```bash
+ref read --id 1 --samples 10 --interval 200
+# Output:
+# Measuring slave ID 1 active power (10 samples, 200 ms interval)...
+# Slave ID 1 - Active Power: 1235.123 W (average of 10 samples)
+#   Voltage: L1=230.0V ...
+```
+
+**4. So sánh đồng thời P_ref và P_meter (workflow calibration):**
+```bash
+ref compare --id 1 --phase a --samples 10 --interval 200
+# Output:
+# Comparing phase A: DUT vs Reference meter (slave ID 1)
+# Sampling: 10 samples, 200 ms interval
+# --------------------------------------------------
+# Sample  1: P_ref=1220.000 W, P_meter=1234.567 W
+# Sample  2: P_ref=1221.100 W, P_meter=1235.234 W
+# ...
+# Sample 10: P_ref=1219.800 W, P_meter=1233.890 W
+# --------------------------------------------------
+# Results:
+#   P_ref average:   1220.450 W
+#   P_meter average: 1234.678 W
+#   Power error:     1.166%
+#
+# Use this error value for phase calibration:
+#   meter-cal phi-err --phase a --error 1.166
+```
+
+### Workflow calibration phase 2-step
+
+Khi **không thể cấp nguồn đồng thời** cho DUT và reference meter, dùng workflow 2-step:
+
+#### **STEP 1: Đo sai số công suất tại PF=1 (baseline)**
+
+Cấp nguồn PF=1 (tải thuần trở) vào cả DUT và reference meter:
+
+```bash
+# Cách 1: Đọc thủ công và tính error bằng tay
+meter-cal get-p --phase a --samples 10 --interval 200    # P_DUT = 1234.678 W
+ref read --id 1 --samples 10 --interval 200               # P_ref = 1220.450 W
+# Tính: error = (1234.678 - 1220.450) / 1220.450 * 100 = 1.166%
+
+# Cách 2: Dùng ref compare (TỰ ĐỘNG tính error)
+ref compare --id 1 --phase a --samples 10 --interval 200
+# Output trực tiếp: Power error: 1.166%
+```
+
+**Lưu lại giá trị error này** (ví dụ: 1.166%) để dùng cho Step 2.
+
+#### **STEP 2: Calibrate phase tại PF=0.5L**
+
+Bây giờ **chỉ cấp nguồn PF=0.5L** (xung lệch pha 60°) vào DUT (không cần reference meter):
+
+```bash
+# 1. Reset Phi về 0 (baseline requirement)
+meter-cal default --field phi --phase a --apply
+
+# 2. Auto calibrate phase với known error từ Step 1
+meter-cal phi-err --phase a --error 1.166
+
+# 3. Verify và lưu
+meter-cal save
+```
+
+Command `phi-err` sẽ:
+- Đo P_chip hiện tại từ DUT
+- Tính ngược P_ref = P_chip / (1 + error/100)
+- Chạy thuật toán phase calibration như `auto-phi`
+- Ghi Phi vào chip và verify residual error
 
 ---
 

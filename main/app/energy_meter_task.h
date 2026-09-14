@@ -187,6 +187,15 @@ esp_err_t energy_meter_auto_calibrate_power_offset(
     const energy_meter_power_offset_request_t *request,
     energy_meter_power_offset_result_t *result);
 
+/* Get average active power measurement from the chip (not reference meter).
+ * Returns integer milliwatts for deterministic math. Used for manual
+ * calibration workflows where P_chip is measured separately.
+ * Reads from cached measurements (updated every 100ms by task), interval_ms
+ * controls spacing between samples (1-1000ms, default 100ms). */
+esp_err_t energy_meter_get_average_active_power(atm90e32as_phase_t phase,
+                                                uint16_t samples,
+                                                uint16_t interval_ms,
+                                                int64_t *average_mw);
 
 esp_err_t energy_meter_task_start(void);
 esp_err_t energy_meter_get_latest(atm90e32as_measurements_t *out);

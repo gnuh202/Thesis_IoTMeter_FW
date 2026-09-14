@@ -22,35 +22,61 @@ static boot_module_status_t s_modules[BOOT_MODULE_MAX];
 static uint8_t s_module_count;
 static uint8_t s_lcd_line;   /* next LCD row to write on the init screen */
 
-/* Center text into a width-BOOT_LCD_WIDTH field for the splash. */
-static void center_line(const char *text, char *out, size_t out_size)
+/*
+ * Custom character definitions for "PM" logo (3 rows tall).
+ * Each character is 5x8 pixels. We use 8 custom characters (0-7).
+ * 0xFF represents LCD's built-in full block character (not CGRAM).
+ */
+static const uint8_t CGRAM_LOGO[][8] = {
+    /* Char 0x00 */
+    {0b11000, 0b11000, 0b11100, 0b11100, 0b11110, 0b11110, 0b11111, 0b11111},
+    /* Char 0x01 */
+    {0b00000, 0b00000, 0b00000, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111},
+    /* Char 0x02 */
+    {0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b00000, 0b00000, 0b00000},
+    /* Char 0x03 */
+    {0b11000, 0b11100, 0b11110, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111},
+    /* Char 0x04 */
+    {0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11110, 0b11100, 0b11000},
+    /* Char 0x05 */
+    {0b11111, 0b11110, 0b11110, 0b11100, 0b11100, 0b11000, 0b11000, 0b10000},
+    /* Char 0x06 */
+    {0b11111, 0b01111, 0b01111, 0b00111, 0b00111, 0b00011, 0b00011, 0b00001},
+    /* Char 0x07 */
+    {0b00011, 0b00011, 0b00111, 0b00111, 0b01111, 0b01111, 0b11111, 0b11111},
+};
+
+static void load_custom_chars(void)
 {
-    size_t len = strlen(text);
-    if (len > BOOT_LCD_WIDTH) {
-        len = BOOT_LCD_WIDTH;
-    }
-    size_t pad = (BOOT_LCD_WIDTH - len) / 2;
-    memset(out, ' ', BOOT_LCD_WIDTH);
-    memcpy(out + pad, text, len);
-    if (out_size > BOOT_LCD_WIDTH) {
-        out[BOOT_LCD_WIDTH] = '\0';
-    } else {
-        out[out_size - 1] = '\0';
+    for (uint8_t i = 0; i < 8; i++) {
+        hmi_bsp_lcd_create_char(i, CGRAM_LOGO[i]);
     }
 }
 
 static void show_splash(void)
 {
-    char line[BOOT_LCD_WIDTH + 1];
+    load_custom_chars();
 
-    center_line("Power Meter", line, sizeof(line));
-    hmi_bsp_lcd_print_line(0, line);
-    center_line("IoT Energy Meter", line, sizeof(line));
-    hmi_bsp_lcd_print_line(1, line);
-    center_line("", line, sizeof(line));
-    hmi_bsp_lcd_print_line(2, line);
-    center_line("v1.0", line, sizeof(line));
-    hmi_bsp_lcd_print_line(3, line);
+    /* Row 0: Contains 0x00 byte, must use binary array not string literal */
+    const uint8_t row0[20] = {
+        ' ', ' ', ' ', ' ', ' ', 0xFF, 0x02, 0x02, 0x03, ' ',
+        0xFF, 0x00, ' ', 0x07, 0xFF, ' ', ' ', ' ', ' ', ' '
+    };
+
+    /* Row 1: Safe to use string literal (no 0x00) */
+    hmi_bsp_lcd_print_line(1, "     \xFF\x01\x01\x04 \xFF\x06\xFF\x05\xFF");
+
+    /* Row 2: Safe to use string literal (no 0x00) */
+    hmi_bsp_lcd_print_line(2, "     \xFF    \xFF   \xFF");
+
+    /* Row 3: "Hung Nguyen" centered */
+    hmi_bsp_lcd_print_line(3, "    Hung  Nguyen");
+
+    /* Write row 0 manually since it contains NULL byte */
+    hmi_bsp_lcd_set_cursor(0, 0);
+    for (uint8_t i = 0; i < 20; i++) {
+        hmi_bsp_lcd_write_char(row0[i]);
+    }
 }
 
 esp_err_t boot_manager_begin(void)
@@ -65,11 +91,12 @@ esp_err_t boot_manager_begin(void)
     show_splash();
     vTaskDelay(pdMS_TO_TICKS(BOOT_SPLASH_MS));
 
-    hmi_bsp_lcd_print_line(0, "Initializing...");
+    /* Clear screen silently - no "Initializing..." message */
+    hmi_bsp_lcd_print_line(0, "");
     hmi_bsp_lcd_print_line(1, "");
     hmi_bsp_lcd_print_line(2, "");
     hmi_bsp_lcd_print_line(3, "");
-    s_lcd_line = 1;
+    s_lcd_line = 0;  /* Use all 4 rows for boot status if needed */
 
     ESP_LOGI(TAG, "Boot started");
     return ESP_OK;
@@ -94,16 +121,7 @@ void boot_manager_step(const char *label, esp_err_t result)
         s_module_count++;
     }
 
-    if (s_lcd_ok) {
-        char line[BOOT_LCD_WIDTH + 1];
-        snprintf(line, sizeof(line), "%-15s %s", label, ok ? "OK" : "ERR");
-        hmi_bsp_lcd_print_line(s_lcd_line, line);
-        /* Rows 1..3 scroll; keep row 0 as the "Initializing..." title. */
-        s_lcd_line++;
-        if (s_lcd_line >= BOOT_LCD_ROWS) {
-            s_lcd_line = 1;
-        }
-    }
+    /* LCD stays blank during boot - no status messages shown */
 }
 
 void boot_manager_end(void)

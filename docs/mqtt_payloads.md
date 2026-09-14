@@ -1,147 +1,476 @@
-# MQTT Payload Reference (single source of truth)
+# MQTT Payload Reference
 
-> Đây là **tài liệu DUY NHẤT** mô tả toàn bộ topic + payload MQTT của thiết bị.
-> Các doc khác (thiết kế, kiến trúc) chỉ trỏ về đây, KHÔNG lặp lại bảng — để tránh
-> tài liệu rải rác, lệch nhau. Khi đổi payload trong code, sửa ở đây.
+> **Single Source of Truth** cho toàn bộ MQTT topics và payload format của thiết bị.  
+> Source code: [main/app/mqtt_manager.c](../main/app/mqtt_manager.c)  
+> Data structures: [main/app/mqtt_telemetry.h](../main/app/mqtt_telemetry.h)
 
-Nguồn code: [main/app/mqtt_manager.c](../main/app/mqtt_manager.c).
-
----
-
-## 1. Định danh & tiền tố topic
-
-- **Tiền tố**: `pm/<device_name>/...`
-  - `<device_name>` lấy từ `config_system_t.device_name` (đặt qua console/NVS), đã
-    **sanitize** cho hợp lệ topic (khoảng trắng, `/`, `+`, `#` → `_`). Ví dụ tên
-    `Power Meter` → topic `pm/Power_Meter/...`.
-- **MQTT Client ID** (khác `<device_name>`): tự sinh = `<device_name>-<3 byte cuối MAC>`,
-  ví dụ `Power_Meter-3AF2C1`, để duy nhất trên broker.
+**Phiên bản tài liệu:** 2.0 (cập nhật 2026-09-14)  
+**Thay đổi chính:**
+- Power units: W/var/VA → **kW/kvar/kVA** (2 decimal places)
+- Multi-device support: main device + up to 5 Modbus slaves
+- IO states moved into telemetry payload
+- Relay command simplified to plain string
 
 ---
 
-## 2. Bảng tổng quan
+## 📋 Mục lục
 
-| Topic | Hướng | QoS | Retain | Chu kỳ |
-|---|---|---|---|---|
-| `pm/<id>/telemetry` | publish | 0 | no  | mỗi chu kỳ publish (mặc định 5 s, chỉnh 1–60 s) |
-| `pm/<id>/energy`    | publish | 1 | no  | mỗi chu kỳ |
-| `pm/<id>/io`        | publish | 1 | yes | mỗi chu kỳ + echo sau lệnh relay |
-| `pm/<id>/heartbeat` | publish | 0 | no  | mỗi chu kỳ |
-| `pm/<id>/status`    | publish | 1 | yes | khi connect (`online`) + LWT (`offline`) |
-| `pm/<id>/cmd/out0`  | subscribe | 1 | — | khi có lệnh |
-| `pm/<id>/cmd/out1`  | subscribe | 1 | — | khi có lệnh |
+1. [Topic Naming & Device ID](#1-topic-naming--device-id)
+2. [Topic Overview Table](#2-topic-overview-table)
+3. [Published Topics (Device → Broker)](#3-published-topics-device--broker)
+4. [Subscribed Topics (Broker → Device)](#4-subscribed-topics-broker--device)
+5. [Field Reference Dictionary](#5-field-reference-dictionary)
+6. [Integration Examples](#6-integration-examples)
 
 ---
 
-## 3. Publish — thiết bị → broker
+## 1. Topic Naming & Device ID
 
-### 3.1 `telemetry` — số đo tức thời (QoS0, no retain)
+### Device ID Format
 
-| Field | Kiểu | Nghĩa | Đơn vị |
-|---|---|---|---|
-| `v` | number[3] | điện áp pha A/B/C | V |
-| `i` | number[3] | dòng pha A/B/C | A |
-| `pf` | number[3] | hệ số công suất pha A/B/C | — |
-| `in` | number | dòng trung tính | A |
-| `p` | number | công suất tác dụng tổng | W |
-| `q` | number | công suất phản kháng tổng | var |
-| `s` | number | công suất biểu kiến tổng | VA |
-| `pf_total` | number | hệ số công suất tổng | — |
-| `freq` | number | tần số | Hz |
-| `temp` | number | nhiệt độ chip đo | °C |
+**Topic prefix:** `pm/<device_id>/...`
 
-```json
-{"v":[220.1,219.8,221.0],"i":[1.20,1.18,1.25],"pf":[0.98,0.97,0.99],
- "in":0.03,"p":790.5,"q":60.2,"s":792.8,"pf_total":0.98,"freq":50.0,"temp":41.5}
-```
+- `<device_id>` được lấy từ NVS config `device_name` (default: `"PM-" + 6 hex MAC`)
+- **Sanitized:** ký tự không hợp lệ MQTT topic (`/`, `+`, `#`, space) → thay bằng `_`
+- Ví dụ:
+  - Config name: `Power Meter` → Topic: `pm/Power_Meter/...`
+  - Config name: `Lab/Meter#1` → Topic: `pm/Lab_Meter_1/...`
 
-### 3.2 `energy` — năng lượng tích lũy + demand (QoS1)
+### MQTT Client ID
 
-| Field | Kiểu | Nghĩa | Đơn vị |
-|---|---|---|---|
-| `imp_kwh` | number | điện năng tác dụng nhập | kWh |
-| `exp_kwh` | number | điện năng tác dụng xuất | kWh |
-| `imp_kvarh` | number | điện năng phản kháng nhập | kvarh |
-| `exp_kvarh` | number | điện năng phản kháng xuất | kvarh |
-| `dmd_w` | number | demand công suất hiện tại | W |
-| `dmd_max_w` | number | demand đỉnh | W |
+**Format:** `<device_name>-<last_3_bytes_MAC>`
 
-```json
-{"imp_kwh":12.345,"exp_kwh":0.0,"imp_kvarh":1.20,"exp_kvarh":0.0,"dmd_w":810.0,"dmd_max_w":1250.0}
-```
-
-### 3.3 `io` — trạng thái số (QoS1, **retained**)
-
-| Field | Kiểu | Nghĩa |
-|---|---|---|
-| `in0` | bool | ngõ vào số 0 |
-| `in1` | bool | ngõ vào số 1 |
-| `out0` | bool | relay ngõ ra 0 (true = đóng/on) |
-| `out1` | bool | relay ngõ ra 1 |
-
-```json
-{"in0":false,"in1":true,"out0":true,"out1":false}
-```
-
-Retained: client subscribe muộn vẫn thấy trạng thái cuối. Được publish lại ngay
-sau mỗi lệnh relay (echo xác nhận trạng thái thật).
-
-### 3.4 `heartbeat` — sống + giám sát (QoS0)
-
-| Field | Kiểu | Nghĩa |
-|---|---|---|
-| `uptime_s` | number | thời gian chạy kể từ boot (giây) |
-| `heap` | number | RAM (heap) còn trống (byte) |
-| `fw_version` | string | phiên bản firmware (từ app descriptor) |
-| `active_broker` | string | nhãn broker đang kết nối (`cfg.mqtt.name`; giữ tên key `active_broker` cho tương thích consumer) |
-| `iface` | string | interface data-path active: `eth` / `wifi` / `none` |
-| `ip` | string | địa chỉ IP hiện tại |
-
-```json
-{"uptime_s":3600,"heap":142000,"fw_version":"1.0.0","active_broker":"Mosquitto local","iface":"eth","ip":"192.168.137.61"}
-```
-
-### 3.5 `status` — hiện diện (QoS1, **retained**, KHÔNG phải JSON)
-
-Chuỗi thuần:
-- `online` — publish khi kết nối thành công.
-- `offline` — **LWT** (Last Will), broker tự phát khi thiết bị mất kết nối đột ngột.
-
-Cùng một topic retained, nên subscriber luôn thấy trạng thái hiện diện cuối cùng.
+- Ví dụ: `Power_Meter-3AF2C1`
+- Đảm bảo unique khi nhiều device cùng tên trên một broker
 
 ---
 
-## 4. Subscribe — broker → thiết bị (điều khiển relay)
+## 2. Topic Overview Table
 
-| Topic | Payload | Hành động |
-|---|---|---|
-| `pm/<id>/cmd/out0` | `{"state":"on"}` / `{"state":"off"}` | đặt relay out0 |
-| `pm/<id>/cmd/out1` | `{"state":"on"}` / `{"state":"off"}` | đặt relay out1 |
+| Topic | Direction | QoS | Retain | Publish Interval | Description |
+|-------|-----------|-----|--------|------------------|-------------|
+| `pm/<id>/telemetry` | Publish | 0 | No | Configurable (1-60s, default 5s) | Real-time measurements (main + slaves) |
+| `pm/<id>/energy` | Publish | 1 | No | Same as telemetry | Accumulated energy + demand |
+| `pm/<id>/io` | Publish | 1 | **Yes** | Same as telemetry + relay echo | Digital I/O state snapshot |
+| `pm/<id>/heartbeat` | Publish | 0 | No | Same as telemetry | System health + metadata |
+| `pm/<id>/status` | Publish | 1 | **Yes** | On connect + LWT | Online/offline presence |
+| `pm/<id>/cmd/out0` | Subscribe | 1 | — | On demand | Relay output 0 control |
+| `pm/<id>/cmd/out1` | Subscribe | 1 | — | On demand | Relay output 1 control |
 
-- Payload là **JSON**, field `state` kiểu **chuỗi**, chỉ nhận `"on"` hoặc `"off"`.
-- **Validate chặt**: payload không phải JSON / thiếu `state` / `state` không phải
-  chuỗi / giá trị khác `on`|`off` → **bỏ qua, không đụng relay**, ghi log cảnh báo.
-- Sau lệnh hợp lệ: đặt relay vật lý rồi **publish lại `io`** (echo trạng thái xác nhận).
+**Notes:**
+- Publish interval configurable via: LCD Menu (Settings → MQTT → Period), Web Portal (MQTT section), Console (`mqtt-cfg period`)
+- Range: 1-60 seconds (stored in NVS as milliseconds: 1000-60000 ms)
 
-Ví dụ (mosquitto_pub, lưu ý escape nháy tùy shell):
+---
+
+## 3. Published Topics (Device → Broker)
+
+### 3.1. `pm/<id>/telemetry`
+
+**QoS:** 0 (fire-and-forget, real-time priority)  
+**Retain:** No  
+**Frequency:** Every publish interval (default 5s)
+
+**Purpose:** Real-time electrical measurements from main meter (ATM90E32AS) and optional Modbus slave devices (PM710/EM07K).
+
+#### Payload Structure
+
+```json
+{
+  "main": {
+    "v": [230.1, 230.2, 230.3],
+    "i": [5.23, 5.18, 5.31],
+    "pf": [0.98, 0.97, 0.99],
+    "in": 0.05,
+    "p_kw": 3.45,
+    "q_kvar": 0.23,
+    "s_kva": 3.46,
+    "pf_total": 0.98,
+    "freq": 50.01,
+    "temp": 42.3,
+    "energy_kwh": 1234.56,
+    "relay1": false,
+    "relay2": true,
+    "input1": false,
+    "input2": true,
+    "warnings": 0
+  },
+  "slaves": [
+    {
+      "name": "PM710-01",
+      "id": 1,
+      "type": "PM710",
+      "online": true,
+      "v": [230.0, 230.1, 230.2],
+      "i": [2.10, 2.15, 2.18],
+      "p_kw": 1.52,
+      "q_kvar": 0.11,
+      "s_kva": 1.53,
+      "pf": 0.99,
+      "freq": 50.00,
+      "energy_kwh": 567.89
+    }
+  ]
+}
+```
+
+#### Field Details
+
+**`main` object** (always present):
+
+| Field | Type | Unit | Description | Range/Notes |
+|-------|------|------|-------------|-------------|
+| `v` | number[3] | V | Phase voltages (L1, L2, L3) | 0-300 V typical |
+| `i` | number[3] | A | Phase currents (L1, L2, L3) | 0-rated current |
+| `pf` | number[3] | — | Per-phase power factor | -1.0 to 1.0 |
+| `in` | number | A | Neutral current | 0-rated current |
+| `p_kw` | number | kW | Total active power | **2 decimals** |
+| `q_kvar` | number | kvar | Total reactive power | **2 decimals** |
+| `s_kva` | number | kVA | Total apparent power | **2 decimals** |
+| `pf_total` | number | — | System power factor | -1.0 to 1.0 |
+| `freq` | number | Hz | Line frequency | 45-65 Hz typical |
+| `temp` | number | °C | ATM90E32AS chip temperature | Internal sensor |
+| `energy_kwh` | number | kWh | Accumulated active energy (import) | Counter, never resets |
+| `relay1` | boolean | — | Relay output 0 state | true=closed/on |
+| `relay2` | boolean | — | Relay output 1 state | true=closed/on |
+| `input1` | boolean | — | Digital input 0 state | true=high/active |
+| `input2` | boolean | — | Digital input 1 state | true=high/active |
+| `warnings` | number | — | 8-bit warning flags | Reserved for alarm system |
+
+**`slaves` array** (optional, only present if Modbus slaves configured):
+
+| Field | Type | Unit | Description | Range/Notes |
+|-------|------|------|-------------|-------------|
+| `name` | string | — | Device name from config | User-defined label |
+| `id` | number | — | Modbus slave address | 1-247 |
+| `type` | string | — | Device model | `"PM710"` or `"EM07K"` |
+| `online` | boolean | — | Communication status | false if no response |
+| `v` | number[3] | V | Phase voltages | Same as main |
+| `i` | number[3] | A | Phase currents | Same as main |
+| `p_kw` | number | kW | Total active power | **2 decimals** |
+| `q_kvar` | number | kvar | Total reactive power | **2 decimals**, 0 for EM07K |
+| `s_kva` | number | kVA | Total apparent power | **2 decimals** |
+| `pf` | number | — | Total power factor | 0 for EM07K |
+| `freq` | number | Hz | Line frequency | Same as main |
+| `energy_kwh` | number | kWh | Accumulated active energy | Device's internal counter |
+
+**Notes:**
+- Maximum 5 slaves (firmware limit for stack safety)
+- Only **used slots** are published (no empty padding)
+- If no slaves configured: `slaves` key is **not present** in JSON
+- Slave `online=false` when: timeout, CRC error, or exception response
+
+---
+
+### 3.2. `pm/<id>/energy`
+
+**QoS:** 1 (at-least-once delivery)  
+**Retain:** No  
+**Frequency:** Every publish interval
+
+**Purpose:** Accumulated energy counters and demand measurements (main device only).
+
+#### Payload Structure
+
+```json
+{
+  "imp_kwh": 1234.56,
+  "exp_kwh": 0.00,
+  "imp_kvarh": 123.45,
+  "exp_kvarh": 0.00,
+  "dmd_w": 3450.5,
+  "dmd_max_w": 5000.0
+}
+```
+
+#### Field Details
+
+| Field | Type | Unit | Description |
+|-------|------|------|-------------|
+| `imp_kwh` | number | kWh | Active energy import (consumed) |
+| `exp_kwh` | number | kWh | Active energy export (generated) |
+| `imp_kvarh` | number | kvarh | Reactive energy import |
+| `exp_kvarh` | number | kvarh | Reactive energy export |
+| `dmd_w` | number | W | Current demand (sliding window) |
+| `dmd_max_w` | number | W | Maximum demand since reset |
+
+**Notes:**
+- Energy counters persist across reboots (stored in ATM90E32AS registers)
+- Demand values in **Watts** (not kW) for precision
+- Demand window typically 15 minutes (ATM90E32AS configurable)
+
+---
+
+### 3.3. `pm/<id>/io`
+
+**QoS:** 1 (reliable delivery)  
+**Retain:** **Yes** (last state always available)  
+**Frequency:** Every publish interval + immediate after relay command
+
+**Purpose:** Digital I/O state snapshot. Retained so late subscribers see current state.
+
+#### Payload Structure
+
+```json
+{
+  "in0": false,
+  "in1": true,
+  "out0": true,
+  "out1": false
+}
+```
+
+#### Field Details
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `in0` | boolean | Digital input 0 (true = high/active) |
+| `in1` | boolean | Digital input 1 (true = high/active) |
+| `out0` | boolean | Relay output 0 (true = closed/energized) |
+| `out1` | boolean | Relay output 1 (true = closed/energized) |
+
+**Notes:**
+- Also published in `telemetry.main` as `relay1/2` and `input1/2` (same values)
+- Separate topic useful for subscribers only interested in I/O state
+- Publishes immediately after relay command as echo confirmation
+
+---
+
+### 3.4. `pm/<id>/heartbeat`
+
+**QoS:** 0 (best-effort)  
+**Retain:** No  
+**Frequency:** Every publish interval
+
+**Purpose:** System health, version info, and network status for monitoring.
+
+#### Payload Structure
+
+```json
+{
+  "uptime_s": 12345.67,
+  "heap": 180000,
+  "fw_version": "1.0.0",
+  "active_broker": "Main-Broker",
+  "iface": "wifi",
+  "ip": "192.168.1.100"
+}
+```
+
+#### Field Details
+
+| Field | Type | Unit | Description |
+|-------|------|------|-------------|
+| `uptime_s` | number | seconds | Time since boot (from `esp_timer_get_time()`) |
+| `heap` | number | bytes | Free heap memory (from `esp_get_free_heap_size()`) |
+| `fw_version` | string | — | Firmware version (from `esp_app_desc`) |
+| `active_broker` | string | — | Broker name from config (`cfg.mqtt.name`) |
+| `iface` | string | — | Active network interface: `"eth"`, `"wifi"`, or `"none"` |
+| `ip` | string | — | Current IP address |
+
+**Notes:**
+- `fw_version` currently reads from compile-time `esp_app_desc`
+- Future: may read from NVS `ota_version` field after OTA updates
+- `heap` useful for memory leak detection
+- `uptime_s` wraps after ~136 years (safe for practical use)
+
+---
+
+### 3.5. `pm/<id>/status`
+
+**QoS:** 1 (reliable delivery)  
+**Retain:** **Yes** (last-known presence)  
+**Content-Type:** Plain string (NOT JSON)
+
+**Purpose:** Device online/offline presence signaling with Last Will Testament (LWT).
+
+#### Payload Values
+
+- `"online"` — Published when device successfully connects to broker
+- `"offline"` — Published by broker via LWT when device disconnects unexpectedly
+
+**Notes:**
+- LWT (Last Will Testament) configured at connection time
+- Retained flag ensures subscribers always see latest presence
+- No JSON wrapping — payload is literal string `online` or `offline`
+
+---
+
+## 4. Subscribed Topics (Broker → Device)
+
+### 4.1. `pm/<id>/cmd/out0`
+
+**QoS:** 1  
+**Purpose:** Control relay output 0
+
+#### Payload Format
+
+Plain string (NOT JSON):
+- `"on"` or `"1"` or `"true"` → Close relay (energize)
+- `"off"` or `"0"` or `"false"` → Open relay (de-energize)
+
+**Validation:**
+- Case-insensitive matching
+- Any other value → **ignored**, warning logged
+- Invalid UTF-8 or non-string payload → **ignored**
+
+**Response:**
+- On success: relay state updated + `io` topic republished immediately
+- No explicit ACK message (state confirmation via `io` topic)
+
+---
+
+### 4.2. `pm/<id>/cmd/out1`
+
+**QoS:** 1  
+**Purpose:** Control relay output 1
+
+Same format and behavior as `cmd/out0`.
+
+---
+
+## 5. Field Reference Dictionary
+
+### Quick Lookup: Field Name → Meaning
+
+| Field/Key | Full Name | Unit | Where Found |
+|-----------|-----------|------|-------------|
+| `v` | Phase voltages | V | telemetry (main/slaves) |
+| `i` | Phase currents | A | telemetry (main/slaves) |
+| `pf` | Power factor | — | telemetry (main per-phase, slaves total) |
+| `in` | Neutral current | A | telemetry (main only) |
+| `p_kw` | Active power | kW | telemetry (main/slaves) |
+| `q_kvar` | Reactive power | kvar | telemetry (main/slaves) |
+| `s_kva` | Apparent power | kVA | telemetry (main/slaves) |
+| `pf_total` | Total power factor | — | telemetry (main only) |
+| `freq` | Line frequency | Hz | telemetry (main/slaves) |
+| `temp` | Chip temperature | °C | telemetry (main only) |
+| `energy_kwh` | Active energy import | kWh | telemetry (main/slaves), energy |
+| `relay1` / `relay2` | Relay outputs | boolean | telemetry (main only) |
+| `input1` / `input2` | Digital inputs | boolean | telemetry (main only) |
+| `warnings` | Warning flags | bitmask | telemetry (main only) |
+| `in0` / `in1` | Digital inputs | boolean | io |
+| `out0` / `out1` | Relay outputs | boolean | io |
+| `imp_kwh` | Import active energy | kWh | energy |
+| `exp_kwh` | Export active energy | kWh | energy |
+| `imp_kvarh` | Import reactive energy | kvarh | energy |
+| `exp_kvarh` | Export reactive energy | kvarh | energy |
+| `dmd_w` | Current demand | W | energy |
+| `dmd_max_w` | Peak demand | W | energy |
+| `uptime_s` | Uptime | seconds | heartbeat |
+| `heap` | Free heap | bytes | heartbeat |
+| `fw_version` | Firmware version | string | heartbeat |
+| `active_broker` | Broker name | string | heartbeat |
+| `iface` | Network interface | string | heartbeat |
+| `ip` | IP address | string | heartbeat |
+| `name` | Device name | string | slaves array |
+| `id` | Modbus address | number | slaves array |
+| `type` | Device model | string | slaves array |
+| `online` | Comms status | boolean | slaves array |
+
+---
+
+## 6. Integration Examples
+
+### 6.1. Subscribe to All Topics (mosquitto_sub)
+
 ```bash
-# Linux / macOS / Git Bash
-mosquitto_pub -h <broker> -t "pm/Power_Meter/cmd/out0" -m '{"state":"on"}'
+# Subscribe to all topics for one device
+mosquitto_sub -h broker.local -t "pm/Power_Meter/#" -v
 
-# Windows CMD (phải escape nháy kép)
-mosquitto_pub -h <broker> -t "pm/Power_Meter/cmd/out0" -m "{\"state\":\"on\"}"
+# Subscribe to telemetry from all devices
+mosquitto_sub -h broker.local -t "pm/+/telemetry" -v
+
+# Subscribe with credentials (if broker requires auth)
+mosquitto_sub -h broker.local -u username -P password -t "pm/Power_Meter/#" -v
 ```
 
-> Cảnh báo an toàn: điều khiển relay vật lý qua broker → broker phải cấu hình ACL
-> để chỉ client được phép mới publish được vào `cmd/*`. Firmware chỉ đảm bảo phần
-> của nó (TLS khi bật + auth + validate payload).
+### 6.2. Control Relay (mosquitto_pub)
+
+```bash
+# Turn on relay 0
+mosquitto_pub -h broker.local -t "pm/Power_Meter/cmd/out0" -m "on"
+
+# Turn off relay 1
+mosquitto_pub -h broker.local -t "pm/Power_Meter/cmd/out1" -m "off"
+
+# With authentication
+mosquitto_pub -h broker.local -u user -P pass -t "pm/Power_Meter/cmd/out0" -m "1"
+```
+
+### 6.3. Python Example (paho-mqtt)
+
+```python
+import paho.mqtt.client as mqtt
+import json
+
+def on_connect(client, userdata, flags, rc):
+    print(f"Connected with result code {rc}")
+    # Subscribe to telemetry
+    client.subscribe("pm/Power_Meter/telemetry")
+
+def on_message(client, userdata, msg):
+    payload = json.loads(msg.payload)
+    main = payload["main"]
+    
+    # Extract main device measurements
+    print(f"Power: {main['p_kw']:.2f} kW")
+    print(f"Voltage L1: {main['v'][0]:.1f} V")
+    print(f"Current L1: {main['i'][0]:.2f} A")
+    
+    # Process slave devices if present
+    if "slaves" in payload:
+        for slave in payload["slaves"]:
+            print(f"Slave {slave['name']}: {slave['p_kw']:.2f} kW (online={slave['online']})")
+
+client = mqtt.Client()
+client.on_connect = on_connect
+client.on_message = on_message
+
+client.connect("broker.local", 1883, 60)
+client.loop_forever()
+```
+
+### 6.4. Node-RED Flow Snippet
+
+```json
+[
+  {
+    "id": "mqtt_in",
+    "type": "mqtt in",
+    "topic": "pm/Power_Meter/telemetry",
+    "qos": "0",
+    "broker": "broker_config",
+    "name": "Power Meter Telemetry"
+  },
+  {
+    "id": "json_parse",
+    "type": "json",
+    "name": "Parse JSON"
+  },
+  {
+    "id": "extract_power",
+    "type": "function",
+    "func": "msg.payload = msg.payload.main.p_kw;\nreturn msg;",
+    "name": "Extract Power (kW)"
+  }
+]
+```
 
 ---
 
-## 5. Ghi chú
+## Version History
 
-- Chu kỳ publish lưu trong NVS (`cfg.mqtt_publish_ms`, 1000–60000 ms), đổi theo **giây**
-  trên LCD (Settings > MQTT > Period), trên portal (Publish interval), hoặc qua
-  `mqtt-cfg period --period <s>` (RAM only — xem [console_commands.md](console_commands.md));
-  mặc định lần đầu 5000 ms.
-- Toàn bộ JSON build bằng cJSON. Khi thêm/sửa field, cập nhật **doc này** đồng thời với code.
+| Version | Date | Changes |
+|---------|------|---------|
+| 2.0 | 2026-09-14 | • Power units changed to kW/kvar/kVA<br>• Multi-device support (main + slaves)<br>• IO fields in telemetry<br>• Relay cmd simplified to plain string |
+| 1.0 | 2024-xx-xx | Initial version (single device, W/var/VA units) |
+
+---
+
+## Related Documentation
+
+- **MQTT Configuration Guide:** [mqtt_guide.md](mqtt_guide.md)
+- **Console Commands:** [console_commands.md](console_commands.md) (section: mqtt-cfg)
+- **Architecture Overview:** [architecture.md](architecture.md)
+- **Modbus Register Map:** [modbus_slave_register_map.md](modbus_slave_register_map.md)

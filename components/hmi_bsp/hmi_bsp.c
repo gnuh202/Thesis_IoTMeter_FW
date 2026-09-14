@@ -98,6 +98,24 @@ esp_err_t hmi_bsp_lcd_backlight(bool on)
     return lcd2004_i2c_backlight(s_lcd, on);
 }
 
+esp_err_t hmi_bsp_lcd_create_char(uint8_t location, const uint8_t charmap[8])
+{
+    ESP_RETURN_ON_ERROR(hmi_bsp_init(), TAG, "init HMI failed");
+    return lcd2004_i2c_create_char(s_lcd, location, charmap);
+}
+
+esp_err_t hmi_bsp_lcd_set_cursor(uint8_t row, uint8_t col)
+{
+    ESP_RETURN_ON_ERROR(hmi_bsp_init(), TAG, "init HMI failed");
+    return lcd2004_i2c_set_cursor(s_lcd, row, col);
+}
+
+esp_err_t hmi_bsp_lcd_write_char(char c)
+{
+    ESP_RETURN_ON_ERROR(hmi_bsp_init(), TAG, "init HMI failed");
+    return lcd2004_i2c_write_char(s_lcd, c);
+}
+
 esp_err_t hmi_bsp_read_buttons(uint8_t *pressed_mask)
 {
     ESP_RETURN_ON_FALSE(pressed_mask != NULL, ESP_ERR_INVALID_ARG, TAG, "pressed_mask is NULL");

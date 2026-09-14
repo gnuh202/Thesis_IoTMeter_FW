@@ -455,7 +455,7 @@ static const char *HTML_SCRIPT =
     "function rtuUsedCount(){return rtuList()?rtuList().querySelectorAll('.rtu-dev').length:0;}"
     "function rtuRefreshEmpty(){var e=rtuEmpty();if(!e)return;e.hidden=rtuUsedCount()>0;}"
     "function rtuNextSlot(){"
-    "for(var i=0;i<8;i++){if(!document.getElementById('rtu-dev-'+i))return i;}"
+    "for(var i=0;i<5;i++){if(!document.getElementById('rtu-dev-'+i))return i;}"
     "return -1;}"
     "function rtuField(label,node){"
     "var d=document.createElement('div');d.className='field';"
@@ -463,7 +463,7 @@ static const char *HTML_SCRIPT =
     "function rtuAddDevice(pre){"
     "pre=pre||{};var list=rtuList();if(!list)return;"
     "var i=('slot' in pre)?pre.slot:rtuNextSlot();"
-    "if(i<0){alert('Maximum 8 devices on this bus.');return;}"
+    "if(i<0){alert('Maximum 5 devices allowed (MQTT telemetry limit).');return;}"
     "if(document.getElementById('rtu-dev-'+i))return;"
     "var name=pre.name||('M'+i);"
     "var id=pre.id||String(i+1);"
@@ -714,7 +714,7 @@ static esp_err_t send_escaped(httpd_req_t *req, const char *s)
  * two lines and knock the row out of alignment.
  */
 static esp_err_t send_input_ex(httpd_req_t *req, const char *label, const char *name,
-                               const char *value, bool wide)
+                               const char *value, bool wide, const char *placeholder)
 {
     httpd_resp_sendstr_chunk(req, wide ? "<div class=\"field wide\"><label>" : "<div class=\"field\"><label>");
     httpd_resp_sendstr_chunk(req, label);
@@ -722,7 +722,13 @@ static esp_err_t send_input_ex(httpd_req_t *req, const char *label, const char *
     httpd_resp_sendstr_chunk(req, name);
     httpd_resp_sendstr_chunk(req, "\" value=\"");
     send_escaped(req, value != NULL ? value : "");
-    return httpd_resp_sendstr_chunk(req, "\"></div>");
+    httpd_resp_sendstr_chunk(req, "\"");
+    if (placeholder != NULL && placeholder[0] != '\0') {
+        httpd_resp_sendstr_chunk(req, " placeholder=\"");
+        httpd_resp_sendstr_chunk(req, placeholder);
+        httpd_resp_sendstr_chunk(req, "\"");
+    }
+    return httpd_resp_sendstr_chunk(req, "></div>");
 }
 
 static esp_err_t send_input_with_hint(httpd_req_t *req, const char *label, const char *hint,
@@ -744,7 +750,7 @@ static esp_err_t send_input_with_hint(httpd_req_t *req, const char *label, const
 
 static esp_err_t send_input(httpd_req_t *req, const char *label, const char *name, const char *value)
 {
-    return send_input_ex(req, label, name, value, false);
+    return send_input_ex(req, label, name, value, false, NULL);
 }
 
 /*
@@ -764,7 +770,7 @@ static esp_err_t send_secret_input(httpd_req_t *req, const char *label, const ch
     httpd_resp_sendstr_chunk(req, name);
     httpd_resp_sendstr_chunk(req, "\" placeholder=\"");
     httpd_resp_sendstr_chunk(req, has_value ? "Password set — leave blank to keep it"
-                                            : "No password set");
+                                            : "Optional - leave empty if not required");
     return httpd_resp_sendstr_chunk(req, "\"></div>");
 }
 
@@ -1646,14 +1652,14 @@ static void send_mqtt_broker_block(httpd_req_t *req, const config_mqtt_profile_t
     /* The interval sits beside the label, not the port, so the wide server address
      * below does not split the remaining half-width fields: that leaves
      * Port|Keep-alive and Username|Password each on a full row. */
-    send_input(req, "Broker name", "mqtt_name", p->name);
+    send_input_ex(req, "Broker name", "mqtt_name", p->name, false, "Eg. Main-Broker");
     send_input(req, "Publish interval (seconds)", "publish_period_s", period_s);
-    send_input_ex(req, "Server address", "mqtt_uri", p->broker, true);
+    send_input_ex(req, "Server address", "mqtt_uri", p->broker, true, "Eg. 192.168.1.100 or broker.example.com");
     snprintf(buf, sizeof(buf), "%u", (unsigned)p->port);
     send_input(req, "Port", "mqtt_port", buf);
     snprintf(buf, sizeof(buf), "%u", (unsigned)p->keepalive_s);
     send_input(req, "Keep-alive (seconds)", "mqtt_keepalive", buf);
-    send_input(req, "Username", "mqtt_user", p->username);
+    send_input_ex(req, "Username", "mqtt_user", p->username, false, "Optional - leave empty if not required");
     send_secret_input(req, "Password", "mqtt_pass", p->password[0] != '\0', false);
 
     /* MQTT_TLS_INSECURE is intentionally not offered: it skips server
@@ -1670,6 +1676,23 @@ static void send_mqtt_broker_block(httpd_req_t *req, const config_mqtt_profile_t
     }
     send_field_end(req);
     httpd_resp_sendstr_chunk(req, "</div>");
+
+    httpd_resp_sendstr_chunk(req, "<script>"
+        "document.addEventListener('DOMContentLoaded',function(){"
+        "var s=document.querySelector('select[name=\"mqtt_tls\"]');"
+        "var p=document.querySelector('input[name=\"mqtt_port\"]');"
+        "if(s&&p){"
+        "var autoFill=function(){"
+        "var newPort=s.value==='off'?'1883':'8883';"
+        "if(!p.value||p.value==='0'||p.value==='1883'||p.value==='8883'){"
+        "p.value=newPort;"
+        "}"
+        "};"
+        "s.addEventListener('change',autoFill);"
+        "autoFill();"
+        "}"
+        "});"
+        "</script>");
 
     if (!cert_store_ready()) {
         httpd_resp_sendstr_chunk(req, "<div class=\"err\">The certificate store is not ready, so files "

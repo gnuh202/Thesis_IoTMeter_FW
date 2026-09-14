@@ -21,6 +21,7 @@ esp_err_t lcd2004_i2c_write_char(lcd2004_i2c_handle_t handle, char c);
 esp_err_t lcd2004_i2c_write_str(lcd2004_i2c_handle_t handle, const char *text);
 esp_err_t lcd2004_i2c_print_line(lcd2004_i2c_handle_t handle, uint8_t row, const char *text);
 esp_err_t lcd2004_i2c_backlight(lcd2004_i2c_handle_t handle, bool on);
+esp_err_t lcd2004_i2c_create_char(lcd2004_i2c_handle_t handle, uint8_t location, const uint8_t charmap[8]);
 
 #ifdef __cplusplus
 }

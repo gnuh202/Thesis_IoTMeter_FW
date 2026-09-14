@@ -47,7 +47,7 @@ extern "C" {
 #define CONFIG_MANAGER_MQTT_PERIOD_MAX_MS 60000U
 
 /* RTU master multi-device slots (PM710 / EM-07K on one RS485 bus). */
-#define CONFIG_MANAGER_MB_SLOT_COUNT 8
+#define CONFIG_MANAGER_MB_SLOT_COUNT 5
 #define CONFIG_MANAGER_MB_NAME_LEN 16
 
 /* Schema version of the central config snapshot; bump when the field layout
@@ -137,6 +137,10 @@ typedef struct {
     char device_name[CONFIG_MANAGER_DEVICE_NAME_LEN];
     char firmware_version[CONFIG_MANAGER_VERSION_LEN];  /* read-only, from app desc */
     char hardware_version[CONFIG_MANAGER_VERSION_LEN];  /* read-only */
+
+    /* OTA firmware tracking (persisted in NVS, updated after successful OTA) */
+    char ota_fw_build[16];      /* Format: "YYMMDD-NN" e.g. "260914-00", default "000000-00" */
+    char ota_version[16];       /* Format: "major.minor.patch" e.g. "1.0.0", default "0.0.0" */
 
     /* ---- Network ---- (backed by config_network_t) */
     bool dhcp_enable;

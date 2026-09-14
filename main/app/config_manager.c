@@ -74,6 +74,9 @@ typedef struct {
     char firmware_version[CONFIG_MANAGER_VERSION_LEN];
     char hardware_version[CONFIG_MANAGER_VERSION_LEN];
 
+    char ota_fw_build[16];
+    char ota_version[16];
+
     uint8_t dhcp_enable;
     uint8_t mb_slave_id;
     char static_ip[CONFIG_MANAGER_IP_LEN];
@@ -237,6 +240,10 @@ static void snapshot_to_dto(config_snapshot_dto_t *dto, const config_manager_t *
                           cfg->firmware_version, sizeof(cfg->firmware_version));
     copy_persisted_string(dto->hardware_version, sizeof(dto->hardware_version),
                           cfg->hardware_version, sizeof(cfg->hardware_version));
+    copy_persisted_string(dto->ota_fw_build, sizeof(dto->ota_fw_build),
+                          cfg->ota_fw_build, sizeof(cfg->ota_fw_build));
+    copy_persisted_string(dto->ota_version, sizeof(dto->ota_version),
+                          cfg->ota_version, sizeof(cfg->ota_version));
     dto->dhcp_enable = cfg->dhcp_enable ? 1U : 0U;
     copy_persisted_string(dto->static_ip, sizeof(dto->static_ip), cfg->static_ip, sizeof(cfg->static_ip));
     copy_persisted_string(dto->gateway, sizeof(dto->gateway), cfg->gateway, sizeof(cfg->gateway));
@@ -380,6 +387,10 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
                           dto->firmware_version, sizeof(dto->firmware_version));
     copy_persisted_string(cfg->hardware_version, sizeof(cfg->hardware_version),
                           dto->hardware_version, sizeof(dto->hardware_version));
+    copy_persisted_string(cfg->ota_fw_build, sizeof(cfg->ota_fw_build),
+                          dto->ota_fw_build, sizeof(dto->ota_fw_build));
+    copy_persisted_string(cfg->ota_version, sizeof(cfg->ota_version),
+                          dto->ota_version, sizeof(dto->ota_version));
     cfg->dhcp_enable = dto->dhcp_enable != 0;
     copy_persisted_string(cfg->static_ip, sizeof(cfg->static_ip), dto->static_ip, sizeof(dto->static_ip));
     copy_persisted_string(cfg->gateway, sizeof(cfg->gateway), dto->gateway, sizeof(dto->gateway));
@@ -598,6 +609,8 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
 static void mqtt_broker_default(config_mqtt_profile_t *p)
 {
     memset(p, 0, sizeof(*p));
+    p->port = 1883;          /* Default non-TLS port */
+    p->keepalive_s = 60;     /* MQTT standard default: 60 seconds */
     p->tls_mode = MQTT_TLS_DISABLE;
 }
 
@@ -828,6 +841,10 @@ static esp_err_t snapshot_from_store(config_manager_t *c)
         strlcpy(c->firmware_version, desc->version, sizeof(c->firmware_version));
     }
     strlcpy(c->hardware_version, "1.0", sizeof(c->hardware_version));
+
+    /* OTA tracking: default values before any OTA update */
+    strlcpy(c->ota_fw_build, "000000-00", sizeof(c->ota_fw_build));
+    strlcpy(c->ota_version, "0.0.0", sizeof(c->ota_version));
 
     /* Network + WiFi */
     config_network_t net;
