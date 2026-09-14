@@ -490,6 +490,9 @@ static esp_err_t start_client_for_profile(const config_mqtt_profile_t *p)
             .qos = 1,
             .retain = 1,
         },
+        .network.disable_auto_reconnect = false,
+        .network.timeout_ms = 5000,
+        .network.refresh_connection_after_ms = 0,
     };
 
     if (strlen(p->username) > 0) {
