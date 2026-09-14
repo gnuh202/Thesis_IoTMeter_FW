@@ -491,7 +491,7 @@ static esp_err_t start_client_for_profile(const config_mqtt_profile_t *p)
             .retain = 1,
         },
         .network.disable_auto_reconnect = false,
-        .network.timeout_ms = 5000,
+        .network.timeout_ms = 15000,
         .network.refresh_connection_after_ms = 0,
     };
 
