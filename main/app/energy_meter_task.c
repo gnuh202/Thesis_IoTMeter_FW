@@ -503,6 +503,47 @@ static esp_err_t energy_meter_init(void)
     return ESP_OK;
 }
 
+/* Noise-floor cleanup, applied once per poll BEFORE the snapshot is published
+ * anywhere (LCD, Modbus slave, MQTT, demand accumulator). A de-energised or
+ * idling meter still shows sub-LSB chip noise, but |PF| < 0.1 and
+ * |P|/|Q|/|S| < 1 (W/var/VA) are not physical values in any real installation,
+ * so they are reported as exactly 0. Calibration paths never go through here —
+ * they must see the raw chip truth. */
+#define ENERGY_METER_PF_NOISE_FLOOR 0.1f
+#define ENERGY_METER_POWER_NOISE_FLOOR 1.0f
+
+static void energy_meter_apply_noise_floor(atm90e32as_measurements_t *m)
+{
+    for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+        if (fabsf(m->power_factor[i]) < ENERGY_METER_PF_NOISE_FLOOR) {
+            m->power_factor[i] = 0.0f;
+        }
+        if (fabsf(m->active_power[i]) < ENERGY_METER_POWER_NOISE_FLOOR) {
+            m->active_power[i] = 0.0f;
+        }
+        if (fabsf(m->reactive_power[i]) < ENERGY_METER_POWER_NOISE_FLOOR) {
+            m->reactive_power[i] = 0.0f;
+        }
+        /* S follows P/Q: once both are noise-zeroed, a leftover apparent value
+         * would contradict them on every display. */
+        if (fabsf(m->apparent_power[i]) < ENERGY_METER_POWER_NOISE_FLOOR) {
+            m->apparent_power[i] = 0.0f;
+        }
+    }
+    if (fabsf(m->total_power_factor) < ENERGY_METER_PF_NOISE_FLOOR) {
+        m->total_power_factor = 0.0f;
+    }
+    if (fabsf(m->total_active_power) < ENERGY_METER_POWER_NOISE_FLOOR) {
+        m->total_active_power = 0.0f;
+    }
+    if (fabsf(m->total_reactive_power) < ENERGY_METER_POWER_NOISE_FLOOR) {
+        m->total_reactive_power = 0.0f;
+    }
+    if (fabsf(m->total_apparent_power) < ENERGY_METER_POWER_NOISE_FLOOR) {
+        m->total_apparent_power = 0.0f;
+    }
+}
+
 static void energy_meter_task(void *arg)
 {
     atm90e32as_measurements_t measurements;
@@ -550,6 +591,9 @@ static void energy_meter_task(void *arg)
                 }
             }
             free(cfg);
+
+            /* Clean the noise floor before anything consumes this snapshot. */
+            energy_meter_apply_noise_floor(&measurements);
 
             xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
             s_latest_measurements = measurements;
