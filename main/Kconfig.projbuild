@@ -82,11 +82,12 @@ menu "Application Configuration"
 
             config APP_MB_MASTER_POLL_PERIOD_MS_DEFAULT
                 int "Default poll period (ms)"
-                range 200 60000
-                default 2000
+                range 5000 60000
+                default 5000
                 help
                     Full poll-cycle period on first boot / factory default.
-                    Runtime configurable (NVS / LCD / Web Portal).
+                    Runtime configurable (NVS / LCD / Web Portal); stored in
+                    milliseconds, expressed in seconds on both frontends.
 
             config APP_MB_MASTER_TASK_STACK_SIZE
                 int "Task stack size"
@@ -98,9 +99,12 @@ menu "Application Configuration"
             config APP_MB_MASTER_TASK_PRIORITY
                 int "Task priority"
                 range 1 20
-                default 6
+                default 7
                 help
-                    Priority for the Modbus master poll task.
+                    Priority for the Modbus master poll task. Comm tier: equal
+                    to MQTT / network tasks, above internal tasks (energy, IO
+                    expander, HMI at 6). Must stay below the FreeModbus port
+                    task (CONFIG_FMB_PORT_TASK_PRIO).
         endmenu
 
         menu "TCP Server"
@@ -142,10 +146,11 @@ menu "Application Configuration"
             config APP_MB_TCP_TASK_PRIORITY
                 int "Task priority"
                 range 1 20
-                default 5
+                default 7
                 depends on APP_MB_TCP_ENABLE
                 help
-                    Reserved priority for the future TCP server task.
+                    Reserved priority for the future TCP server task. Comm
+                    tier: equal to MQTT / RTU master tasks.
         endmenu
 
     endmenu
@@ -293,9 +298,11 @@ menu "Application Configuration"
         config APP_HMI_TASK_PRIORITY
             int "HMI test task priority"
             range 1 20
-            default 5
+            default 6
             help
-                Priority for the HMI test task.
+                Priority for the HMI test task. Internal tier: below comm
+                tasks (7), equal to energy meter / IO expander. The HMI task
+                polls the shared I2C bus at ~50 Hz, so it must not be starved.
 
         config APP_HMI_BUZZER_CLICK_MS
             int "HMI buzzer click duration in milliseconds"
@@ -831,9 +838,10 @@ menu "Application Configuration"
         config APP_NETWORK_COMM_TASK_PRIORITY
             int "Network communication task priority"
             range 1 20
-            default 5
+            default 7
             help
-                Defines priority for network communication task.
+                Defines priority for network communication task. Comm tier:
+                equal to MQTT / Modbus tasks, above internal tasks.
 
         config APP_NETWORK_PING_PERIOD_MS
             int "Network ping period ms"
@@ -919,13 +927,13 @@ menu "Application Configuration"
 
         config APP_MQTT_PUBLISH_PERIOD_MS
             int "Default telemetry publish period ms"
-            range 1000 60000
+            range 5000 60000
             default 5000
             help
                 Default period between telemetry publishes. This is only the
                 first-boot default; the runtime value lives in NVS
                 (config_manager_t.mqtt_publish_ms) and can be changed without a
-                rebuild. Must stay inside the product range (1..60 s) that
+                rebuild. Must stay inside the product range (5..60 s) that
                 config_manager_update() enforces on every save.
 
         config APP_MQTT_TASK_STACK_SIZE
@@ -939,9 +947,10 @@ menu "Application Configuration"
         config APP_MQTT_TASK_PRIORITY
             int "MQTT manager task priority"
             range 1 20
-            default 5
+            default 7
             help
-                FreeRTOS priority of the MQTT manager task.
+                FreeRTOS priority of the MQTT manager task. Comm tier: equal
+                to Modbus master / TCP / network tasks, above internal tasks.
 
     endmenu
 

@@ -80,6 +80,17 @@ esp_err_t network_manager_get_status(network_status_t *out)
     return ESP_OK;
 }
 
+bool network_manager_is_config_mode(void)
+{
+    if (s_status_mutex == NULL) {
+        return false;
+    }
+    xSemaphoreTake(s_status_mutex, portMAX_DELAY);
+    bool active = s_status.ap_active;
+    xSemaphoreGive(s_status_mutex);
+    return active;
+}
+
 #ifndef CONFIG_APP_NET_ETH_DOWN_DEBOUNCE_MS
 #define CONFIG_APP_NET_ETH_DOWN_DEBOUNCE_MS 3000
 #endif
@@ -216,6 +227,15 @@ static void network_manager_task(void *arg)
         bool eth_ip = ethernet_driver_has_ip();
         bool sta_ip = wifi_manager_sta_has_ip();
         bool ap_active = wifi_manager_ap_is_active();
+
+        /* The config portal tears the STA down (start_ap). If that happened
+         * while we owned a failover request, forget it — otherwise the task
+         * waits forever on an STA that will never associate and never re-runs
+         * the failover after the portal closes. */
+        if (sta_requested && !wifi_manager_sta_is_enabled()) {
+            ESP_LOGI(TAG, "STA torn down externally; failover request cleared");
+            sta_requested = false;
+        }
 
         /* AP and STA are mutually exclusive. While the config portal is up, skip
          * the failover logic so the task does not race to re-connect the STA.
@@ -373,7 +393,8 @@ esp_err_t network_manager_start(void)
 
     ESP_RETURN_ON_ERROR(config_store_init(), TAG, "config store init failed");
 
-    BaseType_t ok = xTaskCreate(network_manager_task, "net_mgr", 4096, NULL, 5, NULL);
+    BaseType_t ok = xTaskCreate(network_manager_task, "net_mgr", 4096, NULL,
+                                CONFIG_APP_NETWORK_COMM_TASK_PRIORITY, NULL);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_FAIL, TAG, "create net_mgr task failed");
 
     s_started = true;

@@ -107,7 +107,7 @@ typedef enum {
     CFG_DNS,
     CFG_WIFI_SSID,
     CFG_WIFI_PASS,
-    CFG_MQTT_PUBLISH_MS,     /* cfg.mqtt_publish_ms: 1000..60000 (config_manager_update) */
+    CFG_MQTT_PUBLISH_MS,     /* cfg.mqtt_publish_ms: 5000..60000 (config_manager_update) */
     CFG_MB_SLAVE_ID,         /* this device's own RTU slave address (LCD-owned) */
     CFG_MB_BAUD_CODE,        /* master bus baud only (portal-owned) */
     CFG_MB_PARITY_CODE,      /* master bus parity only (portal-owned) */

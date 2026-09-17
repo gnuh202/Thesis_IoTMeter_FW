@@ -38,10 +38,14 @@ esp_err_t mqtt_manager_start(void);
 
 /* Apply the current MQTT config at runtime.
  *
- * The existing manager task synchronously stops and destroys its current
- * esp-mqtt client, reads the broker config again from Configuration Manager,
- * then creates and starts a fresh client. Nothing is saved to or reloaded from
- * NVS. Returns only after that lifecycle attempt has completed. */
+ * Asynchronous: the request is queued (bounded ~250 ms wait) and ESP_OK is
+ * returned as soon as the mqtt task accepts it. The task then stops/destroys
+ * its current esp-mqtt client, re-reads the broker config from Configuration
+ * Manager, and creates a fresh client in its own context — esp_mqtt_client_
+ * stop() can take seconds with no network (15 s connect timeout), so callers
+ * (LCD menu, web portal, console) must never wait for completion. Nothing is
+ * saved to or reloaded from NVS. Returns ESP_ERR_INVALID_STATE only if the
+ * manager has not started or an Apply is already pending. */
 esp_err_t mqtt_manager_apply(void);
 
 /* True if the client currently has a live broker session. */

@@ -2,11 +2,16 @@
 
 #include <stdlib.h>
 #include "esp_check.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
-#define PCF8574_I2C_TIMEOUT_MS 100
+#define PCF8574_I2C_TIMEOUT_MS 300
+/* Scheduling load (WiFi/TLS) can lap a single transfer window; retry brief
+ * timeouts instead of surfacing a failed input read. */
+#define PCF8574_I2C_READ_RETRIES 2
 
 struct pcf8574_dev_t {
     i2c_master_dev_handle_t dev_handle;
@@ -156,10 +161,22 @@ esp_err_t pcf8574_read_port(pcf8574_handle_t handle, uint8_t *value)
     ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
     ESP_RETURN_ON_FALSE(value != NULL, ESP_ERR_INVALID_ARG, TAG, "value is NULL");
 
+    esp_err_t ret = ESP_OK;
     xSemaphoreTake(handle->mutex, portMAX_DELAY);
-    esp_err_t ret = i2c_master_receive(handle->dev_handle, value, 1, PCF8574_I2C_TIMEOUT_MS);
+    for (int attempt = 0; attempt <= PCF8574_I2C_READ_RETRIES; ++attempt) {
+        ret = i2c_master_receive(handle->dev_handle, value, 1, PCF8574_I2C_TIMEOUT_MS);
+        if (ret != ESP_ERR_TIMEOUT) {
+            break;
+        }
+        if (attempt < PCF8574_I2C_READ_RETRIES) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+    }
     xSemaphoreGive(handle->mutex);
 
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "read port failed: %s", esp_err_to_name(ret));
+    }
     return ret;
 }
 

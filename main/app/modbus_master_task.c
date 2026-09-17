@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "mbcontroller.h"
 #include "modbus_meters.h"
+#include "network_manager.h"
 #include "sdkconfig.h"
 #include "system_status.h"
 
@@ -36,7 +37,7 @@
 #define CONFIG_APP_MB_MASTER_TASK_STACK_SIZE 5120
 #endif
 #ifndef CONFIG_APP_MB_MASTER_TASK_PRIORITY
-#define CONFIG_APP_MB_MASTER_TASK_PRIORITY 10
+#define CONFIG_APP_MB_MASTER_TASK_PRIORITY 7
 #endif
 
 #define MB_MASTER_OFFLINE_THRESHOLD 5
@@ -496,6 +497,13 @@ static void modbus_master_task(void *arg)
             }
         }
 
+        /* Config portal active: the operator is doing settings, so pause
+         * polling (cooperative; resumes within ~50 ms of portal close). */
+        if (network_manager_is_config_mode()) {
+            delay_interruptible(MB_MASTER_RECFG_POLL_MS);
+            continue;
+        }
+
         if (s_stack_up && s_cfg.bus_enabled) {
             for (uint8_t i = 0; i < MODBUS_MASTER_SLOT_COUNT; i++) {
                 /* Abort mid-cycle if LCD/console toggled Bus/slot enable. */
@@ -519,7 +527,7 @@ static void modbus_master_task(void *arg)
             continue;
         }
 
-        uint32_t period = s_cfg.poll_period_ms > 0 ? s_cfg.poll_period_ms : 2000;
+        uint32_t period = s_cfg.poll_period_ms > 0 ? s_cfg.poll_period_ms : 5000;
         /* If every enabled slot is hard-offline, slow the whole cycle. */
         bool all_offline = false;
         xSemaphoreTake(s_lock, portMAX_DELAY);

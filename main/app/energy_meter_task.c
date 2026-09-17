@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 #include "measurement_data.h"
 #include "modbus_master_task.h"
+#include "network_manager.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
@@ -511,6 +512,13 @@ static void energy_meter_task(void *arg)
         (uint32_t)(60000U / CONFIG_APP_ENERGY_METER_POLL_PERIOD_MS);
 
     while (1) {
+        /* Config portal active: the operator is doing settings, so pause
+         * SPI polling (cooperative; resumes on the tick after it closes). */
+        if (network_manager_is_config_mode()) {
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_ENERGY_METER_POLL_PERIOD_MS));
+            continue;
+        }
+
         xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
         esp_err_t ret = atm90e32as_read_measurements(s_meter, &measurements);
         esp_err_t energy_ret = ESP_FAIL;

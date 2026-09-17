@@ -671,13 +671,21 @@ static esp_err_t apply_mqtt_from_config(void)
 
 static void process_apply_request(mqtt_apply_request_t *request)
 {
-    if (request == NULL || request->done == NULL) {
+    if (request == NULL) {
         ESP_LOGE(TAG, "invalid MQTT Apply request");
         return;
     }
 
     request->result = apply_mqtt_from_config();
-    xSemaphoreGive(request->done);
+
+    if (request->done != NULL) {
+        /* Synchronous caller: it owns the struct and waits on the semaphore. */
+        xSemaphoreGive(request->done);
+    } else {
+        /* Asynchronous request (done == NULL): the struct is heap-owned and
+         * its lifecycle ends here in the manager task. */
+        free(request);
+    }
 }
 
 /* Publish a cJSON object to a topic, then free it. Takes ownership of root. */
@@ -970,6 +978,13 @@ static void mqtt_manager_task(void *arg)
             last_iface = st.active_iface;
         }
 
+        /* Config portal active: the operator is doing settings. Keep the loop
+         * and Apply servicing alive but pause publishing; on portal close the
+         * next tick publishes immediately (period already elapsed). */
+        if (network_manager_is_config_mode()) {
+            continue;
+        }
+
         if (!s_connected || s_client == NULL) {
             continue;
         }
@@ -1016,29 +1031,31 @@ esp_err_t mqtt_manager_apply(void)
         return ESP_ERR_INVALID_STATE;
     }
     if (xTaskGetCurrentTaskHandle() == s_manager_task) {
-        ESP_LOGE(TAG, "MQTT Apply cannot synchronously wait in the manager task");
+        ESP_LOGE(TAG, "MQTT Apply cannot be requested from the manager task");
         return ESP_ERR_INVALID_STATE;
     }
 
-    mqtt_apply_request_t request = {
-        .done = xSemaphoreCreateBinary(),
-        .result = ESP_FAIL,
-    };
-    if (request.done == NULL) {
-        ESP_LOGE(TAG, "create MQTT Apply completion semaphore failed");
+    /* Fire-and-forget: the client teardown/rebuild runs in the manager task.
+     * Waiting here (the old done-semaphore handoff) blocked the LCD menu,
+     * httpd worker or console for the full esp_mqtt_client_stop() duration —
+     * up to the 15 s connect timeout when there is no network. The config is
+     * already saved; the client follows asynchronously. */
+    mqtt_apply_request_t *request = calloc(1, sizeof(*request));
+    if (request == NULL) {
+        ESP_LOGE(TAG, "alloc MQTT Apply request failed");
         return ESP_ERR_NO_MEM;
     }
+    request->done = NULL;   /* async: no completion wait */
+    request->result = ESP_FAIL;
 
-    mqtt_apply_request_t *request_ptr = &request;
-    if (xQueueSend(s_apply_queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
-        vSemaphoreDelete(request.done);
-        ESP_LOGE(TAG, "queue MQTT Apply request failed");
-        return ESP_FAIL;
+    mqtt_apply_request_t *request_ptr = request;
+    if (xQueueSend(s_apply_queue, &request_ptr, pdMS_TO_TICKS(250)) != pdTRUE) {
+        free(request);
+        ESP_LOGE(TAG, "MQTT Apply already pending; request dropped");
+        return ESP_ERR_INVALID_STATE;
     }
 
-    xSemaphoreTake(request.done, portMAX_DELAY);
-    vSemaphoreDelete(request.done);
-    return request.result;
+    return ESP_OK;
 }
 
 bool mqtt_manager_is_connected(void)

@@ -1062,7 +1062,7 @@ static int cmd_mqtt_cfg(int argc, char **argv)
          * reports the unit it actually accepts: seconds. */
         if (period_s < (int)(CONFIG_MANAGER_MQTT_PERIOD_MIN_MS / 1000U) ||
             period_s > (int)(CONFIG_MANAGER_MQTT_PERIOD_MAX_MS / 1000U)) {
-            printf("period out of range (1..60 seconds)\n");
+            printf("period out of range (5..60 seconds)\n");
             free(cfg);
             return 1;
         }
@@ -2422,7 +2422,7 @@ static esp_err_t register_meter_commands(void)
     s_extmeter_args.name = arg_str0(NULL, "name", "<label>", "slot name (add/set)");
     s_extmeter_args.baud = arg_int0(NULL, "baud", "<0..4>", "bus baud code (bus)");
     s_extmeter_args.parity = arg_int0(NULL, "parity", "<0..2>", "bus parity (bus)");
-    s_extmeter_args.period = arg_int0(NULL, "period", "<ms>", "bus poll period ms (bus)");
+    s_extmeter_args.period = arg_int0(NULL, "period", "<ms>", "bus poll period ms, min 5000 (bus)");
     s_extmeter_args.end = arg_end(10);
     const esp_console_cmd_t extmeter_cmd = {
         .command = "ext-meter",
@@ -2439,12 +2439,12 @@ static esp_err_t register_meter_commands(void)
     s_mqttcfg_args.port = arg_int0(NULL, "port", "<n>", "broker port, e.g. 1883 (set)");
     s_mqttcfg_args.user = arg_str0(NULL, "user", "<user>", "broker username (set)");
     s_mqttcfg_args.pass = arg_str0(NULL, "pass", "<pass>", "broker password (set)");
-    s_mqttcfg_args.period = arg_int0(NULL, "period", "<s>", "publish period in seconds, 1..60 (period)");
+    s_mqttcfg_args.period = arg_int0(NULL, "period", "<s>", "publish period in seconds, 5..60 (period)");
     s_mqttcfg_args.tls = arg_str0(NULL, "tls", "<mode>", "off|ca|mutual|insecure (set); fills the /flash cert paths");
     s_mqttcfg_args.end = arg_end(10);
     const esp_console_cmd_t mqttcfg_cmd = {
         .command = "mqtt-cfg",
-        .help = "MQTT config: mqtt-cfg show | set --uri <h> --port 8883 [--user --pass --tls ca] | enable | disable | period --period <1..60 s>",
+        .help = "MQTT config: mqtt-cfg show | set --uri <h> --port 8883 [--user --pass --tls ca] | enable | disable | period --period <5..60 s>",
         .hint = NULL,
         .func = &cmd_mqtt_cfg,
         .argtable = &s_mqttcfg_args,

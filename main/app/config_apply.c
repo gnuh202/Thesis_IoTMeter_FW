@@ -84,7 +84,10 @@ static esp_err_t apply_mqtt(void)
         ESP_LOGE(TAG, "Apply MQTT failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGI(TAG, "Apply MQTT complete");
+    /* Asynchronous: mqtt_manager_apply only queues the request; the actual
+     * teardown/rebuild runs in the mqtt task (esp_mqtt_client_stop can take
+     * seconds without a network and must never block the caller's UI). */
+    ESP_LOGI(TAG, "Apply MQTT queued; client rebuild runs in the mqtt task");
     return ESP_OK;
 }
 
