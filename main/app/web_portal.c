@@ -157,7 +157,8 @@ static esp_err_t captive_dns_start(void)
         return ESP_FAIL;
     }
 
-    if (xTaskCreate(captive_dns_task, "captive_dns", 3072, NULL, 5, &s_dns_task) != pdPASS) {
+    if (xTaskCreate(captive_dns_task, "captive_dns", 3072, NULL,
+                    CONFIG_APP_NETWORK_COMM_TASK_PRIORITY, &s_dns_task) != pdPASS) {
         close(s_dns_sock);
         s_dns_sock = -1;
         return ESP_ERR_NO_MEM;
@@ -903,7 +904,7 @@ static esp_err_t save_all_post_handler(httpd_req_t *req)
      * back unchanged by update() below.
      *
      * The period is submitted in whole seconds and stored in milliseconds;
-     * anything outside 1..60 is ignored so a bad edit cannot make the whole
+     * anything outside 5..60 is ignored so a bad edit cannot make the whole
      * save fail — the stored value simply survives the attempt. */
     uint32_t v = 0;
     if (form_get_u32(body, "publish_period_s", &v) &&
@@ -947,8 +948,9 @@ static esp_err_t save_all_post_handler(httpd_req_t *req)
         if (form_get_u32(body, "mb_parity", &v) && v <= 2U) {
             cfg->mb_parity_code = (uint8_t)v;
         }
-        if (form_get_u32(body, "mb_period", &v) && v >= 200U && v <= 600000U) {
-            cfg->mb_poll_period_ms = v;
+        /* Submitted in whole seconds, stored in milliseconds (5 s floor). */
+        if (form_get_u32(body, "mb_period", &v) && v >= 5U && v <= 600U) {
+            cfg->mb_poll_period_ms = v * 1000U;
         }
 
         /* Rebuild slots from submitted cards only. Preserve enable flags when
@@ -1828,8 +1830,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         send_select_end(req);
         send_field_end(req);
 
-        snprintf(tmpb, sizeof(tmpb), "%lu", (unsigned long)mcfg->mb_poll_period_ms);
-        send_input(req, "Poll period (ms)", "mb_period", tmpb);
+        snprintf(tmpb, sizeof(tmpb), "%lu", (unsigned long)(mcfg->mb_poll_period_ms / 1000U));
+        send_input(req, "Poll period (seconds)", "mb_period", tmpb);
         httpd_resp_sendstr_chunk(req, "</div>");
 
         httpd_resp_sendstr_chunk(req,
@@ -2154,6 +2156,10 @@ esp_err_t web_portal_start(void)
     cfg.server_port = 80;
     cfg.lru_purge_enable = true;
     cfg.stack_size = 12288;
+    /* While the config-portal AP is up, the portal is the device's only comm
+     * path, so its worker runs at comm-tier priority: page loads must not be
+     * preempted by LCD redraws (HMI) or anything else below the comm tier. */
+    cfg.task_priority = CONFIG_APP_NETWORK_COMM_TASK_PRIORITY;
     /* Base + cert(3) + calib auto + reboot. */
     cfg.max_uri_handlers = 22;
 

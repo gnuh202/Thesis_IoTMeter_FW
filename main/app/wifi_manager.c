@@ -280,9 +280,9 @@ esp_err_t wifi_manager_ap_get_ssid(char *out, size_t out_len)
 }
 
 /*
- * Take the SoftAP down and return to STA-only mode. If STA credentials are
- * configured, reconnect the STA so the data path returns automatically after the
- * user closes the portal. No-op if the AP is not active.
+ * Take the SoftAP down and return to STA-only mode. The STA is left
+ * disconnected: net_mgr owns all STA bring-up and reconnects it as Ethernet
+ * failover when appropriate. No-op if the AP is not active.
  */
 esp_err_t wifi_manager_stop_ap(void)
 {
@@ -293,14 +293,12 @@ esp_err_t wifi_manager_stop_ap(void)
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set STA mode failed");
 
-    /* AP/STA are mutually exclusive (start_ap stopped STA). Bring STA back so
-     * the operator's data path resumes when the portal closes. Credentials
-     * are checked live — they may have arrived via the portal we just tore down. */
+    /* Leave the STA down: net_mgr owns all STA bring-up and reconnects it as
+     * ETH failover when appropriate (ETH down + credentials set). A portal
+     * exit must never orphan a reconnecting STA behind the manager's back. */
     if (wifi_manager_sta_has_credentials()) {
-        s_sta_enabled = true;
-        s_sta_fail_count = 0;
-        esp_wifi_connect();
-        ESP_LOGI(TAG, "SoftAP stopped; STA reconnecting");
+        s_sta_enabled = false;
+        ESP_LOGI(TAG, "SoftAP stopped; STA bring-up owned by network manager");
     } else {
         ESP_LOGI(TAG, "SoftAP stopped (no STA credentials)");
     }

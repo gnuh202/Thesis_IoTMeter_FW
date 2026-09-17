@@ -72,6 +72,15 @@ esp_err_t network_manager_start(void);
 esp_err_t network_manager_get_status(network_status_t *out);
 
 /*
+ * True while the AP config portal is active ("config mode"): the operator is
+ * only doing settings, so long-running pollers (Modbus master, energy meter,
+ * MQTT publishing) cooperatively pause. Cheap, thread-safe, no suspend —
+ * every module just skips its work and resumes on the next loop tick after
+ * the portal closes.
+ */
+bool network_manager_is_config_mode(void);
+
+/*
  * Request the config portal SoftAP (on-demand). Drops the STA so AP/STA never
  * coexist; the STA returns when the portal closes (auto-stop idle timer or
  * explicit stop). Ethernet is unaffected.

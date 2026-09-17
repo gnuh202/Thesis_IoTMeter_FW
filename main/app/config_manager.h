@@ -40,11 +40,16 @@ extern "C" {
 #define CONFIG_MANAGER_MQTT_PATH_LEN 64
 #define CONFIG_MANAGER_MQTT_NAME_LEN 32   /* broker label */
 
-/* Telemetry publish period bounds, in milliseconds (1..60 s). One broker means
+/* Telemetry publish period bounds, in milliseconds (5..60 s). One broker means
  * one interval, and both frontends express it in seconds, so the range is
  * enforced centrally in config_manager_update() rather than per-frontend. */
-#define CONFIG_MANAGER_MQTT_PERIOD_MIN_MS 1000U
+#define CONFIG_MANAGER_MQTT_PERIOD_MIN_MS 5000U
 #define CONFIG_MANAGER_MQTT_PERIOD_MAX_MS 60000U
+
+/* RTU master poll period floor, in milliseconds (5 s minimum policy — the
+ * frontends express it in seconds). The 600000 ms ceiling stays local to
+ * validate_mb_config(). */
+#define CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS 5000U
 
 /* RTU master multi-device slots (PM710 / EM-07K on one RS485 bus). */
 #define CONFIG_MANAGER_MB_SLOT_COUNT 5

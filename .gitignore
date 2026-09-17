@@ -30,7 +30,8 @@ build/
 *.map
 flasher_args.json # Generated in build directory
 sdkconfig.old
-sdkconfig
+# sdkconfig is tracked: the board's exact build configuration is part of the
+# deliverable (Kconfig defaults alone do not capture per-board overrides).
 
 # ESP-IDF dependencies
 # For older versions or manual component management

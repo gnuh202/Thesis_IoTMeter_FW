@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "io_expander.h"
 #include "mbcontroller.h"
+#include "network_manager.h"
 #include "sdkconfig.h"
 #include "system_status.h"
 
@@ -369,6 +370,14 @@ static void modbus_slave_task(void *arg)
             s_reconfigure_pending = false;
             s_reconfigure_result = slave_rebuild_from_current_config();
             if (s_reconfigure_done != NULL) xSemaphoreGive(s_reconfigure_done);
+            continue;
+        }
+        /* Config portal active: the operator is doing settings. Pause frame
+         * servicing (cooperative; resumes within ~50 ms of portal close).
+         * The reconfigure branch above still runs, so an Apply made during
+         * the portal is never lost. */
+        if (network_manager_is_config_mode()) {
+            vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
         /* Do not block indefinitely in mbc_slave_check_event(): a reconfigure

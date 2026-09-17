@@ -323,11 +323,12 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
         dto->wiring_mode > 1U) {
         return ESP_ERR_INVALID_ARG;
     }
-    /* Reject an out-of-range period outright: config_manager_update() refuses
-     * to store one, so accepting it here would leave the device unable to save
-     * any configuration change until a re-provision. */
-    if (dto->mqtt_publish_ms < CONFIG_MANAGER_MQTT_PERIOD_MIN_MS ||
-        dto->mqtt_publish_ms > CONFIG_MANAGER_MQTT_PERIOD_MAX_MS) {
+    /* Above the maximum is corruption — reject outright. Below the minimum is
+     * usually a legacy snapshot from before the 5 s floor, which must still
+     * load; normalize_loaded_periods() clamps it after the legacy-domain
+     * overlay, and config_manager_update() rejects new saves outside the range
+     * so a frontend bug surfaces instead of silently persisting. */
+    if (dto->mqtt_publish_ms > CONFIG_MANAGER_MQTT_PERIOD_MAX_MS) {
         return ESP_ERR_INVALID_ARG;
     }
     /* Appended-field guard: a blob written by older firmware stops before these,
@@ -980,6 +981,25 @@ static esp_err_t snapshot_to_store(const config_manager_t *cfg)
     return ret;
 }
 
+/* Legacy snapshots may hold values below the current period floors (RTU poll
+ * was 200..600000 ms, MQTT publish was 1..60 s). Clamp on load so an upgrade
+ * keeps the stored configuration instead of failing future update() saves. */
+static void normalize_loaded_periods(config_manager_t *c)
+{
+    if (c->mqtt_publish_ms < CONFIG_MANAGER_MQTT_PERIOD_MIN_MS) {
+        ESP_LOGW(TAG, "mqtt publish %u ms below the %u ms floor; clamped",
+                 (unsigned)c->mqtt_publish_ms,
+                 (unsigned)CONFIG_MANAGER_MQTT_PERIOD_MIN_MS);
+        c->mqtt_publish_ms = CONFIG_MANAGER_MQTT_PERIOD_MIN_MS;
+    }
+    if (c->mb_poll_period_ms < CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS) {
+        ESP_LOGW(TAG, "mb poll %u ms below the %u ms floor; clamped",
+                 (unsigned)c->mb_poll_period_ms,
+                 (unsigned)CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS);
+        c->mb_poll_period_ms = CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS;
+    }
+}
+
 esp_err_t config_manager_init(void)
 {
     if (s_lock == NULL) {
@@ -1010,6 +1030,7 @@ esp_err_t config_manager_load(void)
                 legacy_shadow_store(tmp);
                 ESP_LOGI(TAG, "loaded full configuration snapshot v%u",
                          (unsigned)CONFIG_SNAPSHOT_VERSION);
+                normalize_loaded_periods(tmp);
                 xSemaphoreTake(s_lock, portMAX_DELAY);
                 s_cfg = *tmp;
                 s_loaded = true;
@@ -1041,6 +1062,7 @@ esp_err_t config_manager_load(void)
         return migrate_ret;
     }
     legacy_shadow_store(tmp);
+    normalize_loaded_periods(tmp);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_cfg = *tmp;
@@ -1110,7 +1132,8 @@ static esp_err_t validate_mb_config(const config_manager_t *c)
     ESP_RETURN_ON_FALSE(c->mb_parity_code <= 2U, ESP_ERR_INVALID_ARG, TAG, "invalid mb parity");
     ESP_RETURN_ON_FALSE(c->mb_slave_baud_code <= 4U, ESP_ERR_INVALID_ARG, TAG,
                         "invalid mb slave baud");
-    ESP_RETURN_ON_FALSE(c->mb_poll_period_ms >= 200U && c->mb_poll_period_ms <= 600000U,
+    ESP_RETURN_ON_FALSE(c->mb_poll_period_ms >= CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS &&
+                        c->mb_poll_period_ms <= 600000U,
                         ESP_ERR_INVALID_ARG, TAG, "invalid mb poll period");
 
     for (size_t i = 0; i < CONFIG_MANAGER_MB_SLOT_COUNT; i++) {
@@ -1168,11 +1191,11 @@ esp_err_t config_manager_update(const config_manager_t *in)
     size_t ap_pass_len = strnlen(in->ap_pass, sizeof(in->ap_pass));
     ESP_RETURN_ON_FALSE(ap_pass_len == 0U || (ap_pass_len >= 8U && ap_pass_len <= 63U),
                         ESP_ERR_INVALID_ARG, TAG, "invalid ap_pass (empty or 8..63)");
-    /* Publish period: 1..60 s, rejected rather than clamped so a frontend bug
+    /* Publish period: 5..60 s, rejected rather than clamped so a frontend bug
      * surfaces instead of silently persisting a different cadence. */
     ESP_RETURN_ON_FALSE(in->mqtt_publish_ms >= CONFIG_MANAGER_MQTT_PERIOD_MIN_MS &&
                         in->mqtt_publish_ms <= CONFIG_MANAGER_MQTT_PERIOD_MAX_MS,
-                        ESP_ERR_INVALID_ARG, TAG, "invalid mqtt_publish_ms (1000..60000)");
+                        ESP_ERR_INVALID_ARG, TAG, "invalid mqtt_publish_ms (5000..60000)");
     ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
