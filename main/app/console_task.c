@@ -2422,7 +2422,7 @@ static esp_err_t register_meter_commands(void)
     s_extmeter_args.name = arg_str0(NULL, "name", "<label>", "slot name (add/set)");
     s_extmeter_args.baud = arg_int0(NULL, "baud", "<0..4>", "bus baud code (bus)");
     s_extmeter_args.parity = arg_int0(NULL, "parity", "<0..2>", "bus parity (bus)");
-    s_extmeter_args.period = arg_int0(NULL, "period", "<ms>", "bus poll period ms, min 5000 (bus)");
+    s_extmeter_args.period = arg_int0(NULL, "period", "<ms>", "bus poll period ms, 5000..60000 (bus)");
     s_extmeter_args.end = arg_end(10);
     const esp_console_cmd_t extmeter_cmd = {
         .command = "ext-meter",

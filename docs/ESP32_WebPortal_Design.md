@@ -38,7 +38,8 @@ Tái dùng `config_store` (đã có sẵn, không thêm struct):
 **MQTT** (`cfg.mqtt` — đúng MỘT broker, không còn danh sách profile):
 - Label, server address, port, username, password, keepalive
 - Connection security (`off` / `ca` / `mutual`) + 3 file chứng chỉ upload qua `/api/cert`
-- Publish interval nhập theo **giây** (1–60), lưu `mqtt_publish_ms`
+- Publish interval: dropdown chọn sẵn theo **giây**, 5–60 s bước 5 s (không còn
+  ô nhập tự do), lưu `mqtt_publish_ms`
 - **Không có control bật/tắt MQTT** — flag `mqtt.enable` thuộc về LCD (Settings ▸ MQTT); portal không parse nó nên một lần Save không bao giờ tự bật/tắt telemetry sau lưng operator
 
 **System** (`config_system_t`):
@@ -90,8 +91,9 @@ neo tới từng `<details>`:
   Connection security**: `off` → ẩn cả 3; `ca` → chỉ CA; `mutual` → cả 3. Server render sẵn
   đúng trạng thái theo `tls_mode` hiện tại (no-script vẫn đúng), script `mqttApplyCertUi()`
   đồng bộ lại khi đổi dropdown.
-- **RTU master** — baud/parity bus và danh sách công tơ downstream; địa chỉ + baud slave của
-  thiết bị nằm ở LCD chứ không phải đây.
+- **RTU master** — baud/parity bus, chu kỳ poll chọn từ dropdown 5–60 s (bước
+  5 s, cùng dropdown với MQTT) và danh sách công tơ downstream; địa chỉ + baud
+  slave của thiết bị nằm ở LCD chứ không phải đây.
 - **Calibration** — chỉ tồn tại khi build bật `CONFIG_APP_WEB_CALIB_ENABLE` (default `n`);
   sản phẩm không có mục này.
 

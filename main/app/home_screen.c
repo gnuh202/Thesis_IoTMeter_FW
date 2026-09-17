@@ -2692,7 +2692,7 @@ static esp_err_t menu_rtu_info(lcd_menu_t *menu, const lcd_menu_item_t *item, vo
     }
 
     if (n == 0) {
-        show_info("RTU INFO", "No devices", "Add via portal", "");
+        show_info("RTU DEVICES", "No devices", "Add via portal", "");
         return ESP_OK;
     }
 
@@ -3076,13 +3076,48 @@ static const lcd_menu_screen_t s_screen_meter_setup = {
     .item_count = sizeof(s_items_meter_setup) / sizeof(s_items_meter_setup[0]),
 };
 
-/* RTU Master keeps its submenu: Info drills into per-slot live readings
- * (V/I/poll count) that no other screen exposes, and Active toggles the bus and
- * each slot. Both are real, distinct destinations. */
+/* RTU Master submenu: Device list browses the configured downstream meters (the
+ * old Info leaf), Active toggles the bus and each slot, and Poll edits the bus
+ * cadence in whole seconds (5..60, same window as the web portal dropdown). */
+#define HOME_RTU_POLL_MIN_S (CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS / 1000U)
+#define HOME_RTU_POLL_MAX_S (CONFIG_MANAGER_MB_POLL_PERIOD_MAX_MS / 1000U)
+
+static void rtu_poll_value(lcd_menu_t *m, const lcd_menu_item_t *it,
+                           char *buf, size_t buf_size, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) { snprintf(buf, buf_size, "< ?>  "); return; }
+    snprintf(buf, buf_size, "<%lus>  ",
+             (unsigned long)(c->mb_poll_period_ms / 1000U));
+}
+
+static esp_err_t rtu_poll_edit(lcd_menu_t *m, const lcd_menu_item_t *it, void *ctx)
+{
+    (void)m; (void)it; (void)ctx;
+    const config_manager_t *c = cfg_view();
+    if (c == NULL) return ESP_ERR_INVALID_STATE;
+    uint32_t seconds = c->mb_poll_period_ms / 1000U;
+    if (!edit_setting_seconds("RTU POLL", seconds,
+                              HOME_RTU_POLL_MIN_S, HOME_RTU_POLL_MAX_S,
+                              &seconds)) {
+        return ESP_OK;   /* LEFT: discard, row keeps the old value */
+    }
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) return ESP_ERR_NO_MEM;
+    *cfg = *c;
+    cfg->mb_poll_period_ms = seconds * 1000U;
+    (void)update_save_apply(cfg, CONFIG_APPLY_MODBUS_MASTER);
+    free(cfg);
+    return ESP_OK;
+}
+
 static const lcd_menu_item_t s_items_rtu_master[] = {
-    {.label = "Info",   .type = LCD_MENU_ITEM_ACTION, .action = menu_rtu_info},
-    {.label = "Active", .type = LCD_MENU_ITEM_ACTION, .action = menu_rtu_active},
-    {.label = "Back",   .type = LCD_MENU_ITEM_BACK},
+    {.label = "Device list", .type = LCD_MENU_ITEM_ACTION, .action = menu_rtu_info},
+    {.label = "Active",      .type = LCD_MENU_ITEM_ACTION, .action = menu_rtu_active},
+    {.label = "Poll",        .type = LCD_MENU_ITEM_VALUE,
+     .value_get = rtu_poll_value, .action = rtu_poll_edit},
+    {.label = "Back",        .type = LCD_MENU_ITEM_BACK},
 };
 static const lcd_menu_screen_t s_screen_rtu_master = {
     .title = "RTU MASTER",
@@ -3110,7 +3145,7 @@ static const lcd_menu_screen_t s_screen_rtu_slave = {
 /* MQTT: the operator's only control over telemetry. Status is the device-wide
  * enable (the web portal deliberately has no such control — it configures the
  * broker, this toggle decides whether it is used at all), and Period is the
- * publish cadence in whole seconds, 1..60 to match the guard in
+ * publish cadence in whole seconds, 5..60 to match the guard in
  * config_manager_update(). CONFIG_APPLY_MQTT rebuilds the client
  * asynchronously, so both rows take effect without a reboot; apply does not
  * notify the home screen, so Status also refreshes the s_mqtt_enabled mirror

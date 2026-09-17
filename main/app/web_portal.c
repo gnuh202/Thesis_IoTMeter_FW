@@ -805,6 +805,25 @@ static void send_field_end(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, "</div>");
 }
 
+/* A 5..60 s cadence picker in 5 s steps, shared by the MQTT publish interval
+ * and the RTU master poll period. A dropdown instead of a free-text field so
+ * an out-of-range value can never reach the save path, and the accepted range
+ * is exactly what the options show. */
+static void send_seconds_select(httpd_req_t *req, const char *label, const char *name,
+                                unsigned min_s, unsigned max_s, unsigned current_s)
+{
+    send_select_start(req, label, name, false);
+    for (unsigned s = min_s; s <= max_s; s += 5U) {
+        char val[4];
+        char txt[12];
+        snprintf(val, sizeof(val), "%u", s);
+        snprintf(txt, sizeof(txt), "%u seconds", s);
+        send_option(req, val, txt, s == current_s);
+    }
+    send_select_end(req);
+    send_field_end(req);
+}
+
 /* Three choices, not four: MQTT_TLS_INSECURE skips server verification and is a
  * console-only bring-up mode, so it is never selectable here. */
 static bool tls_mode_from_form(const char *s, mqtt_tls_mode_t *out)
@@ -948,8 +967,11 @@ static esp_err_t save_all_post_handler(httpd_req_t *req)
         if (form_get_u32(body, "mb_parity", &v) && v <= 2U) {
             cfg->mb_parity_code = (uint8_t)v;
         }
-        /* Submitted in whole seconds, stored in milliseconds (5 s floor). */
-        if (form_get_u32(body, "mb_period", &v) && v >= 5U && v <= 600U) {
+        /* Submitted in whole seconds, stored in milliseconds (5..60 s window,
+         * the same dropdown the MQTT publish interval uses). */
+        if (form_get_u32(body, "mb_period", &v) &&
+            v >= CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS / 1000U &&
+            v <= CONFIG_MANAGER_MB_POLL_PERIOD_MAX_MS / 1000U) {
             cfg->mb_poll_period_ms = v * 1000U;
         }
 
@@ -1655,7 +1677,12 @@ static void send_mqtt_broker_block(httpd_req_t *req, const config_mqtt_profile_t
      * below does not split the remaining half-width fields: that leaves
      * Port|Keep-alive and Username|Password each on a full row. */
     send_input_ex(req, "Broker name", "mqtt_name", p->name, false, "Eg. Main-Broker");
-    send_input(req, "Publish interval (seconds)", "publish_period_s", period_s);
+    {
+        unsigned cur_s = (unsigned)strtoul(period_s, NULL, 10);
+        send_seconds_select(req, "Publish interval", "publish_period_s",
+                            CONFIG_MANAGER_MQTT_PERIOD_MIN_MS / 1000U,
+                            CONFIG_MANAGER_MQTT_PERIOD_MAX_MS / 1000U, cur_s);
+    }
     send_input_ex(req, "Server address", "mqtt_uri", p->broker, true, "Eg. 192.168.1.100 or broker.example.com");
     snprintf(buf, sizeof(buf), "%u", (unsigned)p->port);
     send_input(req, "Port", "mqtt_port", buf);
@@ -1797,7 +1824,6 @@ static esp_err_t root_get_handler(httpd_req_t *req)
      * Collapsible; ships closed because the bus is configured less often than
      * network/MQTT. */
     {
-        char tmpb[24];
         unsigned used_n = 0;
         for (int i = 0; i < CONFIG_MANAGER_MB_SLOT_COUNT; i++) {
             if (mcfg->mb_slots[i].used) {
@@ -1830,8 +1856,10 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         send_select_end(req);
         send_field_end(req);
 
-        snprintf(tmpb, sizeof(tmpb), "%lu", (unsigned long)(mcfg->mb_poll_period_ms / 1000U));
-        send_input(req, "Poll period (seconds)", "mb_period", tmpb);
+        send_seconds_select(req, "Poll period", "mb_period",
+                            CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS / 1000U,
+                            CONFIG_MANAGER_MB_POLL_PERIOD_MAX_MS / 1000U,
+                            mcfg->mb_poll_period_ms / 1000U);
         httpd_resp_sendstr_chunk(req, "</div>");
 
         httpd_resp_sendstr_chunk(req,
