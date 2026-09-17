@@ -981,9 +981,9 @@ static esp_err_t snapshot_to_store(const config_manager_t *cfg)
     return ret;
 }
 
-/* Legacy snapshots may hold values below the current period floors (RTU poll
- * was 200..600000 ms, MQTT publish was 1..60 s). Clamp on load so an upgrade
- * keeps the stored configuration instead of failing future update() saves. */
+/* Legacy snapshots may hold periods outside the current windows (RTU poll was
+ * 200..600000 ms, MQTT publish was 1..60 s). Clamp on load so an upgrade keeps
+ * the stored configuration instead of failing future update() saves. */
 static void normalize_loaded_periods(config_manager_t *c)
 {
     if (c->mqtt_publish_ms < CONFIG_MANAGER_MQTT_PERIOD_MIN_MS) {
@@ -997,6 +997,12 @@ static void normalize_loaded_periods(config_manager_t *c)
                  (unsigned)c->mb_poll_period_ms,
                  (unsigned)CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS);
         c->mb_poll_period_ms = CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS;
+    }
+    if (c->mb_poll_period_ms > CONFIG_MANAGER_MB_POLL_PERIOD_MAX_MS) {
+        ESP_LOGW(TAG, "mb poll %u ms above the %u ms ceiling; clamped",
+                 (unsigned)c->mb_poll_period_ms,
+                 (unsigned)CONFIG_MANAGER_MB_POLL_PERIOD_MAX_MS);
+        c->mb_poll_period_ms = CONFIG_MANAGER_MB_POLL_PERIOD_MAX_MS;
     }
 }
 
@@ -1133,7 +1139,7 @@ static esp_err_t validate_mb_config(const config_manager_t *c)
     ESP_RETURN_ON_FALSE(c->mb_slave_baud_code <= 4U, ESP_ERR_INVALID_ARG, TAG,
                         "invalid mb slave baud");
     ESP_RETURN_ON_FALSE(c->mb_poll_period_ms >= CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS &&
-                        c->mb_poll_period_ms <= 600000U,
+                        c->mb_poll_period_ms <= CONFIG_MANAGER_MB_POLL_PERIOD_MAX_MS,
                         ESP_ERR_INVALID_ARG, TAG, "invalid mb poll period");
 
     for (size_t i = 0; i < CONFIG_MANAGER_MB_SLOT_COUNT; i++) {

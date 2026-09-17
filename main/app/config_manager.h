@@ -46,10 +46,11 @@ extern "C" {
 #define CONFIG_MANAGER_MQTT_PERIOD_MIN_MS 5000U
 #define CONFIG_MANAGER_MQTT_PERIOD_MAX_MS 60000U
 
-/* RTU master poll period floor, in milliseconds (5 s minimum policy — the
- * frontends express it in seconds). The 600000 ms ceiling stays local to
- * validate_mb_config(). */
+/* RTU master poll period bounds, in milliseconds (5..60 s — same window as the
+ * MQTT publish period; both frontends express it in seconds). Enforced centrally
+ * in config_manager_update(); values above the ceiling are clamped down on load. */
 #define CONFIG_MANAGER_MB_POLL_PERIOD_MIN_MS 5000U
+#define CONFIG_MANAGER_MB_POLL_PERIOD_MAX_MS 60000U
 
 /* RTU master multi-device slots (PM710 / EM-07K on one RS485 bus). */
 #define CONFIG_MANAGER_MB_SLOT_COUNT 5
