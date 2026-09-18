@@ -1246,7 +1246,7 @@ static int cmd_mb_master_ref(int argc, char **argv)
                 type_name = "UNKNOWN";
             }
 
-            const char *online_str = status.online ? "ONLINE" : "OFFLINE";
+            const char *online_str = modbus_master_dev_state_name(status.state);
 
             printf("%-6u %-10u %-10s %-20s %-10s\n",
                    (unsigned)slot,
@@ -1853,7 +1853,7 @@ static int cmd_ext_meter(int argc, char **argv)
             modbus_master_slot_status_t st;
             const char *on = "?";
             if (modbus_master_get_slot_status((uint8_t)i, &st) == ESP_OK) {
-                on = !st.enabled ? "off" : (st.online ? "online" : "offline");
+                on = modbus_master_dev_state_name(st.state);
             }
             printf("  slot%u name=%s type=%s id=%u en=%d %s\n",
                    i, s->name[0] ? s->name : "-",

@@ -2603,10 +2603,12 @@ static void menu_rtu_slot_detail(uint8_t slot)
     strlcpy(line, scratch, sizeof(line));
     put_line(1, line);
 
-    /* Row2: slave id + link state + poll count.
-     * OFF = slot disabled, ON = online, --- = enabled but not answering yet. */
+    /* Row2: slave id + device state + poll count.
+     * ON = answering, OFF = enabled but missed 5 consecutive polls (device
+     * down), --- = master not polling (bus/slot disabled or portal up). */
     if (have_st) {
-        const char *link = !st.enabled ? "OFF" : (st.online ? "ON" : "---");
+        const char *link = st.state == MODBUS_MASTER_DEV_ON ? "ON" :
+                           st.state == MODBUS_MASTER_DEV_OFF ? "OFF" : "---";
         snprintf(scratch, sizeof(scratch), "ID %u %s P%lu",
                  (unsigned)st.slave_id, link, (unsigned long)st.poll_count);
         strlcpy(line, scratch, sizeof(line));

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "modbus_master_task.h"
 
 #define MQTT_TELEMETRY_MAX_SLAVES 5
 
@@ -39,9 +40,12 @@ typedef struct {
     char device_name[32];       // from config slot name
     uint8_t slave_id;           // Modbus address
     uint8_t device_type;        // METER_DEV_PM710 or METER_DEV_EM07K
-    bool online;
+    modbus_master_dev_state_t state;  // ON / OFF / INACTIVE (see modbus_master_task.h)
+    bool online;                // convenience flag: true only when state == ON
 
-    // Measurements (power in kW/kvar/kVA)
+    // Measurements (power in kW/kvar/kVA). Copied from the slot cache only
+    // when trustworthy (state ON and cache valid); otherwise they stay 0 —
+    // a lost device publishes the default zeros, never stale numbers.
     float voltage[3];           // V
     float current[3];           // A
     float active_power_kw;      // kW (total)

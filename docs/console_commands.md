@@ -305,7 +305,7 @@ ref compare --id <slave_id> --phase <a|b|c> [--samples <N>] [--interval <ms>]
 
 | Subcommand | Việc |
 |---|---|
-| `list` | liệt kê tất cả các slot Modbus đã cấu hình (slave ID, device type, name, online status) |
+| `list` | liệt kê tất cả các slot Modbus đã cấu hình (slave ID, device type, name, device state) |
 | `read --id <N>` | đọc công suất từ reference meter (hỗ trợ nhiều mẫu để tính trung bình) |
 | `compare --id <N> --phase <a\|b\|c>` | **so sánh đồng thời** P_ref và P_meter, tự động tính error % |
 
@@ -329,9 +329,14 @@ ref compare --id <slave_id> --phase <a|b|c> [--samples <N>] [--interval <ms>]
 ref list
 # Output:
 # Slot   Slave ID   Type       Name                 Status
-# 0      1          PM710      Main-Meter           ONLINE
-# 1      2          EM07K      Phase-Meter          OFFLINE
+# 0      1          PM710      Main-Meter           ON
+# 1      2          EM07K      Phase-Meter          OFF
 ```
+
+Trạng thái device (tri-state):
+- **ON** — thiết bị trả lời lần poll gần nhất
+- **OFF** — master đang poll nhưng thiết bị mất kết nối (5 lần poll liên tiếp không ack)
+- **INACTIVE** — master không poll (bus/slot bị tắt hoặc portal config đang bật)
 
 **2. Đọc công suất từ reference meter (1 mẫu):**
 ```bash

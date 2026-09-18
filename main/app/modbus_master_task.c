@@ -70,6 +70,7 @@ typedef struct {
     bool online;
     uint32_t poll_count;
     uint32_t error_count;
+    uint32_t last_ok_tick;    /* xTaskGetTickCount() of last successful poll */
 } mb_slot_rt_t;
 
 static void *s_master_handler;
@@ -209,6 +210,7 @@ static void commit_slot(uint8_t slot, const meter_readings_t *local, bool ok)
         rt->readings = *local;
         rt->readings_valid = true;
         rt->error_count = 0;
+        rt->last_ok_tick = xTaskGetTickCount();
         if (!rt->online) {
             rt->online = true;
             went_online = true;
@@ -598,8 +600,38 @@ esp_err_t modbus_master_get_slot_status(uint8_t slot, modbus_master_slot_status_
     out->readings_valid = s_slot_rt[slot].readings_valid;
     out->poll_count = s_slot_rt[slot].poll_count;
     out->error_count = s_slot_rt[slot].error_count;
+
+    /*
+     * Single place that derives the tri-state:
+     *   INACTIVE - master not polling this slot: bus disabled, slot disabled,
+     *              or config portal up (polling paused). State is unknown.
+     *   OFF      - master actively polling but the slot missed the offline
+     *              threshold (5 consecutive failed polls).
+     *   ON       - the slot answered its last poll.
+     */
+    if (!s_cfg.bus_enabled || !out->enabled || network_manager_is_config_mode()) {
+        out->state = MODBUS_MASTER_DEV_INACTIVE;
+    } else if (out->online) {
+        out->state = MODBUS_MASTER_DEV_ON;
+    } else {
+        out->state = MODBUS_MASTER_DEV_OFF;
+    }
+
+    /* Tick-count subtraction is wrap-safe. last_ok_tick==0 with no success
+     * ever taken still reports the true age of the (invalid) cache. */
+    out->reading_age_ms = (xTaskGetTickCount() - s_slot_rt[slot].last_ok_tick) *
+                          portTICK_PERIOD_MS;
     xSemaphoreGive(s_lock);
     return ESP_OK;
+}
+
+const char *modbus_master_dev_state_name(modbus_master_dev_state_t state)
+{
+    switch (state) {
+    case MODBUS_MASTER_DEV_ON:  return "ON";
+    case MODBUS_MASTER_DEV_OFF: return "OFF";
+    default:                    return "INACTIVE";
+    }
 }
 
 esp_err_t modbus_master_get_status(modbus_master_status_t *out)

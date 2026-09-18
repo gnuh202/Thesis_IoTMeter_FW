@@ -754,19 +754,26 @@ static uint8_t prepare_slave_telemetry(mqtt_telemetry_slave_t slaves[MQTT_TELEME
         strlcpy(s->device_name, status.name, sizeof(s->device_name));
         s->slave_id = status.slave_id;
         s->device_type = status.type;
-        s->online = status.online;
+        s->state = status.state;
+        s->online = (status.state == MODBUS_MASTER_DEV_ON);
 
-        meter_readings_t r = {0};
-        if (modbus_master_get_readings_slot(slot, &r) == ESP_OK) {
-            memcpy(s->voltage, r.voltage, sizeof(s->voltage));
-            memcpy(s->current, r.current, sizeof(s->current));
+        /* Data authenticity: copy cached readings only when they are
+         * trustworthy — device answered its last poll and the cache is
+         * valid. Every other state leaves the values at the zero default,
+         * so MQTT never carries stale numbers. */
+        if (status.state == MODBUS_MASTER_DEV_ON && status.readings_valid) {
+            meter_readings_t r = {0};
+            if (modbus_master_get_readings_slot(slot, &r) == ESP_OK) {
+                memcpy(s->voltage, r.voltage, sizeof(s->voltage));
+                memcpy(s->current, r.current, sizeof(s->current));
 
-            s->active_power_kw = roundf(r.active_power / 10.0f) / 100.0f;
-            s->reactive_power_kvar = roundf(r.reactive_power / 10.0f) / 100.0f;
-            s->apparent_power_kva = roundf(r.apparent_power / 10.0f) / 100.0f;
-            s->power_factor = r.power_factor;
-            s->frequency = r.frequency;
-            s->active_energy_kwh = r.active_energy;
+                s->active_power_kw = roundf(r.active_power / 10.0f) / 100.0f;
+                s->reactive_power_kvar = roundf(r.reactive_power / 10.0f) / 100.0f;
+                s->apparent_power_kva = roundf(r.apparent_power / 10.0f) / 100.0f;
+                s->power_factor = r.power_factor;
+                s->frequency = r.frequency;
+                s->active_energy_kwh = r.active_energy;
+            }
         }
     }
 
@@ -820,8 +827,18 @@ static void publish_telemetry(void)
             cJSON_AddNumberToObject(slave_obj, "id", s->slave_id);
             cJSON_AddStringToObject(slave_obj, "type",
                 s->device_type == METER_DEV_PM710 ? "PM710" : "EM07K");
+            /*
+             * Tri-state so consumers can tell "device down" apart from
+             * "master not polling": on / off / inactive. `online` is kept
+             * for backward compatibility (true only when state == on).
+             */
+            cJSON_AddStringToObject(slave_obj, "state",
+                s->state == MODBUS_MASTER_DEV_ON ? "on" :
+                s->state == MODBUS_MASTER_DEV_OFF ? "off" : "inactive");
             cJSON_AddBoolToObject(slave_obj, "online", s->online);
 
+            /* Values are the zero default whenever the device is not
+             * answering (state != on) — no stale numbers are published. */
             cJSON *sv = cJSON_AddArrayToObject(slave_obj, "v");
             cJSON *si = cJSON_AddArrayToObject(slave_obj, "i");
             for (int ph = 0; ph < 3; ph++) {
