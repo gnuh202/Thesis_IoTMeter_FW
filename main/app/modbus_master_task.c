@@ -202,12 +202,37 @@ static float float_from_regs_abcd(uint16_t hi, uint16_t lo)
 /* Noise-floor cleanup for slave meters, mirroring the main meter's
  * energy_meter_apply_noise_floor(): |PF| < 0.1 and |P|/|Q|/|S| < 1 (W/var/VA)
  * are chip noise on an idle device, not physical values, so every consumer
- * (LCD, MQTT, console) sees a clean no-load state. */
+ * (LCD, MQTT, console) sees a clean no-load state.
+ *
+ * A no-load gate on RMS current runs first, same rationale as the main
+ * meter: CTs packed together in the cabinet cross-couple, so a slot with
+ * no real load must not report pickup as current/power/PF. No hysteresis
+ * here — the poll cadence is seconds and these values only feed snapshot
+ * consumers. */
+#ifndef CONFIG_APP_METER_NOLOAD_CURRENT_MA
+#define CONFIG_APP_METER_NOLOAD_CURRENT_MA 50
+#endif
 #define MB_MASTER_PF_NOISE_FLOOR 0.1f
 #define MB_MASTER_POWER_NOISE_FLOOR 1.0f
+#define MB_MASTER_NOLOAD_CURRENT_A ((float)CONFIG_APP_METER_NOLOAD_CURRENT_MA / 1000.0f)
 
 static void meter_readings_apply_noise_floor(meter_readings_t *r)
 {
+    bool any_loaded = false;
+    for (int i = 0; i < 3; i++) {
+        if (r->current[i] < MB_MASTER_NOLOAD_CURRENT_A) {
+            r->current[i] = 0.0f;
+            r->active_power_ph[i] = 0.0f;
+        } else {
+            any_loaded = true;
+        }
+    }
+    if (!any_loaded) {
+        r->active_power = 0.0f;
+        r->reactive_power = 0.0f;
+        r->apparent_power = 0.0f;
+        r->power_factor = 0.0f;
+    }
     for (int i = 0; i < 3; i++) {
         if (fabsf(r->active_power_ph[i]) < MB_MASTER_POWER_NOISE_FLOOR) {
             r->active_power_ph[i] = 0.0f;

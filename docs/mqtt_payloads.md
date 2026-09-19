@@ -9,6 +9,8 @@
 - Thêm `p_kw_ph`: công suất P từng pha (kW) cho main và slaves
 - Noise floor cho slave meters (|PF| < 0.1, |P|/|Q|/|S| < 1) như main meter
 - Giá trị sau làm tròn về 0 luôn là +0 — không bao giờ publish/hiển thị `-0`
+- No-load gate theo dòng (mặc định 50 mA, `APP_METER_NOLOAD_CURRENT_MA`):
+  pha không có tải → I/P/Q/S/PF = 0, chống nhiễu xuyên âm giữa các CT xếp sát
 
 **Thay đổi chính (2.1):**
 - Slaves: thêm trường `state` (on/off/inactive), `online` true chỉ khi `state="on"`
@@ -483,7 +485,7 @@ client.loop_forever()
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2.2 | 2026-09-19 | • Thêm `p_kw_ph` (P từng pha, kW, 2 số lẻ) cho main và slaves<br>• Noise floor cho slaves (|PF| < 0.1, \|P\|/\|Q\|/\|S\| < 1)<br>• Giá trị làm tròn về 0 luôn là +0, không bao giờ `-0` |
+| 2.2 | 2026-09-19 | • Thêm `p_kw_ph` (P từng pha, kW, 2 số lẻ) cho main và slaves<br>• Noise floor cho slaves (|PF| < 0.1, \|P\|/\|Q\|/\|S\| < 1)<br>• Giá trị làm tròn về 0 luôn là +0, không bao giờ `-0`<br>• No-load gate theo dòng (50 mA): pha rỗi → I/P/Q/S/PF = 0 (chống crosstalk CT) |
 | 2.1 | 2026-09-18 | • Slaves: thêm `state` (on/off/inactive) — phân biệt device off với master inactive<br>• `online` giờ true chỉ khi `state="on"`<br>• Data authenticity: khi state ≠ on, mọi giá trị đo về 0 (không publish stale data) |
 | 2.0 | 2026-09-14 | • Power units changed to kW/kvar/kVA<br>• Multi-device support (main + slaves)<br>• IO fields in telemetry<br>• Relay cmd simplified to plain string |
 | 1.0 | 2024-xx-xx | Initial version (single device, W/var/VA units) |
