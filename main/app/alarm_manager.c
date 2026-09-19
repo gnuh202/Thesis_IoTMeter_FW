@@ -42,6 +42,10 @@ static bool s_apply_pending = true;
 static bool s_v_armed;
 static bool s_oc_anchored;
 static uint32_t s_oc_retry_at;
+/* Log throttles: the anchor retries every cycle while the grid or the load is
+ * missing, so these "still waiting" conditions get one line per episode. */
+static bool s_oc_deferred_logged;
+static bool s_no_anchor_logged;
 
 static bool s_en_ov, s_en_oc, s_en_uv, s_en_pl, s_en_freq;
 static uint32_t s_confirm_ms;
@@ -145,10 +149,15 @@ void alarm_manager_apply_ic(atm90e32as_handle_t handle, const atm90e32as_calib_t
         }
     }
     if (ns < 2) {
-        /* No grid yet: stay unarmed (boot false-latch gate). */
-        ESP_LOGI(ALARM_TAG, "no valid voltage anchor yet; alarm stays unarmed");
+        /* No grid yet: stay unarmed (boot false-latch gate). Logged once per
+         * episode - with no grid this path runs every measurement cycle. */
+        if (!s_no_anchor_logged) {
+            s_no_anchor_logged = true;
+            ESP_LOGI(ALARM_TAG, "no valid voltage anchor yet; alarm stays unarmed");
+        }
         return;
     }
+    s_no_anchor_logged = false;
     float v_med = v_sum / (float)ns;
     if (ns == 2) {
         scale = (scales[0] + scales[1]) * 0.5f;
@@ -177,10 +186,25 @@ void alarm_manager_apply_ic(atm90e32as_handle_t handle, const atm90e32as_calib_t
                      oi_th, iscale, 'A' + best);
         } else if (!s_oc_anchored) {
             s_oc_retry_at = now + ALARM_OC_RETRY_MS;
-            ESP_LOGI(ALARM_TAG, "no load current yet; OIth anchor deferred");
+            /* Logged once: the retry runs every 5 s until a load appears, and
+             * repeating the same line for hours buries the rest of the log. */
+            if (!s_oc_deferred_logged) {
+                s_oc_deferred_logged = true;
+                ESP_LOGI(ALARM_TAG, "no load current yet; OIth anchor deferred "
+                                    "(retrying every %ums)", ALARM_OC_RETRY_MS);
+            } else {
+                ESP_LOGD(ALARM_TAG, "OIth anchor still deferred (no load current)");
+            }
         }
     } else {
         s_oc_anchored = true;   /* disabled: nothing to anchor */
+    }
+
+    /* Nothing left to do: V/freq are already in the IC and this pass was only
+     * the OC retry, which found no load. Bail out rather than re-open the
+     * config-register window and rewrite five unchanged values every 5 s. */
+    if (!v_pending && !write_oi) {
+        return;
     }
 
     /* All V/freq thresholds are written even when a firmware-level category
@@ -201,11 +225,16 @@ void alarm_manager_apply_ic(atm90e32as_handle_t handle, const atm90e32as_calib_t
     }
     if (write_oi) {
         s_oc_anchored = true;
+        s_oc_deferred_logged = false;
     }
-    ESP_LOGI(ALARM_TAG, "IC thresholds: OVth=%u SagTh=%u PLossTh=%u FreqLo=%u FreqHi=%u "
-                        "(scale=%.1f/V, Vnom=%.1f)",
-             th.ov_th, th.sag_th, th.phase_loss_th, th.freq_lo_th, th.freq_hi_th,
-             scale, v_med);
+    /* Only a real apply request is worth a line; an OC-anchor pass rewrites the
+     * same V/freq values and has already logged its own OIth. */
+    if (v_pending) {
+        ESP_LOGI(ALARM_TAG, "IC thresholds: OVth=%u SagTh=%u PLossTh=%u FreqLo=%u FreqHi=%u "
+                            "(scale=%.1f/V, Vnom=%.1f)",
+                 th.ov_th, th.sag_th, th.phase_loss_th, th.freq_lo_th, th.freq_hi_th,
+                 scale, v_med);
+    }
 
     /* Thresholds are in the IC: the request is satisfied and V/freq are armed. */
     portENTER_CRITICAL(&s_alarm_mux);
@@ -345,6 +374,8 @@ void alarm_manager_request_apply(void)
     s_v_armed = false;
     s_oc_anchored = false;
     s_oc_retry_at = now;
+    s_oc_deferred_logged = false;
+    s_no_anchor_logged = false;
     portEXIT_CRITICAL(&s_alarm_mux);
 }
 
