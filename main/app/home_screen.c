@@ -321,6 +321,16 @@ static void render_current(void)
     put_kv(3, "I3", line);
 }
 
+/* roundf() keeps the sign: a tiny negative input (e.g. -3.7 W, under the
+ * 0.005 kW display LSB) rounds to -0.0, which printf renders as "-0.00".
+ * Snap any result that rounds to zero back to +0 so a no-load state can
+ * never display as negative. */
+static float round_kw(float w)
+{
+    float kw = roundf(w / 10.0f) / 100.0f;
+    return (kw == 0.0f) ? 0.0f : kw;
+}
+
 static void render_total(void)
 {
     atm90e32as_measurements_t m;
@@ -338,10 +348,10 @@ static void render_total(void)
 
     snprintf(line, sizeof(line), "%.2f A", m.current_neutral);
     put_kv(1, "I", line);
-    float kw = roundf(m.total_active_power / 10.0f) / 100.0f;
+    float kw = round_kw(m.total_active_power);
     snprintf(line, sizeof(line), "%.2f kW", kw);
     put_kv(2, "P", line);
-    float kvar = roundf(m.total_reactive_power / 10.0f) / 100.0f;
+    float kvar = round_kw(m.total_reactive_power);
     snprintf(line, sizeof(line), "%.2f kvar", kvar);
     put_kv(3, "Q", line);
 }
@@ -360,13 +370,13 @@ static void render_active_power(void)
         put_kv(3, "L3", status);
         return;
     }
-    float kw_a = roundf(m.active_power[0] / 10.0f) / 100.0f;
+    float kw_a = round_kw(m.active_power[0]);
     snprintf(line, sizeof(line), "%.2f kW", kw_a);
     put_kv(1, "L1", line);
-    float kw_b = roundf(m.active_power[1] / 10.0f) / 100.0f;
+    float kw_b = round_kw(m.active_power[1]);
     snprintf(line, sizeof(line), "%.2f kW", kw_b);
     put_kv(2, "L2", line);
-    float kw_c = roundf(m.active_power[2] / 10.0f) / 100.0f;
+    float kw_c = round_kw(m.active_power[2]);
     snprintf(line, sizeof(line), "%.2f kW", kw_c);
     put_kv(3, "L3", line);
 }
@@ -430,7 +440,7 @@ static void render_power_quality(void)
     put_kv(1, "PF Total", line);
     snprintf(line, sizeof(line), "%.2f Hz", m.frequency);
     put_kv(2, "Freq", line);
-    float kva = roundf(m.total_apparent_power / 10.0f) / 100.0f;
+    float kva = round_kw(m.total_apparent_power);
     snprintf(line, sizeof(line), "%.2f kVA", kva);
     put_kv(3, "S Total", line);
 }
@@ -2603,10 +2613,12 @@ static void menu_rtu_slot_detail(uint8_t slot)
     strlcpy(line, scratch, sizeof(line));
     put_line(1, line);
 
-    /* Row2: slave id + link state + poll count.
-     * OFF = slot disabled, ON = online, --- = enabled but not answering yet. */
+    /* Row2: slave id + device state + poll count.
+     * ON = answering, OFF = enabled but missed 5 consecutive polls (device
+     * down), --- = master not polling (bus/slot disabled or portal up). */
     if (have_st) {
-        const char *link = !st.enabled ? "OFF" : (st.online ? "ON" : "---");
+        const char *link = st.state == MODBUS_MASTER_DEV_ON ? "ON" :
+                           st.state == MODBUS_MASTER_DEV_OFF ? "OFF" : "---";
         snprintf(scratch, sizeof(scratch), "ID %u %s P%lu",
                  (unsigned)st.slave_id, link, (unsigned long)st.poll_count);
         strlcpy(line, scratch, sizeof(line));

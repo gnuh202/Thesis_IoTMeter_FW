@@ -507,6 +507,18 @@ menu "Application Configuration"
             help
                 Print every measurement to console. Disable to keep console shell clean.
 
+        config APP_METER_NOLOAD_CURRENT_MA
+            int "Per-phase no-load current threshold (mA)"
+            range 0 1000
+            default 50
+            help
+                RMS current below which a phase is reported as no-load
+                (I/P/Q/S/PF forced to 0). Screens out crosstalk pickup between
+                closely mounted CTs: a 7 A load on one phase induces about
+                16 mA on the idle CTs next to it, which otherwise shows up as
+                a meaningless P/PF on those phases. 0 disables the gate.
+                Applies to the main ATM90E32AS meter and to Modbus slave meters.
+
         menu "Calibration Defaults"
             comment "Auto-calibration tolerance and sample defaults"
 

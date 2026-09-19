@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "config_manager.h"
 #include "config_store.h"
 #include "driver/uart.h"
@@ -70,6 +71,7 @@ typedef struct {
     bool online;
     uint32_t poll_count;
     uint32_t error_count;
+    uint32_t last_ok_tick;    /* xTaskGetTickCount() of last successful poll */
 } mb_slot_rt_t;
 
 static void *s_master_handler;
@@ -197,6 +199,59 @@ static float float_from_regs_abcd(uint16_t hi, uint16_t lo)
     return v;
 }
 
+/* Noise-floor cleanup for slave meters, mirroring the main meter's
+ * energy_meter_apply_noise_floor(): |PF| < 0.1 and |P|/|Q|/|S| < 1 (W/var/VA)
+ * are chip noise on an idle device, not physical values, so every consumer
+ * (LCD, MQTT, console) sees a clean no-load state.
+ *
+ * A no-load gate on RMS current runs first, same rationale as the main
+ * meter: CTs packed together in the cabinet cross-couple, so a slot with
+ * no real load must not report pickup as current/power/PF. No hysteresis
+ * here — the poll cadence is seconds and these values only feed snapshot
+ * consumers. */
+#ifndef CONFIG_APP_METER_NOLOAD_CURRENT_MA
+#define CONFIG_APP_METER_NOLOAD_CURRENT_MA 50
+#endif
+#define MB_MASTER_PF_NOISE_FLOOR 0.1f
+#define MB_MASTER_POWER_NOISE_FLOOR 1.0f
+#define MB_MASTER_NOLOAD_CURRENT_A ((float)CONFIG_APP_METER_NOLOAD_CURRENT_MA / 1000.0f)
+
+static void meter_readings_apply_noise_floor(meter_readings_t *r)
+{
+    bool any_loaded = false;
+    for (int i = 0; i < 3; i++) {
+        if (r->current[i] < MB_MASTER_NOLOAD_CURRENT_A) {
+            r->current[i] = 0.0f;
+            r->active_power_ph[i] = 0.0f;
+        } else {
+            any_loaded = true;
+        }
+    }
+    if (!any_loaded) {
+        r->active_power = 0.0f;
+        r->reactive_power = 0.0f;
+        r->apparent_power = 0.0f;
+        r->power_factor = 0.0f;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (fabsf(r->active_power_ph[i]) < MB_MASTER_POWER_NOISE_FLOOR) {
+            r->active_power_ph[i] = 0.0f;
+        }
+    }
+    if (fabsf(r->active_power) < MB_MASTER_POWER_NOISE_FLOOR) {
+        r->active_power = 0.0f;
+    }
+    if (fabsf(r->reactive_power) < MB_MASTER_POWER_NOISE_FLOOR) {
+        r->reactive_power = 0.0f;
+    }
+    if (fabsf(r->apparent_power) < MB_MASTER_POWER_NOISE_FLOOR) {
+        r->apparent_power = 0.0f;
+    }
+    if (fabsf(r->power_factor) < MB_MASTER_PF_NOISE_FLOOR) {
+        r->power_factor = 0.0f;
+    }
+}
+
 static void commit_slot(uint8_t slot, const meter_readings_t *local, bool ok)
 {
     bool went_online = false;
@@ -206,9 +261,12 @@ static void commit_slot(uint8_t slot, const meter_readings_t *local, bool ok)
     mb_slot_rt_t *rt = &s_slot_rt[slot];
     rt->poll_count++;
     if (ok) {
-        rt->readings = *local;
+        meter_readings_t cleaned = *local;
+        meter_readings_apply_noise_floor(&cleaned);
+        rt->readings = cleaned;
         rt->readings_valid = true;
         rt->error_count = 0;
+        rt->last_ok_tick = xTaskGetTickCount();
         if (!rt->online) {
             rt->online = true;
             went_online = true;
@@ -291,6 +349,9 @@ static void poll_pm710_slot(uint8_t slot, uint8_t addr)
         {PM710_REG_I_A, &local.current[0], 1.0f},
         {PM710_REG_I_B, &local.current[1], 1.0f},
         {PM710_REG_I_C, &local.current[2], 1.0f},
+        {PM710_REG_P_A_KW, &local.active_power_ph[0], 1000.0f},
+        {PM710_REG_P_B_KW, &local.active_power_ph[1], 1000.0f},
+        {PM710_REG_P_C_KW, &local.active_power_ph[2], 1000.0f},
         {PM710_REG_P_TOTAL_KW, &local.active_power, 1000.0f},
         {PM710_REG_Q_TOTAL_KVAR, &local.reactive_power, 1000.0f},
         {PM710_REG_S_TOTAL_KVA, &local.apparent_power, 1000.0f},
@@ -372,6 +433,8 @@ static void poll_em07k_slot(uint8_t slot, uint8_t addr)
     for (int k = 0; k < 3; k++) {
         local.voltage[k] = (float)v[k] * 0.1f * vtr;
         local.current[k] = (float)i[k] * 0.01f * ctr;
+        /* Datasheet: per-phase Watt × CTR × VTR. */
+        local.active_power_ph[k] = (float)p[k] * ctr * vtr;
     }
     /* Datasheet: per-phase Watt/VA × CTR × VTR; sum phases for totals (W/VA). */
     local.active_power = ((float)p[0] + (float)p[1] + (float)p[2]) * ctr * vtr;
@@ -598,8 +661,38 @@ esp_err_t modbus_master_get_slot_status(uint8_t slot, modbus_master_slot_status_
     out->readings_valid = s_slot_rt[slot].readings_valid;
     out->poll_count = s_slot_rt[slot].poll_count;
     out->error_count = s_slot_rt[slot].error_count;
+
+    /*
+     * Single place that derives the tri-state:
+     *   INACTIVE - master not polling this slot: bus disabled, slot disabled,
+     *              or config portal up (polling paused). State is unknown.
+     *   OFF      - master actively polling but the slot missed the offline
+     *              threshold (5 consecutive failed polls).
+     *   ON       - the slot answered its last poll.
+     */
+    if (!s_cfg.bus_enabled || !out->enabled || network_manager_is_config_mode()) {
+        out->state = MODBUS_MASTER_DEV_INACTIVE;
+    } else if (out->online) {
+        out->state = MODBUS_MASTER_DEV_ON;
+    } else {
+        out->state = MODBUS_MASTER_DEV_OFF;
+    }
+
+    /* Tick-count subtraction is wrap-safe. last_ok_tick==0 with no success
+     * ever taken still reports the true age of the (invalid) cache. */
+    out->reading_age_ms = (xTaskGetTickCount() - s_slot_rt[slot].last_ok_tick) *
+                          portTICK_PERIOD_MS;
     xSemaphoreGive(s_lock);
     return ESP_OK;
+}
+
+const char *modbus_master_dev_state_name(modbus_master_dev_state_t state)
+{
+    switch (state) {
+    case MODBUS_MASTER_DEV_ON:  return "ON";
+    case MODBUS_MASTER_DEV_OFF: return "OFF";
+    default:                    return "INACTIVE";
+    }
 }
 
 esp_err_t modbus_master_get_status(modbus_master_status_t *out)

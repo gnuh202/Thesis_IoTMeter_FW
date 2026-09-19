@@ -22,17 +22,36 @@ extern "C" {
 
 #define MODBUS_MASTER_SLOT_COUNT CONFIG_MANAGER_MB_SLOT_COUNT
 
+/*
+ * Tri-state device state, derived in one place (modbus_master_get_slot_status):
+ *   ON       - the master is polling and the slot answered its last poll.
+ *   OFF      - the master is polling but the slot missed MB_MASTER_OFFLINE_
+ *              THRESHOLD (5) consecutive polls: the device is known to be down.
+ *   INACTIVE - the master is NOT polling this slot (bus disabled, slot
+ *              disabled, or config portal active): the device state is
+ *              UNKNOWN, not off.
+ * Consumers (LCD, MQTT, console) must never re-derive this from `online`,
+ * so "master inactive" and "device off" stay distinguishable everywhere.
+ */
+typedef enum {
+    MODBUS_MASTER_DEV_INACTIVE = 0,  /* master not polling: state unknown */
+    MODBUS_MASTER_DEV_ON,            /* answering */
+    MODBUS_MASTER_DEV_OFF,           /* polling, offline threshold reached */
+} modbus_master_dev_state_t;
+
 /* Per-slot runtime status. */
 typedef struct {
     bool used;
     bool enabled;             /* slot enabled in config */
     bool online;              /* last successful poll within offline threshold */
     bool readings_valid;      /* at least one successful decode since start */
+    modbus_master_dev_state_t state;  /* tri-state above, derived */
     uint8_t type;             /* meter_device_t */
     uint8_t slave_id;
     char name[CONFIG_MANAGER_MB_NAME_LEN];
     uint32_t poll_count;
     uint32_t error_count;     /* consecutive failures since last success */
+    uint32_t reading_age_ms;  /* age of the cached readings (0 = never read) */
 } modbus_master_slot_status_t;
 
 /* Bus-level status snapshot. */
@@ -63,6 +82,9 @@ esp_err_t modbus_master_get_readings_slot(uint8_t slot, meter_readings_t *out);
 
 /* Status of one slot. ESP_ERR_INVALID_ARG if slot out of range. */
 esp_err_t modbus_master_get_slot_status(uint8_t slot, modbus_master_slot_status_t *out);
+
+/* "ON" / "OFF" / "INACTIVE" for logs and console UI. */
+const char *modbus_master_dev_state_name(modbus_master_dev_state_t state);
 
 /* Bus-level status (includes legacy single-device mirrors). */
 esp_err_t modbus_master_get_status(modbus_master_status_t *out);

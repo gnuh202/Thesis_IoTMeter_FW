@@ -4,8 +4,19 @@
 > Source code: [main/app/mqtt_manager.c](../main/app/mqtt_manager.c)  
 > Data structures: [main/app/mqtt_telemetry.h](../main/app/mqtt_telemetry.h)
 
-**Phiên bản tài liệu:** 2.0 (cập nhật 2026-09-14)  
-**Thay đổi chính:**
+**Phiên bản tài liệu:** 2.2 (cập nhật 2026-09-19)  
+**Thay đổi chính (2.2):**
+- Thêm `p_kw_ph`: công suất P từng pha (kW) cho main và slaves
+- Noise floor cho slave meters (|PF| < 0.1, |P|/|Q|/|S| < 1) như main meter
+- Giá trị sau làm tròn về 0 luôn là +0 — không bao giờ publish/hiển thị `-0`
+- No-load gate theo dòng (mặc định 50 mA, `APP_METER_NOLOAD_CURRENT_MA`):
+  pha không có tải → I/P/Q/S/PF = 0, chống nhiễu xuyên âm giữa các CT xếp sát
+
+**Thay đổi chính (2.1):**
+- Slaves: thêm trường `state` (on/off/inactive), `online` true chỉ khi `state="on"`
+- Data authenticity: khi state ≠ on, mọi giá trị đo về 0 — không publish stale data
+
+**Thay đổi chính (2.0):**
 - Power units: W/var/VA → **kW/kvar/kVA** (2 decimal places)
 - Multi-device support: main device + up to 5 Modbus slaves
 - IO states moved into telemetry payload
@@ -49,7 +60,7 @@
 
 | Topic | Direction | QoS | Retain | Publish Interval | Description |
 |-------|-----------|-----|--------|------------------|-------------|
-| `pm/<id>/telemetry` | Publish | 0 | No | Configurable (1-60s, default 5s) | Real-time measurements (main + slaves) |
+| `pm/<id>/telemetry` | Publish | 0 | No | Configurable (5-60s, default 5s) | Real-time measurements (main + slaves) |
 | `pm/<id>/energy` | Publish | 1 | No | Same as telemetry | Accumulated energy + demand |
 | `pm/<id>/io` | Publish | 1 | **Yes** | Same as telemetry + relay echo | Digital I/O state snapshot |
 | `pm/<id>/heartbeat` | Publish | 0 | No | Same as telemetry | System health + metadata |
@@ -59,7 +70,7 @@
 
 **Notes:**
 - Publish interval configurable via: LCD Menu (Settings → MQTT → Period), Web Portal (MQTT section), Console (`mqtt-cfg period`)
-- Range: 1-60 seconds (stored in NVS as milliseconds: 1000-60000 ms)
+- Range: 5-60 seconds (stored in NVS as milliseconds: 5000-60000 ms)
 
 ---
 
@@ -83,6 +94,7 @@
     "pf": [0.98, 0.97, 0.99],
     "in": 0.05,
     "p_kw": 3.45,
+    "p_kw_ph": [1.10, 1.15, 1.20],
     "q_kvar": 0.23,
     "s_kva": 3.46,
     "pf_total": 0.98,
@@ -100,10 +112,12 @@
       "name": "PM710-01",
       "id": 1,
       "type": "PM710",
+      "state": "on",
       "online": true,
       "v": [230.0, 230.1, 230.2],
       "i": [2.10, 2.15, 2.18],
       "p_kw": 1.52,
+      "p_kw_ph": [0.50, 0.51, 0.51],
       "q_kvar": 0.11,
       "s_kva": 1.53,
       "pf": 0.99,
@@ -125,6 +139,7 @@
 | `pf` | number[3] | — | Per-phase power factor | -1.0 to 1.0 |
 | `in` | number | A | Neutral current | 0-rated current |
 | `p_kw` | number | kW | Total active power | **2 decimals** |
+| `p_kw_ph` | number[3] | kW | Active power per phase (L1, L2, L3) | **2 decimals** |
 | `q_kvar` | number | kvar | Total reactive power | **2 decimals** |
 | `s_kva` | number | kVA | Total apparent power | **2 decimals** |
 | `pf_total` | number | — | System power factor | -1.0 to 1.0 |
@@ -144,10 +159,12 @@
 | `name` | string | — | Device name from config | User-defined label |
 | `id` | number | — | Modbus slave address | 1-247 |
 | `type` | string | — | Device model | `"PM710"` or `"EM07K"` |
-| `online` | boolean | — | Communication status | false if no response |
+| `state` | string | — | Device state (tri-state) | `"on"` answering / `"off"` down (5 failed polls) / `"inactive"` master not polling |
+| `online` | boolean | — | Comms status (compat) | true chỉ khi `state="on"` |
 | `v` | number[3] | V | Phase voltages | Same as main |
 | `i` | number[3] | A | Phase currents | Same as main |
 | `p_kw` | number | kW | Total active power | **2 decimals** |
+| `p_kw_ph` | number[3] | kW | Active power per phase (L1, L2, L3) | **2 decimals** |
 | `q_kvar` | number | kvar | Total reactive power | **2 decimals**, 0 for EM07K |
 | `s_kva` | number | kVA | Total apparent power | **2 decimals** |
 | `pf` | number | — | Total power factor | 0 for EM07K |
@@ -158,7 +175,10 @@
 - Maximum 5 slaves (firmware limit for stack safety)
 - Only **used slots** are published (no empty padding)
 - If no slaves configured: `slaves` key is **not present** in JSON
-- Slave `online=false` when: timeout, CRC error, or exception response
+- **Data authenticity:** giá trị đo chỉ có nghĩa khi `state="on"`. Khi `state="off"`
+  (mất kết nối ≥ 5 lần poll liên tiếp) hoặc `"inactive"` (master không poll — bus/slot
+  bị tắt hoặc portal config đang bật), **mọi giá trị đo về 0 (mặc định)** — thiết bị
+  KHÔNG BAO GIỜ publish dữ liệu cũ (stale).
 
 ---
 
@@ -340,6 +360,7 @@ Same format and behavior as `cmd/out0`.
 | `pf` | Power factor | — | telemetry (main per-phase, slaves total) |
 | `in` | Neutral current | A | telemetry (main only) |
 | `p_kw` | Active power | kW | telemetry (main/slaves) |
+| `p_kw_ph` | Active power per phase | kW | telemetry (main/slaves) |
 | `q_kvar` | Reactive power | kvar | telemetry (main/slaves) |
 | `s_kva` | Apparent power | kVA | telemetry (main/slaves) |
 | `pf_total` | Total power factor | — | telemetry (main only) |
@@ -366,7 +387,8 @@ Same format and behavior as `cmd/out0`.
 | `name` | Device name | string | slaves array |
 | `id` | Modbus address | number | slaves array |
 | `type` | Device model | string | slaves array |
-| `online` | Comms status | boolean | slaves array |
+| `state` | Device state (on/off/inactive) | string | slaves array |
+| `online` | Comms status (true chỉ khi state="on") | boolean | slaves array |
 
 ---
 
@@ -463,6 +485,8 @@ client.loop_forever()
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.2 | 2026-09-19 | • Thêm `p_kw_ph` (P từng pha, kW, 2 số lẻ) cho main và slaves<br>• Noise floor cho slaves (|PF| < 0.1, \|P\|/\|Q\|/\|S\| < 1)<br>• Giá trị làm tròn về 0 luôn là +0, không bao giờ `-0`<br>• No-load gate theo dòng (50 mA): pha rỗi → I/P/Q/S/PF = 0 (chống crosstalk CT) |
+| 2.1 | 2026-09-18 | • Slaves: thêm `state` (on/off/inactive) — phân biệt device off với master inactive<br>• `online` giờ true chỉ khi `state="on"`<br>• Data authenticity: khi state ≠ on, mọi giá trị đo về 0 (không publish stale data) |
 | 2.0 | 2026-09-14 | • Power units changed to kW/kvar/kVA<br>• Multi-device support (main + slaves)<br>• IO fields in telemetry<br>• Relay cmd simplified to plain string |
 | 1.0 | 2024-xx-xx | Initial version (single device, W/var/VA units) |
 

@@ -30,6 +30,10 @@
 #define CONFIG_APP_ATM90E32AS_DEFAULT_MODE_3P3W 0
 #endif
 
+#ifndef CONFIG_APP_METER_NOLOAD_CURRENT_MA
+#define CONFIG_APP_METER_NOLOAD_CURRENT_MA 50
+#endif
+
 /* Fallbacks if sdkconfig not yet regenerated after Kconfig change. */
 #ifndef CONFIG_APP_ATM90E32AS_DEFAULT_PGA_4X
 #ifndef CONFIG_APP_ATM90E32AS_DEFAULT_PGA_2X
@@ -511,10 +515,39 @@ static esp_err_t energy_meter_init(void)
  * they must see the raw chip truth. */
 #define ENERGY_METER_PF_NOISE_FLOOR 0.1f
 #define ENERGY_METER_POWER_NOISE_FLOOR 1.0f
+#define ENERGY_METER_NOLOAD_CURRENT_A ((float)CONFIG_APP_METER_NOLOAD_CURRENT_MA / 1000.0f)
+#define ENERGY_METER_NOLOAD_RELEASE_A (ENERGY_METER_NOLOAD_CURRENT_A * 0.8f)
+
+/* Per-phase no-load gate, applied before the value floors below. CTs mounted
+ * close together in the cabinet cross-couple: a loaded phase induces a small
+ * coherent 50 Hz current on the idle CTs (measured ~16 mA with a 7 A adjacent
+ * load), and the P/PF computed from that pickup are meaningless. Hysteresis
+ * (enter at the threshold, release at 80% of it) keeps a current hovering at
+ * the threshold from flapping the displayed values. */
+static bool s_phase_loaded[ATM90E32AS_PHASE_COUNT];
+
+static bool energy_meter_phase_is_loaded(float current_a, bool was_loaded)
+{
+    return was_loaded ? (current_a >= ENERGY_METER_NOLOAD_RELEASE_A)
+                      : (current_a >= ENERGY_METER_NOLOAD_CURRENT_A);
+}
 
 static void energy_meter_apply_noise_floor(atm90e32as_measurements_t *m)
 {
     for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+        if (!energy_meter_phase_is_loaded(m->current[i], s_phase_loaded[i])) {
+            /* No real load on this phase: the current is crosstalk pickup,
+             * so every value derived from it is meaningless — report a
+             * clean no-load state. */
+            s_phase_loaded[i] = false;
+            m->current[i] = 0.0f;
+            m->power_factor[i] = 0.0f;
+            m->active_power[i] = 0.0f;
+            m->reactive_power[i] = 0.0f;
+            m->apparent_power[i] = 0.0f;
+            continue;
+        }
+        s_phase_loaded[i] = true;
         if (fabsf(m->power_factor[i]) < ENERGY_METER_PF_NOISE_FLOOR) {
             m->power_factor[i] = 0.0f;
         }
