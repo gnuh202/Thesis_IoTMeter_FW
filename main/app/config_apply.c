@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 
+#include "alarm_manager.h"
 #include "config_manager.h"
 #include "esp_log.h"
 #include "ethernet_driver.h"
@@ -289,11 +290,16 @@ esp_err_t config_apply(config_apply_flags_t flags)
     }
 
     if ((flags & CONFIG_APPLY_ALARM) && cfg != NULL) {
+        /* The meter task performs the actual IC threshold writes (it owns the
+         * SPI access to the ATM90E32AS); this only queues the request. */
+        alarm_manager_request_apply();
         ESP_LOGI(TAG,
-                 "Apply Alarm Settings: nominal=%uHz trigger=%us clear=%us (detection deferred)",
-                 (unsigned)cfg->alarm_nominal_frequency_hz,
-                 (unsigned)cfg->alarm_trigger_delay_s,
-                 (unsigned)cfg->alarm_clear_delay_s);
+                 "Apply Alarm Settings: preset=%u out1/out2 role=%u/%u trigger=%us "
+                 "(thresholds queued to meter task)",
+                 (unsigned)cfg->alarm_preset,
+                 (unsigned)cfg->alarm_out0_role,
+                 (unsigned)cfg->alarm_out1_role,
+                 (unsigned)cfg->alarm_trigger_delay_s);
     }
 
     if (cfg != NULL) {

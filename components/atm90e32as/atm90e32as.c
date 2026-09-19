@@ -27,6 +27,9 @@
 #define REG_OV_TH 0x06
 #define REG_ZX_CONFIG 0x07
 #define REG_SAG_TH 0x08
+#define REG_PHASE_LOSS_TH 0x09
+#define REG_IN_WARN_TH 0x0A
+#define REG_OI_TH 0x0B
 #define REG_FREQ_LO_TH 0x0C
 #define REG_FREQ_HI_TH 0x0D
 #define REG_PL_CONST_H 0x31
@@ -278,6 +281,57 @@ esp_err_t atm90e32as_write_register(atm90e32as_handle_t handle, uint16_t reg, ui
 {
     ESP_RETURN_ON_FALSE(handle != NULL, ESP_ERR_INVALID_ARG, TAG, "handle is NULL");
     return atm90e32as_transfer16(handle, reg, value, NULL);
+}
+
+esp_err_t atm90e32as_write_warning_thresholds(atm90e32as_handle_t handle,
+                                              const atm90e32as_warning_thresholds_t *th)
+{
+    ESP_RETURN_ON_FALSE(handle != NULL && th != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid arg");
+
+    /* 0x05..0x0D live in the config space behind the CFG_REG_ACC_EN unlock
+     * window (same protocol as atm90e32as_init). */
+    esp_err_t err = atm90e32as_write_register(handle, REG_CFG_REG_ACC_EN, 0x55AA);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = atm90e32as_write_register(handle, REG_OV_TH, th->ov_th);
+    if (err == ESP_OK) {
+        err = atm90e32as_write_register(handle, REG_SAG_TH, th->sag_th);
+    }
+    if (err == ESP_OK) {
+        err = atm90e32as_write_register(handle, REG_PHASE_LOSS_TH, th->phase_loss_th);
+    }
+    if (err == ESP_OK && th->write_oi_th) {
+        err = atm90e32as_write_register(handle, REG_OI_TH, th->oi_th);
+    }
+    if (err == ESP_OK) {
+        err = atm90e32as_write_register(handle, REG_FREQ_LO_TH, th->freq_lo_th);
+    }
+    if (err == ESP_OK) {
+        err = atm90e32as_write_register(handle, REG_FREQ_HI_TH, th->freq_hi_th);
+    }
+    esp_err_t lock_err = atm90e32as_write_register(handle, REG_CFG_REG_ACC_EN, 0x0000);
+    return err != ESP_OK ? err : lock_err;
+}
+
+esp_err_t atm90e32as_read_raw_rms(atm90e32as_handle_t handle, uint16_t urms[3], uint16_t irms[3])
+{
+    ESP_RETURN_ON_FALSE(handle != NULL && urms != NULL && irms != NULL, ESP_ERR_INVALID_ARG,
+                        TAG, "invalid arg");
+    esp_err_t err = ESP_OK;
+    for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+        esp_err_t e = atm90e32as_read_register(handle, REG_URMS_A + p, &urms[p]);
+        if (e != ESP_OK) {
+            err = e;
+        }
+    }
+    for (int p = 0; p < ATM90E32AS_PHASE_COUNT; p++) {
+        esp_err_t e = atm90e32as_read_register(handle, REG_IRMS_A + p, &irms[p]);
+        if (e != ESP_OK) {
+            err = e;
+        }
+    }
+    return err;
 }
 
 static esp_err_t atm90e32as_read_s32(atm90e32as_handle_t handle, uint16_t reg_hi, uint16_t reg_lo, int32_t *value)

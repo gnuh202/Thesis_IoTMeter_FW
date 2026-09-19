@@ -161,6 +161,13 @@ typedef struct {
      * line speed instead of dropping to 9600. */
     uint8_t mb_slave_baud_code;
     uint8_t slave_baud_reserved[3];
+
+    /* Alarm output roles + threshold preset (append-only). Older blobs lack
+     * this tail → roles default to alarm (1), preset to default (0). */
+    uint8_t alarm_out0_role;
+    uint8_t alarm_out1_role;
+    uint8_t alarm_preset;
+    uint8_t alarm_roles_reserved;
 } config_snapshot_dto_t;
 
 #define CONFIG_SNAPSHOT_V1_SIZE \
@@ -302,6 +309,9 @@ static void snapshot_to_dto(config_snapshot_dto_t *dto, const config_manager_t *
     dto->alarm_trigger_delay_s = cfg->alarm_trigger_delay_s;
     dto->alarm_clear_delay_s = cfg->alarm_clear_delay_s;
     dto->alarm_hysteresis_deci = (uint16_t)(cfg->alarm_hysteresis * 10.0f + 0.5f);
+    dto->alarm_out0_role = cfg->alarm_out0_role;
+    dto->alarm_out1_role = cfg->alarm_out1_role;
+    dto->alarm_preset = cfg->alarm_preset;
 }
 
 static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_dto_t *dto,
@@ -359,6 +369,9 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
     bool has_slave_baud =
         stored_size >= (offsetof(config_snapshot_dto_t, mb_slave_baud_code) +
                         sizeof(dto->mb_slave_baud_code));
+    bool has_alarm_roles =
+        stored_size >= (offsetof(config_snapshot_dto_t, alarm_preset) +
+                        sizeof(dto->alarm_preset));
     if (has_mb_runtime && dto->mb_enabled > 1U) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -548,6 +561,19 @@ static esp_err_t snapshot_from_dto(config_manager_t *cfg, const config_snapshot_
         cfg->alarm_trigger_delay_s = 2U;
         cfg->alarm_clear_delay_s = 2U;
         cfg->alarm_hysteresis = 5.0f;
+    }
+
+    /* Alarm roles/preset tail (append-only). Default = alarm roles, Default preset. */
+    if (has_alarm_roles) {
+        cfg->alarm_out0_role = dto->alarm_out0_role > 1U ? 1U : dto->alarm_out0_role;
+        cfg->alarm_out1_role = dto->alarm_out1_role > 1U ? 1U : dto->alarm_out1_role;
+        if (dto->alarm_preset <= 3U) {
+            cfg->alarm_preset = dto->alarm_preset;
+        }
+    } else {
+        cfg->alarm_out0_role = 1U;
+        cfg->alarm_out1_role = 1U;
+        cfg->alarm_preset = 0U;
     }
 
     if (has_mb_runtime) {
@@ -960,6 +986,11 @@ static esp_err_t snapshot_from_store(config_manager_t *c)
     c->alarm_trigger_delay_s = 2U;
     c->alarm_clear_delay_s = 2U;
     c->alarm_hysteresis = 5.0f;
+    c->alarm_out0_role = 1U;    /* OUT1/OUT2 default to alarm role: manual stays
+                                 * available to the user at all times; alarm
+                                 * drives ON at the latch edge only. */
+    c->alarm_out1_role = 1U;
+    c->alarm_preset = 0U;       /* 0 = Default threshold set */
     return ESP_OK;
 }
 
@@ -1129,6 +1160,10 @@ static esp_err_t validate_alarm_config(const config_manager_t *c)
     ESP_RETURN_ON_FALSE(c->alarm_hysteresis >= 0.0f &&
                         c->alarm_hysteresis <= 100.0f,
                         ESP_ERR_INVALID_ARG, TAG, "invalid alarm hysteresis");
+    ESP_RETURN_ON_FALSE(c->alarm_out0_role <= 1U &&
+                        c->alarm_out1_role <= 1U &&
+                        c->alarm_preset <= 3U,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid alarm role/preset");
     return ESP_OK;
 }
 

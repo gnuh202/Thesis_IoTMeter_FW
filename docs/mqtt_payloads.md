@@ -4,7 +4,11 @@
 > Source code: [main/app/mqtt_manager.c](../main/app/mqtt_manager.c)  
 > Data structures: [main/app/mqtt_telemetry.h](../main/app/mqtt_telemetry.h)
 
-**Phiên bản tài liệu:** 2.2 (cập nhật 2026-09-19)  
+**Phiên bản tài liệu:** 2.3 (cập nhật 2026-09-19)  
+**Thay đổi chính (2.3):**
+- `warnings` không còn là reserved: đã nối với alarm backend (ATM90E32AS native
+  warning) — xem bảng bit bên dưới
+
 **Thay đổi chính (2.2):**
 - Thêm `p_kw_ph`: công suất P từng pha (kW) cho main và slaves
 - Noise floor cho slave meters (|PF| < 0.1, |P|/|Q|/|S| < 1) như main meter
@@ -150,7 +154,22 @@
 | `relay2` | boolean | — | Relay output 1 state | true=closed/on |
 | `input1` | boolean | — | Digital input 0 state | true=high/active |
 | `input2` | boolean | — | Digital input 1 state | true=high/active |
-| `warnings` | number | — | 8-bit warning flags | Reserved for alarm system |
+| `warnings` | number | — | 8-bit warning flags (xem bảng bit) | 0 = không có cảnh báo |
+
+**`warnings` bitmask** - trạng thái **latched** của alarm; chỉ xoá bằng
+LCD → Settings → Alarm → Reset Latch. Mỗi bit gộp cả 3 pha (chi tiết từng pha
+xem trên LCD trang ALARMS).
+
+| Bit | Giá trị | Ý nghĩa | Nguồn (ATM90E32AS) |
+|-----|---------|---------|--------------------|
+| 0 | 0x01 | Over-voltage (pha bất kỳ) | EMMState0 b12–10 |
+| 1 | 0x02 | Under-voltage / sag (pha bất kỳ) | EMMState1 b14–12 |
+| 2 | 0x04 | Over-current (pha bất kỳ) | EMMState0 b15–13 |
+| 3 | 0x08 | Phase loss (pha bất kỳ) | EMMState1 b10–8 |
+| 4 | 0x10 | Frequency high | EMMState1 b15 |
+| 5 | 0x20 | Frequency low | EMMState1 b11 |
+| 6 | 0x40 | IC error (Internal/CfgCRC) | chân WarnOut |
+| 7 | 0x80 | — | dự phòng |
 
 **`slaves` array** (optional, only present if Modbus slaves configured):
 
@@ -485,6 +504,7 @@ client.loop_forever()
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.3 | 2026-09-19 | - Alarm backend (ATM90E32AS native warning) nối vào `warnings`: bitmask latched 7 bit, reset bằng LCD Reset Latch |
 | 2.2 | 2026-09-19 | • Thêm `p_kw_ph` (P từng pha, kW, 2 số lẻ) cho main và slaves<br>• Noise floor cho slaves (|PF| < 0.1, \|P\|/\|Q\|/\|S\| < 1)<br>• Giá trị làm tròn về 0 luôn là +0, không bao giờ `-0`<br>• No-load gate theo dòng (50 mA): pha rỗi → I/P/Q/S/PF = 0 (chống crosstalk CT) |
 | 2.1 | 2026-09-18 | • Slaves: thêm `state` (on/off/inactive) — phân biệt device off với master inactive<br>• `online` giờ true chỉ khi `state="on"`<br>• Data authenticity: khi state ≠ on, mọi giá trị đo về 0 (không publish stale data) |
 | 2.0 | 2026-09-14 | • Power units changed to kW/kvar/kVA<br>• Multi-device support (main + slaves)<br>• IO fields in telemetry<br>• Relay cmd simplified to plain string |

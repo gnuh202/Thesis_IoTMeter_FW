@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "boot_manager.h"
+#include "alarm_manager.h"
 #include "config_apply.h"
 #include "config_manager.h"
 #include "energy_meter_task.h"
@@ -582,21 +583,65 @@ static void render_status_modbus(void)
 }
 
 /* ============================================================
- * ALARM (placeholder — no backend yet)
+ * ALARM
  * ============================================================ */
 
 static int get_active_alarm_count(void)
 {
-    /* Placeholder: no alarm detection backend yet. */
-    return 0;
+    return alarm_manager_active_count();
 }
+
+/* Short labels for the latched bitmap, indexed by alarm_manager_bit_t. */
+static const char *const s_alarm_bit_name[ALARM_BIT_COUNT] = {
+    "OV A", "OV B", "OV C",
+    "OC A", "OC B", "OC C",
+    "UV A", "UV B", "UV C",
+    "PLOSS A", "PLOSS B", "PLOSS C",
+    "FREQ HI", "FREQ LO", "IC ERR",
+};
 
 static void render_alarm_page(void)
 {
+    uint16_t latched = alarm_manager_latched_bitmap();
+
     put_line_centre(0, "ALARMS");
-    put_line(1, "");
-    put_line_centre(2, "NONE ACTIVE");
-    put_line(3, "Detection: coming");
+    if (latched == 0) {
+        put_line(1, "");
+        put_line_centre(2, "NONE ACTIVE");
+        put_line(3, "");
+        return;
+    }
+
+    /* Three rows for the first three latched bits; a trailing "+N more" keeps
+     * the page honest when more than three are up at once. */
+    int shown = 0;
+    int total = 0;
+    char rows[3][16];
+    for (int b = 0; b < ALARM_BIT_COUNT; b++) {
+        if (!(latched & (uint16_t)(1U << b))) {
+            continue;
+        }
+        total++;
+        if (shown < 3) {
+            snprintf(rows[shown], sizeof(rows[shown]), "%s", s_alarm_bit_name[b]);
+            shown++;
+        }
+    }
+    for (int r = 0; r < 3; r++) {
+        if (r < shown) {
+            if (r == 2 && total > 3) {
+                char more[HOME_LCD_WIDTH + 1];
+                int extra = total - 3;
+                if (extra > 99) extra = 99;
+                snprintf(more, sizeof(more), "%.10s +%d more", rows[2], extra);
+                put_line(3, more);
+            } else {
+                put_line((uint8_t)(r + 1), rows[r]);
+            }
+        } else {
+            put_line((uint8_t)(r + 1), "");
+        }
+    }
 }
 
 /* ============================================================
@@ -2049,6 +2094,13 @@ static esp_err_t menu_auto_off(lcd_menu_t *menu, const lcd_menu_item_t *item, vo
 }
 
 typedef enum {
+    ALARM_PRESET_DEFAULT = 0,
+    ALARM_PRESET_EN50160,
+    ALARM_PRESET_ANSI_A,
+    ALARM_PRESET_CUSTOM,
+} alarm_preset_t;
+
+typedef enum {
     ALARM_CFG_VLOW_EN = 1, ALARM_CFG_VHIGH_EN, ALARM_CFG_OC_EN,
     ALARM_CFG_PHASE_EN, ALARM_CFG_FREQ_EN, ALARM_CFG_VLOW,
     ALARM_CFG_VHIGH, ALARM_CFG_OC, ALARM_CFG_FLOW, ALARM_CFG_FHIGH,
@@ -2255,10 +2307,8 @@ static void alarm_value_get(lcd_menu_t *menu, const lcd_menu_item_t *item,
  * The menu row then shows the new value inline, so no result flash is needed.
  *
  * These write real, validated, persisted config (read back by the Data Point
- * Layer and saved to NVS; the web portal has no alarm section). What is not yet
- * wired is live detection — get_active_alarm_count() is a stub and the ALARMS
- * status page says so — so apply only logs; that honesty lives on the status
- * page, not as a gate here. */
+ * Layer and saved to NVS; the web portal has no alarm section). Apply queues a
+ * threshold re-anchor to the meter task, which owns the IC's SPI link. */
 static esp_err_t menu_alarm_config(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
 {
     (void)menu; (void)ctx;
@@ -2277,8 +2327,174 @@ static esp_err_t menu_alarm_config(lcd_menu_t *menu, const lcd_menu_item_t *item
     }
 
     alarm_cfg_set(cfg, field, value);
+    /* Hand-editing any limit means the active set no longer matches a standard:
+     * the preset follows the edit instead of lying about where the numbers
+     * came from. Enable flags and timing are preset-independent. */
+    if (field >= ALARM_CFG_VLOW && field <= ALARM_CFG_FHIGH) {
+        cfg->alarm_preset = ALARM_PRESET_CUSTOM;
+    }
     (void)update_save_apply(cfg, CONFIG_APPLY_ALARM);
     free(cfg);
+    return ESP_OK;
+}
+
+/* ---- Limit presets ----
+ * A preset is a named voltage/frequency limit set from a published standard, so
+ * the operator does not have to derive percentages by hand. The nominal voltage
+ * is the configured V Low/V High midpoint's base 230/120 V depending on the grid
+ * frequency already selected under Meter Setup (50 Hz -> 230 V L-N / EN 50160,
+ * 60 Hz -> 120 V L-N / ANSI C84.1). Over-current is never part of a preset: it
+ * comes from the CT / installation, not from a voltage-quality standard. */
+typedef struct {
+    float v_low, v_high, f_low, f_high;
+} alarm_limit_set_t;
+
+static const char *alarm_preset_name(uint8_t preset)
+{
+    switch (preset) {
+    case ALARM_PRESET_DEFAULT: return "Default";
+    case ALARM_PRESET_EN50160: return "EN 50160";
+    case ALARM_PRESET_ANSI_A:  return "ANSI A";
+    default:                   return "Custom";
+    }
+}
+
+/* Resolve a preset into concrete limits for the grid frequency in use.
+ * Returns false for Custom (no canned numbers — the operator owns them). */
+static bool alarm_preset_limits(uint8_t preset, bool is_60hz, alarm_limit_set_t *out)
+{
+    float f_nom = is_60hz ? 60.0f : 50.0f;
+    switch (preset) {
+    case ALARM_PRESET_DEFAULT:
+        /* Wide "will not nuisance-trip" window: the factory default set. */
+        out->v_low = 180.0f;
+        out->v_high = 250.0f;
+        out->f_low = f_nom - 3.0f;
+        out->f_high = f_nom + 3.0f;
+        return true;
+    case ALARM_PRESET_EN50160: {
+        /* EN 50160: Un +/-10 % for LV supply voltage, 50 Hz +/-1 % (synchronous
+         * interconnected system). Un = 230 V L-N. */
+        float v_nom = is_60hz ? 120.0f : 230.0f;
+        out->v_low = v_nom * 0.90f;
+        out->v_high = v_nom * 1.10f;
+        out->f_low = f_nom * 0.99f;
+        out->f_high = f_nom * 1.01f;
+        return true;
+    }
+    case ALARM_PRESET_ANSI_A: {
+        /* ANSI C84.1 Range A service voltage: -5 % / +5 % around nominal,
+         * frequency held to +/-0.5 Hz. Nominal = 120 V L-N. */
+        float v_nom = is_60hz ? 120.0f : 230.0f;
+        out->v_low = v_nom * 0.95f;
+        out->v_high = v_nom * 1.05f;
+        out->f_low = f_nom - 0.5f;
+        out->f_high = f_nom + 0.5f;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+/* Row value for the PRESET screen: the active preset gets a '*'. */
+static void alarm_preset_row_value(lcd_menu_t *m, const lcd_menu_item_t *it,
+                                   char *buf, size_t buf_size, void *ctx)
+{
+    (void)m; (void)ctx;
+    uint8_t preset = (uint8_t)(uintptr_t)it->user_data;
+    const config_manager_t *c = cfg_view();
+    bool active = (c != NULL) && (c->alarm_preset == preset);
+    snprintf(buf, buf_size, "<%s>  ", active ? "ACTIVE" : "set");
+}
+
+/* OK on a preset row: show the limits it would install, then Confirm/Cancel.
+ * This is the "vô trong chính là info ngưỡng" behaviour — the operator always
+ * sees the numbers before they replace the live ones. */
+static esp_err_t menu_alarm_preset(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
+{
+    (void)menu; (void)ctx;
+    uint8_t preset = (uint8_t)(uintptr_t)item->user_data;
+
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) return ESP_ERR_NO_MEM;
+    if (config_manager_get(cfg) != ESP_OK) { free(cfg); return ESP_OK; }
+
+    alarm_limit_set_t set;
+    if (!alarm_preset_limits(preset, cfg->line_freq != 0U, &set)) {
+        free(cfg);
+        show_info("CUSTOM LIMITS", "Edit under Limits;", "preset follows", "OK: Back");
+        return ESP_OK;
+    }
+
+    /* wait_confirm_cancel() owns row 2, so the limits go on rows 1 and 3. */
+    char l1[HOME_LCD_WIDTH + 1], l3[HOME_LCD_WIDTH + 1];
+    snprintf(l1, sizeof(l1), "V %.0f-%.0fV", set.v_low, set.v_high);
+    snprintf(l3, sizeof(l3), "F %.1f-%.1fHz", set.f_low, set.f_high);
+    put_line_centre(0, alarm_preset_name(preset));
+    put_line(1, l1);
+    put_line(3, l3);
+    if (!wait_confirm_cancel()) {
+        free(cfg);
+        return ESP_OK;
+    }
+
+    cfg->alarm_voltage_low_v = set.v_low;
+    cfg->alarm_voltage_high_v = set.v_high;
+    cfg->alarm_frequency_low_hz = set.f_low;
+    cfg->alarm_frequency_high_hz = set.f_high;
+    cfg->alarm_preset = preset;
+    esp_err_t ret = update_save_apply(cfg, CONFIG_APPLY_ALARM);
+    free(cfg);
+    show_action_result(ret == ESP_OK);
+    return ret;
+}
+
+/* ---- Output roles ----
+ * Manual is always available; the ALARM role only adds the right for a latch
+ * edge to drive the output ON. The operator can still switch either output by
+ * hand at any time under I/O, and Reset Latch releases whatever the alarm drove. */
+static void alarm_out_role_value(lcd_menu_t *m, const lcd_menu_item_t *it,
+                                 char *buf, size_t buf_size, void *ctx)
+{
+    (void)m; (void)ctx;
+    int which = (int)(uintptr_t)it->user_data;
+    const config_manager_t *c = cfg_view();
+    uint8_t role = 0;
+    if (c != NULL) {
+        role = which == 0 ? c->alarm_out0_role : c->alarm_out1_role;
+    }
+    snprintf(buf, buf_size, "<%s>  ", role ? "ALARM" : "MANUAL");
+}
+
+static esp_err_t menu_alarm_out_role(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
+{
+    (void)menu; (void)ctx;
+    int which = (int)(uintptr_t)item->user_data;
+
+    config_manager_t *cfg = malloc(sizeof(*cfg));
+    if (cfg == NULL) return ESP_ERR_NO_MEM;
+    if (config_manager_get(cfg) != ESP_OK) { free(cfg); return ESP_OK; }
+
+    if (which == 0) {
+        cfg->alarm_out0_role = cfg->alarm_out0_role ? 0U : 1U;
+    } else {
+        cfg->alarm_out1_role = cfg->alarm_out1_role ? 0U : 1U;
+    }
+    (void)update_save_apply(cfg, CONFIG_APPLY_ALARM);
+    free(cfg);
+    return ESP_OK;
+}
+
+/* ---- Reset Latch ----
+ * The only way a latched alarm clears. Also releases any output the alarm had
+ * driven, handing full authority back to the operator. Re-latches on the next
+ * confirm window if the fault is still present — by design. */
+static esp_err_t menu_alarm_reset_latch(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
+{
+    (void)menu; (void)item; (void)ctx;
+    alarm_manager_reset_latch();
+    show_action_result(true);
     return ESP_OK;
 }
 
@@ -3036,20 +3252,61 @@ static const lcd_menu_screen_t s_screen_alarm_threshold = {
     .item_count = sizeof(s_items_alarm_threshold) / sizeof(s_items_alarm_threshold[0]),
 };
 
+/* Limit presets: each row shows the standard's numbers before replacing the
+ * live limits (OK -> info + Confirm/Cancel). Custom is not a row — it is what
+ * the preset becomes when a limit is hand-edited under Limits. */
+static const lcd_menu_item_t s_items_alarm_preset[] = {
+    {.label = "Default", .type = LCD_MENU_ITEM_VALUE,
+     .value_get = alarm_preset_row_value, .action = menu_alarm_preset,
+     .user_data = (void *)(uintptr_t)ALARM_PRESET_DEFAULT},
+    {.label = "EN 50160", .type = LCD_MENU_ITEM_VALUE,
+     .value_get = alarm_preset_row_value, .action = menu_alarm_preset,
+     .user_data = (void *)(uintptr_t)ALARM_PRESET_EN50160},
+    {.label = "ANSI C84.1 A", .type = LCD_MENU_ITEM_VALUE,
+     .value_get = alarm_preset_row_value, .action = menu_alarm_preset,
+     .user_data = (void *)(uintptr_t)ALARM_PRESET_ANSI_A},
+    {.label = "Back", .type = LCD_MENU_ITEM_BACK},
+};
+static const lcd_menu_screen_t s_screen_alarm_preset = {
+    .title = "LIMIT PRESET", .items = s_items_alarm_preset,
+    .item_count = sizeof(s_items_alarm_preset) / sizeof(s_items_alarm_preset[0]),
+};
+
+/* Output roles: MANUAL (operator only) or ALARM (a latch edge may also drive
+ * it ON). The operator keeps manual control in both roles. */
+static const lcd_menu_item_t s_items_alarm_output[] = {
+    {.label = "OUT1", .type = LCD_MENU_ITEM_VALUE,
+     .value_get = alarm_out_role_value, .action = menu_alarm_out_role,
+     .user_data = (void *)(uintptr_t)0},
+    {.label = "OUT2", .type = LCD_MENU_ITEM_VALUE,
+     .value_get = alarm_out_role_value, .action = menu_alarm_out_role,
+     .user_data = (void *)(uintptr_t)1},
+    {.label = "Back", .type = LCD_MENU_ITEM_BACK},
+};
+static const lcd_menu_screen_t s_screen_alarm_output = {
+    .title = "ALARM OUTPUT", .items = s_items_alarm_output,
+    .item_count = sizeof(s_items_alarm_output) / sizeof(s_items_alarm_output[0]),
+};
+
 /* Nominal Frequency is intentionally absent: energy_meter_set_line_freq() owns
  * alarm_nominal_frequency_hz (it rewrites the mirror on every Meter Setup > LFreq
  * toggle), so a second UI path here would silently fight the first. Set the grid
  * frequency under Meter Setup; this branch only keeps the alarm-specific timing
  * and the audible-alarm flag.
  *
- * Hysteresis has no row: the field stays at its internal default (deci 10 =
- * 1.0 unit) because an operator has no reason to tune it — the register and the
- * edit path remain for engineering use. */
+ * Hysteresis and Reset Delay have no rows: the alarm latches in the IC-backed
+ * detector and clears only through Reset Latch, so a clear delay has nothing to
+ * time, and the IC comparators need no firmware hysteresis. Both fields stay in
+ * config as reserved. The warning blink period likewise stays a compile-time
+ * constant (HOME_ALARM_*_MS) — it is an indicator characteristic, not an
+ * operator setting. */
 static const lcd_menu_item_t s_items_alarm_settings[] = {
     {.label = "Detect", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_enable},
     {.label = "Limits", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_threshold},
+    {.label = "Preset", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_preset},
+    {.label = "Output", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_output},
     ALARM_ITEM("Alarm Delay", ALARM_CFG_TRIGGER),
-    ALARM_ITEM("Reset Delay", ALARM_CFG_CLEAR),
+    {.label = "Reset Latch", .type = LCD_MENU_ITEM_ACTION, .action = menu_alarm_reset_latch},
     {.label = "Sound", .type = LCD_MENU_ITEM_VALUE,
      .value_get = alarm_sound_value, .action = alarm_sound_toggle},
     {.label = "Back", .type = LCD_MENU_ITEM_BACK},

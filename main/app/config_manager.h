@@ -222,8 +222,16 @@ typedef struct {
     float alarm_frequency_low_hz;
     float alarm_frequency_high_hz;
     uint16_t alarm_trigger_delay_s;
-    uint16_t alarm_clear_delay_s;
-    float alarm_hysteresis;
+    uint16_t alarm_clear_delay_s;  /* reserved: latch has no auto-clear (v1) */
+    float alarm_hysteresis;        /* reserved: IC thresholds need no firmware hysteresis */
+
+    /* Output roles + threshold preset. Manual (0) is always available to the
+     * user; "alarm" (1) lets the latch edge drive the output ON. The preset
+     * records which threshold set is in effect: 0=default, 1=EN 50160,
+     * 2=ANSI C84.1 Range A, 3=custom (limits hand-edited). */
+    uint8_t alarm_out0_role;       /* OUT1: 0=manual, 1=alarm */
+    uint8_t alarm_out1_role;       /* OUT2: 0=manual, 1=alarm */
+    uint8_t alarm_preset;
 
     /* ---- Buzzer ---- */
     bool buzzer_enable;          /* button feedback sound */

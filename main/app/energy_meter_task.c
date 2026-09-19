@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "atm90e32as.h"
+#include "alarm_manager.h"
 #include "config_manager.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
@@ -712,6 +713,21 @@ static void energy_meter_task(void *arg)
             /* First successful read after init or error recovery -> READY. */
             system_status_set(SYS_MODULE_ATM90, SYS_STATUS_READY);
 
+            /* Alarm: the IC does the detection, this task owns the SPI link.
+             * Threshold writes only happen when an apply is queued (or the
+             * over-current anchor is still waiting for real load current);
+             * the evaluation below is pure decode of sys_status0/1. */
+            if (alarm_manager_ic_access_pending()) {
+                config_manager_t *acfg = malloc(sizeof(*acfg));
+                if (acfg != NULL && config_manager_get(acfg) == ESP_OK) {
+                    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+                    alarm_manager_apply_ic(s_meter, &s_applied_calib, acfg, &measurements);
+                    xSemaphoreGive(s_meter_mutex);
+                }
+                free(acfg);
+            }
+            alarm_manager_service(&measurements);
+
 #if CONFIG_APP_ENERGY_METER_LOG_EACH_SAMPLE
             ESP_LOGI(TAG,
                      "VA=%.2fV IA=%.3fA VB=%.2fV IB=%.3fA VC=%.2fV IC=%.3fA P=%.2fW F=%.2fHz PF=%.3f ST0=0x%04X ST1=0x%04X",
@@ -1013,6 +1029,10 @@ static esp_err_t energy_meter_apply_locked(const atm90e32as_calib_t *target)
         s_current_calib = *target;
         s_applied_calib = *target;
         s_calib = *target;
+        /* Gains just moved, so every anchored IC threshold is scaled against a
+         * stale gain. Re-anchor or the comparators silently judge against the
+         * old calibration. */
+        alarm_manager_request_apply();
         if (wiring_changed) vTaskDelay(pdMS_TO_TICKS(ENERGY_METER_MEASUREMENT_SETTLE_MS));
     }
     return ret;

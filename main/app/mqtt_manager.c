@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include "cJSON.h"
 #include "cert_store.h"
+#include "alarm_manager.h"
 #include "config_manager.h"
 #include "energy_meter_task.h"
 #include "esp_crt_bundle.h"
@@ -748,7 +749,7 @@ static void prepare_main_telemetry(mqtt_telemetry_main_t *out)
     io_expander_get_in0(&out->digital_in0);
     io_expander_get_in1(&out->digital_in1);
 
-    out->warning_flags = 0;
+    out->warning_flags = alarm_manager_warning_byte();
 }
 
 static uint8_t prepare_slave_telemetry(mqtt_telemetry_slave_t slaves[MQTT_TELEMETRY_MAX_SLAVES])

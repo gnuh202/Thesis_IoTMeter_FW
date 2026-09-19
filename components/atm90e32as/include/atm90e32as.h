@@ -129,6 +129,29 @@ esp_err_t atm90e32as_delete(atm90e32as_handle_t handle);
 esp_err_t atm90e32as_init(atm90e32as_handle_t handle);
 esp_err_t atm90e32as_read_register(atm90e32as_handle_t handle, uint16_t reg, uint16_t *value);
 esp_err_t atm90e32as_write_register(atm90e32as_handle_t handle, uint16_t reg, uint16_t value);
+
+/*
+ * Native warning-threshold API (datasheet 0x06/0x08/0x09/0x0B/0x0C/0x0D).
+ * Values are raw comparator thresholds computed by the caller (the datasheet
+ * formula xxTh = RmsReg * sqrt(2) * 2^14 / gain applies). write_oi_th gates
+ * the OIth write so an unanchored over-current threshold can be omitted.
+ * Registers 0x05..0x0D sit in the config space behind CFG_REG_ACC_EN; this
+ * helper handles the unlock/lock window internally.
+ */
+typedef struct {
+    uint16_t ov_th;         /* OVth 0x06         */
+    uint16_t sag_th;        /* SagTh 0x08        */
+    uint16_t phase_loss_th; /* PhaseLossTh 0x09  */
+    uint16_t oi_th;         /* OIth 0x0B         */
+    uint16_t freq_lo_th;    /* FreqLoTh 0x0C     */
+    uint16_t freq_hi_th;    /* FreqHiTh 0x0D     */
+    bool write_oi_th;
+} atm90e32as_warning_thresholds_t;
+
+esp_err_t atm90e32as_write_warning_thresholds(atm90e32as_handle_t handle,
+                                              const atm90e32as_warning_thresholds_t *th);
+/* Raw RMS channel values for the ratio threshold anchor (URMS A/B/C, IRMS A/B/C). */
+esp_err_t atm90e32as_read_raw_rms(atm90e32as_handle_t handle, uint16_t urms[3], uint16_t irms[3]);
 esp_err_t atm90e32as_get_calibration(atm90e32as_handle_t handle, atm90e32as_calib_t *calib);
 esp_err_t atm90e32as_set_calibration(atm90e32as_handle_t handle, const atm90e32as_calib_t *calib, bool apply);
 esp_err_t atm90e32as_apply_calibration(atm90e32as_handle_t handle, const atm90e32as_calib_t *calib);
