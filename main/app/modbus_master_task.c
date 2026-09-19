@@ -293,6 +293,9 @@ static void poll_pm710_slot(uint8_t slot, uint8_t addr)
         {PM710_REG_I_A, &local.current[0], 1.0f},
         {PM710_REG_I_B, &local.current[1], 1.0f},
         {PM710_REG_I_C, &local.current[2], 1.0f},
+        {PM710_REG_P_A_KW, &local.active_power_ph[0], 1000.0f},
+        {PM710_REG_P_B_KW, &local.active_power_ph[1], 1000.0f},
+        {PM710_REG_P_C_KW, &local.active_power_ph[2], 1000.0f},
         {PM710_REG_P_TOTAL_KW, &local.active_power, 1000.0f},
         {PM710_REG_Q_TOTAL_KVAR, &local.reactive_power, 1000.0f},
         {PM710_REG_S_TOTAL_KVA, &local.apparent_power, 1000.0f},
@@ -374,6 +377,8 @@ static void poll_em07k_slot(uint8_t slot, uint8_t addr)
     for (int k = 0; k < 3; k++) {
         local.voltage[k] = (float)v[k] * 0.1f * vtr;
         local.current[k] = (float)i[k] * 0.01f * ctr;
+        /* Datasheet: per-phase Watt × CTR × VTR. */
+        local.active_power_ph[k] = (float)p[k] * ctr * vtr;
     }
     /* Datasheet: per-phase Watt/VA × CTR × VTR; sum phases for totals (W/VA). */
     local.active_power = ((float)p[0] + (float)p[1] + (float)p[2]) * ctr * vtr;

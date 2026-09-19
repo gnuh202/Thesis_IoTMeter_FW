@@ -34,6 +34,7 @@ typedef enum {
 typedef struct {
     float voltage[3];        /* L-N voltage per phase (V) */
     float current[3];        /* current per phase (A) */
+    float active_power_ph[3]; /* active power per phase (W) */
     float active_power;      /* total active power (W) */
     float reactive_power;    /* total reactive power (var); 0 on EM-07K */
     float apparent_power;    /* total apparent power (VA) */
@@ -62,6 +63,9 @@ typedef struct {
 #define PM710_REG_V_AN           1060  /* Voltage A-N, float, V */
 #define PM710_REG_V_BN           1062
 #define PM710_REG_V_CN           1064
+#define PM710_REG_P_A_KW         1066  /* Real Power A, float, kW */
+#define PM710_REG_P_B_KW         1068
+#define PM710_REG_P_C_KW         1070
 
 /*
  * EM-07K register map (TENSE EM-07 Modbus table).

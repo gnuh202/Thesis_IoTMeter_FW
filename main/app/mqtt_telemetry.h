@@ -17,6 +17,7 @@ typedef struct {
     float current[3];           // A
     float current_neutral;      // A
     float active_power_kw;      // kW (total)
+    float active_power_kw_ph[3]; // kW per phase (L1, L2, L3)
     float reactive_power_kvar;  // kvar (total)
     float apparent_power_kva;   // kVA (total)
     float power_factor[3];      // per phase
@@ -49,6 +50,7 @@ typedef struct {
     float voltage[3];           // V
     float current[3];           // A
     float active_power_kw;      // kW (total)
+    float active_power_kw_ph[3]; // kW per phase (L1, L2, L3)
     float reactive_power_kvar;  // kvar (total, 0 for EM07K)
     float apparent_power_kva;   // kVA (total)
     float power_factor;         // total (0 for EM07K)

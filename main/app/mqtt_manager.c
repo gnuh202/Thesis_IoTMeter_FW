@@ -725,6 +725,9 @@ static void prepare_main_telemetry(mqtt_telemetry_main_t *out)
     out->temperature = m.temperature;
 
     out->active_power_kw = roundf(m.total_active_power / 10.0f) / 100.0f;
+    for (int ph = 0; ph < 3; ph++) {
+        out->active_power_kw_ph[ph] = roundf(m.active_power[ph] / 10.0f) / 100.0f;
+    }
     out->reactive_power_kvar = roundf(m.total_reactive_power / 10.0f) / 100.0f;
     out->apparent_power_kva = roundf(m.total_apparent_power / 10.0f) / 100.0f;
 
@@ -768,6 +771,9 @@ static uint8_t prepare_slave_telemetry(mqtt_telemetry_slave_t slaves[MQTT_TELEME
                 memcpy(s->current, r.current, sizeof(s->current));
 
                 s->active_power_kw = roundf(r.active_power / 10.0f) / 100.0f;
+                for (int ph = 0; ph < 3; ph++) {
+                    s->active_power_kw_ph[ph] = roundf(r.active_power_ph[ph] / 10.0f) / 100.0f;
+                }
                 s->reactive_power_kvar = roundf(r.reactive_power / 10.0f) / 100.0f;
                 s->apparent_power_kva = roundf(r.apparent_power / 10.0f) / 100.0f;
                 s->power_factor = r.power_factor;
@@ -798,10 +804,12 @@ static void publish_telemetry(void)
     cJSON *v = cJSON_AddArrayToObject(main_obj, "v");
     cJSON *i = cJSON_AddArrayToObject(main_obj, "i");
     cJSON *pf = cJSON_AddArrayToObject(main_obj, "pf");
+    cJSON *p_ph = cJSON_AddArrayToObject(main_obj, "p_kw_ph");
     for (int ph = 0; ph < 3; ph++) {
         cJSON_AddItemToArray(v, cJSON_CreateNumber(main.voltage[ph]));
         cJSON_AddItemToArray(i, cJSON_CreateNumber(main.current[ph]));
         cJSON_AddItemToArray(pf, cJSON_CreateNumber(main.power_factor[ph]));
+        cJSON_AddItemToArray(p_ph, cJSON_CreateNumber(main.active_power_kw_ph[ph]));
     }
     cJSON_AddNumberToObject(main_obj, "in", main.current_neutral);
     cJSON_AddNumberToObject(main_obj, "p_kw", main.active_power_kw);
@@ -841,9 +849,11 @@ static void publish_telemetry(void)
              * answering (state != on) — no stale numbers are published. */
             cJSON *sv = cJSON_AddArrayToObject(slave_obj, "v");
             cJSON *si = cJSON_AddArrayToObject(slave_obj, "i");
+            cJSON *sp = cJSON_AddArrayToObject(slave_obj, "p_kw_ph");
             for (int ph = 0; ph < 3; ph++) {
                 cJSON_AddItemToArray(sv, cJSON_CreateNumber(s->voltage[ph]));
                 cJSON_AddItemToArray(si, cJSON_CreateNumber(s->current[ph]));
+                cJSON_AddItemToArray(sp, cJSON_CreateNumber(s->active_power_kw_ph[ph]));
             }
             cJSON_AddNumberToObject(slave_obj, "p_kw", s->active_power_kw);
             cJSON_AddNumberToObject(slave_obj, "q_kvar", s->reactive_power_kvar);
