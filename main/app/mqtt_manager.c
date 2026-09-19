@@ -704,6 +704,16 @@ static void publish_json(const char *topic, cJSON *root, int qos, int retain)
     cJSON_free(payload);
 }
 
+/* roundf() keeps the sign: a tiny negative input (e.g. -3.7 W, under the
+ * 0.005 kW display LSB) rounds to -0.0, which cJSON renders as "-0".
+ * Snap any result that rounds to zero back to +0 so a no-load state can
+ * never publish as negative. */
+static float round_kw(float w)
+{
+    float kw = roundf(w / 10.0f) / 100.0f;
+    return (kw == 0.0f) ? 0.0f : kw;
+}
+
 static void prepare_main_telemetry(mqtt_telemetry_main_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -724,12 +734,12 @@ static void prepare_main_telemetry(mqtt_telemetry_main_t *out)
     out->frequency = m.frequency;
     out->temperature = m.temperature;
 
-    out->active_power_kw = roundf(m.total_active_power / 10.0f) / 100.0f;
+    out->active_power_kw = round_kw(m.total_active_power);
     for (int ph = 0; ph < 3; ph++) {
-        out->active_power_kw_ph[ph] = roundf(m.active_power[ph] / 10.0f) / 100.0f;
+        out->active_power_kw_ph[ph] = round_kw(m.active_power[ph]);
     }
-    out->reactive_power_kvar = roundf(m.total_reactive_power / 10.0f) / 100.0f;
-    out->apparent_power_kva = roundf(m.total_apparent_power / 10.0f) / 100.0f;
+    out->reactive_power_kvar = round_kw(m.total_reactive_power);
+    out->apparent_power_kva = round_kw(m.total_apparent_power);
 
     out->active_energy_kwh = e.active_import_kwh;
 
@@ -770,12 +780,12 @@ static uint8_t prepare_slave_telemetry(mqtt_telemetry_slave_t slaves[MQTT_TELEME
                 memcpy(s->voltage, r.voltage, sizeof(s->voltage));
                 memcpy(s->current, r.current, sizeof(s->current));
 
-                s->active_power_kw = roundf(r.active_power / 10.0f) / 100.0f;
+                s->active_power_kw = round_kw(r.active_power);
                 for (int ph = 0; ph < 3; ph++) {
-                    s->active_power_kw_ph[ph] = roundf(r.active_power_ph[ph] / 10.0f) / 100.0f;
+                    s->active_power_kw_ph[ph] = round_kw(r.active_power_ph[ph]);
                 }
-                s->reactive_power_kvar = roundf(r.reactive_power / 10.0f) / 100.0f;
-                s->apparent_power_kva = roundf(r.apparent_power / 10.0f) / 100.0f;
+                s->reactive_power_kvar = round_kw(r.reactive_power);
+                s->apparent_power_kva = round_kw(r.apparent_power);
                 s->power_factor = r.power_factor;
                 s->frequency = r.frequency;
                 s->active_energy_kwh = r.active_energy;

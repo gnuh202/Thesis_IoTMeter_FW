@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "config_manager.h"
 #include "config_store.h"
 #include "driver/uart.h"
@@ -198,6 +199,34 @@ static float float_from_regs_abcd(uint16_t hi, uint16_t lo)
     return v;
 }
 
+/* Noise-floor cleanup for slave meters, mirroring the main meter's
+ * energy_meter_apply_noise_floor(): |PF| < 0.1 and |P|/|Q|/|S| < 1 (W/var/VA)
+ * are chip noise on an idle device, not physical values, so every consumer
+ * (LCD, MQTT, console) sees a clean no-load state. */
+#define MB_MASTER_PF_NOISE_FLOOR 0.1f
+#define MB_MASTER_POWER_NOISE_FLOOR 1.0f
+
+static void meter_readings_apply_noise_floor(meter_readings_t *r)
+{
+    for (int i = 0; i < 3; i++) {
+        if (fabsf(r->active_power_ph[i]) < MB_MASTER_POWER_NOISE_FLOOR) {
+            r->active_power_ph[i] = 0.0f;
+        }
+    }
+    if (fabsf(r->active_power) < MB_MASTER_POWER_NOISE_FLOOR) {
+        r->active_power = 0.0f;
+    }
+    if (fabsf(r->reactive_power) < MB_MASTER_POWER_NOISE_FLOOR) {
+        r->reactive_power = 0.0f;
+    }
+    if (fabsf(r->apparent_power) < MB_MASTER_POWER_NOISE_FLOOR) {
+        r->apparent_power = 0.0f;
+    }
+    if (fabsf(r->power_factor) < MB_MASTER_PF_NOISE_FLOOR) {
+        r->power_factor = 0.0f;
+    }
+}
+
 static void commit_slot(uint8_t slot, const meter_readings_t *local, bool ok)
 {
     bool went_online = false;
@@ -207,7 +236,9 @@ static void commit_slot(uint8_t slot, const meter_readings_t *local, bool ok)
     mb_slot_rt_t *rt = &s_slot_rt[slot];
     rt->poll_count++;
     if (ok) {
-        rt->readings = *local;
+        meter_readings_t cleaned = *local;
+        meter_readings_apply_noise_floor(&cleaned);
+        rt->readings = cleaned;
         rt->readings_valid = true;
         rt->error_count = 0;
         rt->last_ok_tick = xTaskGetTickCount();
