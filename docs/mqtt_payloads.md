@@ -4,7 +4,13 @@
 > Source code: [main/app/mqtt_manager.c](../main/app/mqtt_manager.c)  
 > Data structures: [main/app/mqtt_telemetry.h](../main/app/mqtt_telemetry.h)
 
-**Phiên bản tài liệu:** 2.3 (cập nhật 2026-09-19)  
+**Phiên bản tài liệu:** 2.4 (cập nhật 2026-09-19)  
+**Thay đổi chính (2.4):**
+- `io`: 2 digital input giờ **event-driven** — đổi mức là publish ngay (≤ 250 ms),
+  không chờ hết chu kỳ publish
+- Thêm `warn_bits`: bitmap alarm **từng pha** (16-bit) bên cạnh `warnings` (byte
+  tóm tắt theo nhóm) — cùng dữ liệu mà trang ALARMS trên LCD hiển thị
+
 **Thay đổi chính (2.3):**
 - `warnings` không còn là reserved: đã nối với alarm backend (ATM90E32AS native
   warning) — xem bảng bit bên dưới
@@ -66,7 +72,7 @@
 |-------|-----------|-----|--------|------------------|-------------|
 | `pm/<id>/telemetry` | Publish | 0 | No | Configurable (5-60s, default 5s) | Real-time measurements (main + slaves) |
 | `pm/<id>/energy` | Publish | 1 | No | Same as telemetry | Accumulated energy + demand |
-| `pm/<id>/io` | Publish | 1 | **Yes** | Same as telemetry + relay echo | Digital I/O state snapshot |
+| `pm/<id>/io` | Publish | 1 | **Yes** | Same as telemetry + **đổi mức input** + relay echo | Digital I/O state snapshot |
 | `pm/<id>/heartbeat` | Publish | 0 | No | Same as telemetry | System health + metadata |
 | `pm/<id>/status` | Publish | 1 | **Yes** | On connect + LWT | Online/offline presence |
 | `pm/<id>/cmd/out0` | Subscribe | 1 | — | On demand | Relay output 0 control |
@@ -109,7 +115,8 @@
     "relay2": true,
     "input1": false,
     "input2": true,
-    "warnings": 0
+    "warnings": 0,
+    "warn_bits": 0
   },
   "slaves": [
     {
@@ -154,22 +161,55 @@
 | `relay2` | boolean | — | Relay output 1 state | true=closed/on |
 | `input1` | boolean | — | Digital input 0 state | true=high/active |
 | `input2` | boolean | — | Digital input 1 state | true=high/active |
-| `warnings` | number | — | 8-bit warning flags (xem bảng bit) | 0 = không có cảnh báo |
+| `warnings` | number | — | Alarm latched, tóm tắt theo nhóm (8-bit) | 0 = không có cảnh báo |
+| `warn_bits` | number | — | Alarm latched, chi tiết từng pha (16-bit) | 0 = không có cảnh báo |
 
-**`warnings` bitmask** - trạng thái **latched** của alarm; chỉ xoá bằng
-LCD → Settings → Alarm → Reset Latch. Mỗi bit gộp cả 3 pha (chi tiết từng pha
-xem trên LCD trang ALARMS).
+#### Alarm: `warnings` và `warn_bits`
 
-| Bit | Giá trị | Ý nghĩa | Nguồn (ATM90E32AS) |
-|-----|---------|---------|--------------------|
-| 0 | 0x01 | Over-voltage (pha bất kỳ) | EMMState0 b12–10 |
-| 1 | 0x02 | Under-voltage / sag (pha bất kỳ) | EMMState1 b14–12 |
-| 2 | 0x04 | Over-current (pha bất kỳ) | EMMState0 b15–13 |
-| 3 | 0x08 | Phase loss (pha bất kỳ) | EMMState1 b10–8 |
-| 4 | 0x10 | Frequency high | EMMState1 b15 |
-| 5 | 0x20 | Frequency low | EMMState1 b11 |
-| 6 | 0x40 | IC error (Internal/CfgCRC) | chân WarnOut |
-| 7 | 0x80 | — | dự phòng |
+Cả hai đều là trạng thái **latched** (chốt): bit đã set thì **giữ nguyên kể cả khi
+sự cố đã hết**, chỉ xoá bằng **LCD → Settings → Alarm → Reset Latch**. Sau khi
+reset, nếu sự cố vẫn còn thì bit sẽ chốt lại sau hết cửa sổ xác nhận
+(`alarm_trigger_delay_s`, mặc định 2 s).
+
+Nguồn: cảnh báo **native của ATM90E32AS** (IC tự so ngưỡng trong thanh ghi OVth /
+SagTh / PhaseLossTh / OIth / FreqLoTh / FreqHiTh, firmware chỉ đọc kết quả ở
+EMMState0 `0x71` / EMMState1 `0x72`) — không phải firmware tự lọc.
+
+**`warnings`** — 1 byte, mỗi bit gộp cả 3 pha (dùng cho dashboard/cảnh báo nhanh):
+
+| Bit | Giá trị | Ý nghĩa | Phục vụ cho | Nguồn (ATM90E32AS) |
+|-----|---------|---------|-------------|--------------------|
+| 0 | 0x01 | Over-voltage (pha bất kỳ) | Quá áp lưới — bảo vệ tải | EMMState0 b12–10 |
+| 1 | 0x02 | Under-voltage / sag (pha bất kỳ) | Sụt áp — motor/UPS, chất lượng điện | EMMState1 b14–12 |
+| 2 | 0x04 | Over-current (pha bất kỳ) | Quá tải / ngắn mạch — cắt tải | EMMState0 b15–13 |
+| 3 | 0x08 | Phase loss (pha bất kỳ) | Mất pha — nguy hiểm cho motor 3 pha | EMMState1 b10–8 |
+| 4 | 0x10 | Frequency high | Tần số cao — lỗi nguồn/máy phát | EMMState1 b15 |
+| 5 | 0x20 | Frequency low | Tần số thấp — quá tải máy phát | EMMState1 b11 |
+| 6 | 0x40 | IC error (Internal / CfgCRC) | Lỗi chính IC đo — **số liệu không tin được** | chân WarnOut (GPIO 41) |
+| 7 | 0x80 | — | dự phòng, luôn 0 | — |
+
+**`warn_bits`** — 16-bit, cho biết **pha nào** bị (đúng dữ liệu trang ALARMS trên LCD):
+
+| Bit | Giá trị | Ý nghĩa | | Bit | Giá trị | Ý nghĩa |
+|-----|---------|---------|-|-----|---------|---------|
+| 0 | 0x0001 | Over-voltage pha A | | 8 | 0x0100 | Under-voltage pha C |
+| 1 | 0x0002 | Over-voltage pha B | | 9 | 0x0200 | Phase loss pha A |
+| 2 | 0x0004 | Over-voltage pha C | | 10 | 0x0400 | Phase loss pha B |
+| 3 | 0x0008 | Over-current pha A | | 11 | 0x0800 | Phase loss pha C |
+| 4 | 0x0010 | Over-current pha B | | 12 | 0x1000 | Frequency high |
+| 5 | 0x0020 | Over-current pha C | | 13 | 0x2000 | Frequency low |
+| 6 | 0x0040 | Under-voltage pha A | | 14 | 0x4000 | IC error (WarnOut) |
+| 7 | 0x0080 | Under-voltage pha B | | 15 | 0x8000 | — dự phòng |
+
+Quan hệ: `warnings` chính là `warn_bits` gộp nhóm — ví dụ `warn_bits = 0x0020`
+(quá dòng pha C) ⇒ `warnings = 0x04`.
+
+**Lưu ý về thời điểm báo:** alarm chỉ được đánh giá sau khi firmware đã ghi được
+ngưỡng thật vào IC (cần ≥ 2 pha có điện áp ≥ 50 V; riêng over-current còn cần tải
+≥ 0.5 A để neo ngưỡng, thử lại mỗi 5 s). Trước đó mọi bit đều 0 — đây là chủ ý,
+vì ngưỡng mặc định sau reset của IC sẽ báo sag + mất pha + tần số thấp khi chưa
+có lưới. Đổi ngưỡng alarm hoặc hiệu chuẩn (calibration) cũng làm firmware neo
+lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
 
 **`slaves` array** (optional, only present if Modbus slaves configured):
 
@@ -244,7 +284,7 @@ xem trên LCD trang ALARMS).
 
 **QoS:** 1 (reliable delivery)  
 **Retain:** **Yes** (last state always available)  
-**Frequency:** Every publish interval + immediate after relay command
+**Frequency:** Every publish interval + **ngay khi input đổi mức** + immediate after relay command
 
 **Purpose:** Digital I/O state snapshot. Retained so late subscribers see current state.
 
@@ -272,6 +312,12 @@ xem trên LCD trang ALARMS).
 - Also published in `telemetry.main` as `relay1/2` and `input1/2` (same values)
 - Separate topic useful for subscribers only interested in I/O state
 - Publishes immediately after relay command as echo confirmation
+- **Event-driven inputs:** `in0`/`in1` đổi mức → publish ngay, **không chờ hết chu kỳ
+  publish**. PCF8574 kéo chân INT khi input đổi, firmware đọc lại rồi đẩy bản tin
+  ở nhịp 250 ms kế tiếp ⇒ **độ trễ tối đa ~250 ms** (thay vì tới 60 s theo chu kỳ).
+  Xung ngắn hơn một nhịp đọc vẫn có thể bị bỏ sót — nếu cần đếm xung chính xác thì
+  dùng cảnh báo mức, không dùng topic này làm bộ đếm.
+- Chỉ **input** là event-driven; `out0`/`out1` đã có echo ngay sau lệnh relay từ trước.
 
 ---
 
@@ -388,7 +434,8 @@ Same format and behavior as `cmd/out0`.
 | `energy_kwh` | Active energy import | kWh | telemetry (main/slaves), energy |
 | `relay1` / `relay2` | Relay outputs | boolean | telemetry (main only) |
 | `input1` / `input2` | Digital inputs | boolean | telemetry (main only) |
-| `warnings` | Warning flags | bitmask | telemetry (main only) |
+| `warnings` | Warning flags, gộp nhóm | bitmask 8-bit | telemetry (main only) |
+| `warn_bits` | Warning flags, từng pha | bitmask 16-bit | telemetry (main only) |
 | `in0` / `in1` | Digital inputs | boolean | io |
 | `out0` / `out1` | Relay outputs | boolean | io |
 | `imp_kwh` | Import active energy | kWh | energy |
@@ -504,6 +551,7 @@ client.loop_forever()
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.4 | 2026-09-19 | • `io`: 2 digital input thành event-driven (đổi mức → publish ngay, trễ ≤ 250 ms)<br>• Thêm `warn_bits` (bitmap alarm từng pha, 16-bit) cạnh `warnings`<br>• Mô tả đầy đủ từng bit alarm: ý nghĩa, phục vụ cho gì, nguồn thanh ghi IC |
 | 2.3 | 2026-09-19 | - Alarm backend (ATM90E32AS native warning) nối vào `warnings`: bitmask latched 7 bit, reset bằng LCD Reset Latch |
 | 2.2 | 2026-09-19 | • Thêm `p_kw_ph` (P từng pha, kW, 2 số lẻ) cho main và slaves<br>• Noise floor cho slaves (|PF| < 0.1, \|P\|/\|Q\|/\|S\| < 1)<br>• Giá trị làm tròn về 0 luôn là +0, không bao giờ `-0`<br>• No-load gate theo dòng (50 mA): pha rỗi → I/P/Q/S/PF = 0 (chống crosstalk CT) |
 | 2.1 | 2026-09-18 | • Slaves: thêm `state` (on/off/inactive) — phân biệt device off với master inactive<br>• `online` giờ true chỉ khi `state="on"`<br>• Data authenticity: khi state ≠ on, mọi giá trị đo về 0 (không publish stale data) |

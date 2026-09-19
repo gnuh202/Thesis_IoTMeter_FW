@@ -32,8 +32,12 @@ typedef struct {
     bool digital_in0;
     bool digital_in1;
 
-    // Warning flags (reserved for alarm system)
-    uint8_t warning_flags;      // 8 bits: bit set = warning active
+    // Alarm state, latched (cleared only by LCD Alarm > Reset Latch).
+    // warning_flags: coarse per-category summary, published as "warnings".
+    // warning_bits:  full per-phase bitmap (ALARM_BIT_* in alarm_manager.h),
+    //                published as "warn_bits" — same data the LCD ALARMS page shows.
+    uint8_t warning_flags;      // 7 bits used, see alarm_manager_warning_byte()
+    uint16_t warning_bits;      // 15 bits used, see alarm_manager_bit_t
 } mqtt_telemetry_main_t;
 
 /* Slave device telemetry (PM710/EM07K via Modbus) */

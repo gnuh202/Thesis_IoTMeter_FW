@@ -10,6 +10,15 @@ extern "C" {
 
 esp_err_t io_expander_start(void);
 esp_err_t io_expander_w5500_reset_pulse(void);
+
+/* Digital-input edge notification. The PCF8574 INT pin already wakes the
+ * expander task on any IN0/IN1 change, so subscribers get the edge without
+ * polling. The callback runs in the expander task right after the readback:
+ * it must not block (no network I/O, no long mutex waits) — set a flag or
+ * signal your own task. One subscriber; a second call replaces the first,
+ * NULL unsubscribes. */
+typedef void (*io_expander_input_cb_t)(bool in0, bool in1, void *ctx);
+void io_expander_set_input_callback(io_expander_input_cb_t cb, void *ctx);
 esp_err_t io_expander_set_out0(bool level);
 esp_err_t io_expander_set_out1(bool level);
 esp_err_t io_expander_get_in0(bool *level);

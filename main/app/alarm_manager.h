@@ -34,8 +34,10 @@
 extern "C" {
 #endif
 
-/* Internal latch bitmap (uint16). Per-phase detail lives here; the MQTT
- * `warnings` byte is a coarser category mapping (see alarm_manager_warning_byte). */
+/* Latch bitmap (uint16). Per-phase detail lives here; it drives the LCD ALARMS
+ * page and is published on MQTT as telemetry.main.warn_bits. The MQTT
+ * `warnings` byte is the coarser category mapping of the same state
+ * (see alarm_manager_warning_byte). */
 typedef enum {
     ALARM_BIT_OV_A = 0, ALARM_BIT_OV_B, ALARM_BIT_OV_C,      /* b0..2  */
     ALARM_BIT_OC_A, ALARM_BIT_OC_B, ALARM_BIT_OC_C,          /* b3..5  */
@@ -74,8 +76,21 @@ int alarm_manager_active_count(void);
 /* Latched bitmap (ALARM_BIT_* layout), for the LCD ALARMS page. */
 uint16_t alarm_manager_latched_bitmap(void);
 
-/* MQTT `warnings` byte: b0 OV(any) b1 UV/sag(any) b2 OC(any) b3 phase-loss(any)
- * b4 freq-high b5 freq-low b6 IC config error. Latched, not instantaneous. */
+/* MQTT telemetry `warnings` byte — the per-category summary of the latched
+ * bitmap above (each bit ORs the three phases together). Latched, not
+ * instantaneous: it stays set until Reset Latch even if the fault has cleared.
+ *
+ *   b0 0x01  over-voltage, any phase      (ALARM_BIT_OV_A..C)
+ *   b1 0x02  under-voltage / sag, any     (ALARM_BIT_UV_A..C)
+ *   b2 0x04  over-current, any phase      (ALARM_BIT_OC_A..C)
+ *   b3 0x08  phase loss, any phase        (ALARM_BIT_PL_A..C)
+ *   b4 0x10  frequency high               (ALARM_BIT_FREQ_HI)
+ *   b5 0x20  frequency low                (ALARM_BIT_FREQ_LO)
+ *   b6 0x40  IC fatal error               (ALARM_BIT_IC_ERROR, WarnOut pin)
+ *   b7 0x80  unused, always 0
+ *
+ * Which phase tripped is in alarm_manager_latched_bitmap(), published beside
+ * this byte as `warn_bits`. Full reference: docs/mqtt_payloads.md section 3.1. */
 uint8_t alarm_manager_warning_byte(void);
 
 #ifdef __cplusplus
