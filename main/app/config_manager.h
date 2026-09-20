@@ -222,8 +222,16 @@ typedef struct {
     float alarm_frequency_low_hz;
     float alarm_frequency_high_hz;
     uint16_t alarm_trigger_delay_s;
-    uint16_t alarm_clear_delay_s;
-    float alarm_hysteresis;
+    uint16_t alarm_clear_delay_s;  /* reserved: latch has no auto-clear (v1) */
+    float alarm_hysteresis;        /* reserved: IC thresholds need no firmware hysteresis */
+
+    /* Output roles + threshold preset. Manual (0) is always available to the
+     * user; "alarm" (1) lets the latch edge drive the output ON. The preset
+     * records which threshold set is in effect: 0=default, 1=EN 50160,
+     * 2=ANSI C84.1 Range A, 3=custom (limits hand-edited). */
+    uint8_t alarm_out0_role;       /* OUT1: 0=manual, 1=alarm */
+    uint8_t alarm_out1_role;       /* OUT2: 0=manual, 1=alarm */
+    uint8_t alarm_preset;
 
     /* ---- Buzzer ---- */
     bool buzzer_enable;          /* button feedback sound */
@@ -247,6 +255,15 @@ esp_err_t config_manager_get(config_manager_t *out);
  * the first load, ESP_ERR_INVALID_ARG if out is NULL).
  */
 esp_err_t config_manager_get_mqtt(config_mqtt_profile_t *out);
+
+/*
+ * Copy out just the two CT ratios (current NCT and the NCT in force when the
+ * meter was calibrated). Same motivation as config_manager_get_mqtt(): the
+ * energy task needs these every poll and must not copy the whole ~1.2 KB
+ * snapshot onto its stack (or malloc it) once a second. Either pointer may be
+ * NULL. Returns ESP_ERR_INVALID_STATE before the first load.
+ */
+esp_err_t config_manager_get_ct_ratios(uint16_t *ct_ratio, uint16_t *ct_ratio_calib);
 
 /* Replace the RAM snapshot (thread-safe). Does not write NVS, apply, or notify. */
 esp_err_t config_manager_update(const config_manager_t *in);

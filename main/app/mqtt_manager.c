@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include "cJSON.h"
 #include "cert_store.h"
+#include "alarm_manager.h"
 #include "config_manager.h"
 #include "energy_meter_task.h"
 #include "esp_crt_bundle.h"
@@ -27,6 +28,7 @@
 #include "network_manager.h"
 #include "sdkconfig.h"
 #include "system_status.h"
+#include "time_source.h"
 
 /*
  * MQTT manager skeleton (step 3).
@@ -63,6 +65,9 @@ static QueueHandle_t s_apply_queue;
 static bool s_started;
 static volatile bool s_connected;
 static uint32_t s_publish_period_ms = 5000;
+/* Set from the IO-expander task when IN0/IN1 change; the publish loop clears it
+ * and pushes an io snapshot on its next 250 ms tick. */
+static volatile bool s_input_event_pending;
 
 typedef struct {
     SemaphoreHandle_t done;
@@ -748,7 +753,8 @@ static void prepare_main_telemetry(mqtt_telemetry_main_t *out)
     io_expander_get_in0(&out->digital_in0);
     io_expander_get_in1(&out->digital_in1);
 
-    out->warning_flags = 0;
+    out->warning_flags = alarm_manager_warning_byte();
+    out->warning_bits = alarm_manager_latched_bitmap();
 }
 
 static uint8_t prepare_slave_telemetry(mqtt_telemetry_slave_t slaves[MQTT_TELEMETRY_MAX_SLAVES])
@@ -833,7 +839,10 @@ static void publish_telemetry(void)
     cJSON_AddBoolToObject(main_obj, "relay2", main.relay_out1);
     cJSON_AddBoolToObject(main_obj, "input1", main.digital_in0);
     cJSON_AddBoolToObject(main_obj, "input2", main.digital_in1);
+    /* Latched alarm state: "warnings" is the per-category summary byte,
+     * "warn_bits" the per-phase bitmap (docs/mqtt_payloads.md 3.1). */
     cJSON_AddNumberToObject(main_obj, "warnings", main.warning_flags);
+    cJSON_AddNumberToObject(main_obj, "warn_bits", main.warning_bits);
 
     if (slave_count > 0) {
         cJSON *slaves_arr = cJSON_AddArrayToObject(root, "slaves");
@@ -929,6 +938,19 @@ static void publish_io(void)
     publish_json(s_topic_io, root, 1, 1);
 }
 
+/* Digital-input edge, delivered by the IO-expander task (PCF8574 INT). We only
+ * flag it here: publishing from that task would block it on the network stack,
+ * and it also owns the I2C readback path. The publish loop wakes at most 250 ms
+ * later, which is the "tức thời" latency the io topic needs without giving up
+ * the single-publisher model. */
+static void on_input_change(bool in0, bool in1, void *ctx)
+{
+    (void)in0;
+    (void)in1;
+    (void)ctx;
+    s_input_event_pending = true;
+}
+
 /* pm/<id>/heartbeat — liveness + debug/monitoring fields (QoS0). */
 static void publish_heartbeat(void)
 {
@@ -938,6 +960,15 @@ static void publish_heartbeat(void)
     }
 
     cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000));
+    /* Wall clock plus its quality flag. tq is 'U' while no RTC is fitted, and a
+     * subscriber must check it before trusting ts: 'U' means ts is uptime from
+     * the epoch, not a real date. 'E' = restored floor (drifting), 'S' = synced. */
+    cJSON_AddNumberToObject(root, "ts", (double)time_source_now());
+    {
+        const char q[2] = { time_source_quality_char(), '\0' };
+        cJSON_AddStringToObject(root, "tq", q);
+    }
+    cJSON_AddNumberToObject(root, "boot", (double)time_source_boot_count());
     cJSON_AddNumberToObject(root, "heap", (double)esp_get_free_heap_size());
 
     const esp_app_desc_t *app = esp_app_get_description();
@@ -1027,7 +1058,21 @@ static void mqtt_manager_task(void *arg)
         }
 
         int64_t now = esp_timer_get_time();
-        if (last_publish_us == 0 || (now - last_publish_us) / 1000 >= s_publish_period_ms) {
+        bool periodic = (last_publish_us == 0 ||
+                         (now - last_publish_us) / 1000 >= s_publish_period_ms);
+
+        /* Input edge: push the io snapshot straight away instead of waiting out
+         * the publish period. Cleared before publishing so an edge that lands
+         * during the publish is not swallowed (it costs one redundant message
+         * at worst, never a missed transition). */
+        if (s_input_event_pending) {
+            s_input_event_pending = false;
+            if (!periodic) {
+                publish_io();
+            }
+        }
+
+        if (periodic) {
             last_publish_us = now;
             publish_telemetry();
             publish_energy();
@@ -1058,6 +1103,7 @@ esp_err_t mqtt_manager_start(void)
     }
 
     s_started = true;
+    io_expander_set_input_callback(on_input_change, NULL);
     return ESP_OK;
 }
 

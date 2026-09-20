@@ -10,13 +10,16 @@
 #include "io_expander.h"
 #include "modbus_master_task.h"
 #include "modbus_slave_task.h"
+#include "modbus_tcp_task.h"
 #include "mqtt_manager.h"
 #include "network_comm_task.h"
 #include "network_manager.h"
 #include "sd_card.h"
 #include "system_status.h"
+#include "time_source.h"
 #include "wifi_manager.h"
 #include "esp_check.h"
+#include "esp_log.h"
 
 static const char *TAG = "app_tasks";
 
@@ -40,6 +43,15 @@ esp_err_t app_tasks_start(void)
      * that NVS is up, before consumers read. Load-only: does not apply settings
      * or notify modules, so boot behavior is unchanged. */
     ESP_RETURN_ON_ERROR(config_manager_init(), TAG, "init configuration manager failed");
+
+    /* Wall-clock abstraction. With no RTC wired yet this only sets the timezone
+     * and bumps the boot counter, so stamps read 1970-01-01 with quality 'U' —
+     * intentional and visible, never a fabricated date. Must run before the
+     * energy task so the first CSV row is already stamped. */
+    esp_err_t time_ret = time_source_init();
+    if (time_ret != ESP_OK) {
+        ESP_LOGW(TAG, "time source init failed: %s", esp_err_to_name(time_ret));
+    }
 
     /* Boot UI: bring up the LCD + PCF8575 (idempotent hmi_bsp_init), show the
      * splash, then the "Initializing..." progress screen. LCD failure is
@@ -120,6 +132,16 @@ esp_err_t app_tasks_start(void)
         ESP_LOGI(TAG, "Modbus Master skipped (engineering mode)");
         system_status_set(SYS_MODULE_RS485_MASTER, SYS_STATUS_OFFLINE);
     }
+
+#if CONFIG_APP_MB_TCP_ENABLE
+    /* Modbus TCP (EVN profile) — skip in engineering mode. Binds INADDR_ANY, so
+     * it survives the ETH/STA failover without knowing which netif is live. */
+    if (!engineering_mode) {
+        boot_manager_step("Modbus TCP", modbus_tcp_task_start());
+    } else {
+        ESP_LOGI(TAG, "Modbus TCP skipped (engineering mode)");
+    }
+#endif
 
 #if CONFIG_APP_CONSOLE_ENABLE
     boot_manager_step("Console", console_task_start());

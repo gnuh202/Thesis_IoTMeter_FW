@@ -29,7 +29,7 @@ esp_err_t calib_backup_json(char *json_out, size_t cap, size_t *json_len);
 #define SD_EVENTS_DIR SD_MOUNT_POINT "/EVENTS"
 #define SD_ENERGY_DIR SD_MOUNT_POINT "/ENERGY"
 #define SD_CALIB_DIR SD_MOUNT_POINT "/CALIB"
-#define SD_EVENTS_FILE SD_EVENTS_DIR "/EVENTS.LOG"
+#define SD_EVENTS_FILE SD_EVENTS_DIR "/FAULTS.CSV"
 #define SD_ENERGY_FILE SD_ENERGY_DIR "/ENERGY.CSV"
 
 #define SD_MONITOR_TASK_STACK 4096
@@ -190,21 +190,31 @@ static esp_err_t append_line(const char *path, const char *line)
     return ret;
 }
 
-esp_err_t sd_card_log_event(const char *fmt, ...)
+/* Size of a log file in bytes, or 0 when it does not exist yet. */
+static long log_file_size(const char *path)
 {
-    ESP_RETURN_ON_FALSE(fmt != NULL, ESP_ERR_INVALID_ARG, TAG, "fmt is NULL");
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return 0;
+    }
+    return (long)st.st_size;
+}
+
+esp_err_t sd_card_log_fault_csv(const char *header, const char *line)
+{
+    ESP_RETURN_ON_FALSE(line != NULL, ESP_ERR_INVALID_ARG, TAG, "line is NULL");
     if (!s_mounted || s_lock == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    char line[256];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(line, sizeof(line), fmt, args);
-    va_end(args);
-
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    esp_err_t ret = append_line(SD_EVENTS_FILE, line);
+    esp_err_t ret = ESP_OK;
+    if (header != NULL && log_file_size(SD_EVENTS_FILE) == 0) {
+        ret = append_line(SD_EVENTS_FILE, header);
+    }
+    if (ret == ESP_OK) {
+        ret = append_line(SD_EVENTS_FILE, line);
+    }
     xSemaphoreGive(s_lock);
     return ret;
 }
@@ -218,6 +228,64 @@ esp_err_t sd_card_log_energy(const char *line)
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t ret = append_line(SD_ENERGY_FILE, line);
+    xSemaphoreGive(s_lock);
+    return ret;
+}
+
+/* Size of the energy CSV in bytes, or 0 when it does not exist yet. */
+static long energy_file_size(void)
+{
+    return log_file_size(SD_ENERGY_FILE);
+}
+
+/*
+ * Shift the generation chain: .003 is dropped, .002 -> .003, .001 -> .002 and
+ * the live CSV becomes .001. Each step is independent — a missing generation
+ * is not an error, it just means the chain is not full yet.
+ */
+static void energy_rotate_generations(void)
+{
+    char older[64];
+    char newer[64];
+
+    remove(SD_ENERGY_DIR "/ENERGY.003");
+    for (int gen = 2; gen >= 1; gen--) {
+        snprintf(newer, sizeof(newer), SD_ENERGY_DIR "/ENERGY.%03d", gen + 1);
+        snprintf(older, sizeof(older), SD_ENERGY_DIR "/ENERGY.%03d", gen);
+        rename(older, newer);
+    }
+    if (rename(SD_ENERGY_FILE, SD_ENERGY_DIR "/ENERGY.001") != 0) {
+        ESP_LOGW(TAG, "energy log rotate failed (errno=%d)", errno);
+    } else {
+        ESP_LOGI(TAG, "energy log rotated to ENERGY.001");
+    }
+}
+
+esp_err_t sd_card_log_energy_csv(const char *header, const char *line, uint32_t max_kb)
+{
+    ESP_RETURN_ON_FALSE(line != NULL, ESP_ERR_INVALID_ARG, TAG, "line is NULL");
+    if (!s_mounted || s_lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+
+    if (max_kb > 0 && energy_file_size() >= (long)max_kb * 1024L) {
+        energy_rotate_generations();
+    }
+
+    /* A zero-size (or absent) file needs the schema row first, whether that is
+     * a fresh card, the file just rotated away, or the user deleted it. */
+    esp_err_t ret = ESP_OK;
+    if (header != NULL && energy_file_size() == 0) {
+        ret = append_line(SD_ENERGY_FILE, header);
+        if (ret != ESP_OK) {
+            xSemaphoreGive(s_lock);
+            return ret;
+        }
+    }
+
+    ret = append_line(SD_ENERGY_FILE, line);
     xSemaphoreGive(s_lock);
     return ret;
 }
@@ -245,11 +313,8 @@ static void sd_monitor_task(void *arg)
 
         if (stable_present >= SD_DEBOUNCE_SAMPLES && !s_mounted) {
             xSemaphoreTake(s_lock, portMAX_DELAY);
-            esp_err_t ret = sd_mount_locked();
+            sd_mount_locked();
             xSemaphoreGive(s_lock);
-            if (ret == ESP_OK) {
-                sd_card_log_event("boot: card mounted");
-            }
         } else if (stable_absent >= SD_DEBOUNCE_SAMPLES && s_mounted) {
             ESP_LOGW(TAG, "card removed, unmounting");
             xSemaphoreTake(s_lock, portMAX_DELAY);

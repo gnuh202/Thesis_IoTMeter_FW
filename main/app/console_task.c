@@ -1202,6 +1202,7 @@ static int cmd_reboot(int argc, char **argv)
 {
     printf("rebooting...\n");
     fflush(stdout);
+    energy_meter_flush_persist();
     vTaskDelay(pdMS_TO_TICKS(200));
     esp_restart();
     return 0; /* unreachable */
@@ -1657,6 +1658,9 @@ static int cmd_cfg_reset(int argc, char **argv)
      * default configuration. */
     printf("factory reset done; rebooting to run on default configuration...\n");
     fflush(stdout);
+    /* Energy survives a factory reset by design (it is the meter reading, not a
+     * setting), so commit it before the restart. */
+    energy_meter_flush_persist();
     vTaskDelay(pdMS_TO_TICKS(300));
     esp_restart();
     return 0;

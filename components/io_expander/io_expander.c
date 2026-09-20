@@ -58,6 +58,8 @@ static bool s_last_in0;
 static bool s_last_in1;
 static bool s_out0_level;   /* cached last-set output levels (write-only pins) */
 static bool s_out1_level;
+static io_expander_input_cb_t s_input_cb;
+static void *s_input_cb_ctx;
 
 static void IRAM_ATTR io_expander_isr_handler(void *arg)
 {
@@ -93,6 +95,10 @@ static void io_expander_task(void *arg)
                 s_last_in0 = in0;
                 s_last_in1 = in1;
                 ESP_LOGI(TAG, "PCF8574 inputs changed: IN0=%d IN1=%d", in0, in1);
+                io_expander_input_cb_t cb = s_input_cb;
+                if (cb != NULL) {
+                    cb(in0, in1, s_input_cb_ctx);
+                }
             }
         }
     }
@@ -391,6 +397,14 @@ esp_err_t io_expander_get_out1(bool *level)
     ESP_RETURN_ON_FALSE(level != NULL, ESP_ERR_INVALID_ARG, TAG, "level is NULL");
     *level = s_out1_level;
     return ESP_OK;
+}
+
+void io_expander_set_input_callback(io_expander_input_cb_t cb, void *ctx)
+{
+    /* Publish the context before the callback pointer so the expander task can
+     * never observe a new callback against a stale context. */
+    s_input_cb_ctx = ctx;
+    s_input_cb = cb;
 }
 
 esp_err_t io_expander_get_in0(bool *level)

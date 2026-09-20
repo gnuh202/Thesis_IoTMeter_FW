@@ -2,6 +2,8 @@
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -29,13 +31,43 @@ bool sd_card_is_inserted(void);
 /* True if a FAT filesystem is currently mounted and ready for logging. */
 bool sd_card_is_mounted(void);
 
-/* Append a line to the events log (failures/events). Adds a newline. Returns
- * ESP_ERR_INVALID_STATE if no card is mounted. */
-esp_err_t sd_card_log_event(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/*
+ * Append one row to the grid-fault log, /sdcard/EVENTS/FAULTS.CSV.
+ *
+ * This file records POWER-GRID faults only — over/under voltage, over-current,
+ * phase loss, frequency out of band, IC fatal error — never board or firmware
+ * events (boot, card mount, network). An operator reading it should see a list
+ * of grid incidents with their times, nothing else.
+ *
+ *   header - column header row (no newline), written automatically whenever
+ *            the file is new or empty. May be NULL to skip it.
+ *   line   - the data row (no newline).
+ *
+ * Returns ESP_ERR_INVALID_STATE if no card is mounted, so callers can log
+ * opportunistically without tracking card presence.
+ */
+esp_err_t sd_card_log_fault_csv(const char *header, const char *line);
 
 /* Append a pre-formatted line to the energy log. Adds a newline. Returns
  * ESP_ERR_INVALID_STATE if no card is mounted. */
 esp_err_t sd_card_log_energy(const char *line);
+
+/*
+ * Append a CSV row to the energy log, with schema header and size rotation.
+ *
+ *   header  - column header row (no newline). Written automatically whenever
+ *             the target file is new or empty, so a fresh card, a rotated file
+ *             and a card formatted by the user all end up with a readable CSV.
+ *             May be NULL to skip the header.
+ *   line    - the data row (no newline).
+ *   max_kb  - rotate when the file reaches this many KiB; 0 disables rotation.
+ *             ENERGY.CSV -> ENERGY.001 -> ENERGY.002 -> ENERGY.003 -> deleted,
+ *             so the card keeps the newest four generations and never fills.
+ *
+ * Rotation is size-based on purpose: date-based names would need a trustworthy
+ * clock, which this device does not have until an RTC is fitted.
+ */
+esp_err_t sd_card_log_energy_csv(const char *header, const char *line, uint32_t max_kb);
 
 /* Calibration backup helpers */
 typedef struct {

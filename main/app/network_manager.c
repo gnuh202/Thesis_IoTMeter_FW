@@ -14,6 +14,7 @@
 #include "sdkconfig.h"
 #include "config_manager.h"
 #include "config_store.h"
+#include "energy_meter_task.h"
 #include "ethernet_driver.h"
 #include "web_portal.h"
 #include "wifi_manager.h"
@@ -148,6 +149,11 @@ static esp_err_t start_ap_with_portal(void)
     }
 
     set_ap_active(true);
+
+    /* The portal pauses the measurement poll for as long as the operator stays
+     * in it, and the session usually ends in a reboot. Commit the energy
+     * accumulators now so nothing measured before the portal can be lost. */
+    energy_meter_flush_persist();
     return ESP_OK;
 }
 

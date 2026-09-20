@@ -2,11 +2,13 @@
 
 #include <limits.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "atm90e32as.h"
+#include "alarm_manager.h"
 #include "config_manager.h"
 #include "driver/gpio.h"
 #include "esp_check.h"
@@ -24,6 +26,7 @@
 #include "sdkconfig.h"
 #include "spi_bus_shared.h"
 #include "system_status.h"
+#include "time_source.h"
 #include "esp_crc.h"
 
 #ifndef CONFIG_APP_ATM90E32AS_DEFAULT_MODE_3P3W
@@ -32,6 +35,24 @@
 
 #ifndef CONFIG_APP_METER_NOLOAD_CURRENT_MA
 #define CONFIG_APP_METER_NOLOAD_CURRENT_MA 50
+#endif
+
+/* Energy persistence / SD logging knobs (Kconfig "Energy persistence and
+ * logging"); fallbacks keep the file building against an older sdkconfig. */
+#ifndef CONFIG_APP_ENERGY_PERSIST_THRESHOLD_WH
+#define CONFIG_APP_ENERGY_PERSIST_THRESHOLD_WH 50
+#endif
+#ifndef CONFIG_APP_ENERGY_PERSIST_PERIOD_S
+#define CONFIG_APP_ENERGY_PERSIST_PERIOD_S 600
+#endif
+#ifndef CONFIG_APP_ENERGY_SD_LOG_PERIOD_S
+#define CONFIG_APP_ENERGY_SD_LOG_PERIOD_S 300
+#endif
+#ifndef CONFIG_APP_ENERGY_SD_LOG_ENABLE
+#define CONFIG_APP_ENERGY_SD_LOG_ENABLE 1
+#endif
+#ifndef CONFIG_APP_ENERGY_SD_LOG_MAX_KB
+#define CONFIG_APP_ENERGY_SD_LOG_MAX_KB 8192
 #endif
 
 /* Fallbacks if sdkconfig not yet regenerated after Kconfig change. */
@@ -83,12 +104,22 @@ static double s_active_export_wh;
 static double s_reactive_import_varh;
 static double s_reactive_export_varh;
 
-/* Demand: moving average of total active power over a configurable window. */
-static double s_demand_accum_w;
-static uint32_t s_demand_samples;
+/* Demand: moving average of total active power over a configurable window.
+ * Integrated over real elapsed time (P*dt) rather than counted in samples, so
+ * a paused or failed tick shortens the data the average is built from instead
+ * of silently stretching a "15 minute" window into 25 real minutes. */
+static double s_demand_accum_ws;     /* watt-seconds accumulated this window */
+static double s_demand_elapsed_s;    /* seconds of real data in this window */
+static int64_t s_demand_last_us;     /* esp_timer stamp of the previous sample */
 static float s_demand_value_w;
 static float s_demand_max_w;
 static uint16_t s_demand_window_min = 15;
+
+/* Energy persistence bookkeeping (s_measurements_mutex for the counters,
+ * plain statics for the task-local timers). */
+static double s_persist_saved_total_wh;  /* sum of all four counters at last save */
+static int64_t s_persist_last_save_us;
+static bool s_persist_dirty;
 
 #define ENERGY_METER_CALIB_MAGIC 0x9032CA1BU
 /* Single calibration profile (no 3W/4W slots — wiring switch only drives relay,
@@ -114,6 +145,207 @@ static atm90e32as_calib_t s_calib;
 static esp_err_t energy_meter_apply_locked(const atm90e32as_calib_t *target);
 static void energy_meter_stamp_chipwide_locked(atm90e32as_pga_gain_t pga,
                                               atm90e32as_line_freq_t freq);
+
+/* ---------------------------------------------------------------------------
+ * Energy persistence
+ *
+ * The ATM90E32AS total-energy registers are read-to-clear (datasheet Table-11,
+ * type R/C): the chip stores nothing, so the firmware's RAM accumulators ARE
+ * the meter reading. Without this they reset to zero on every reboot, OTA or
+ * brownout — unacceptable for a meter.
+ *
+ * Two alternating slots + CRC32 make a write atomic in practice: power lost
+ * mid-write leaves the previous slot intact, and the loader simply picks the
+ * highest sequence number that passes CRC. Writes are triggered by accumulated
+ * energy rather than by a timer, so flash wear scales with actual consumption.
+ * ------------------------------------------------------------------------- */
+#define ENERGY_ACCUM_NVS_NAMESPACE "energy"
+#define ENERGY_ACCUM_KEY_A         "accum_a"
+#define ENERGY_ACCUM_KEY_B         "accum_b"
+#define ENERGY_ACCUM_MAGIC         0xE4E59001U
+#define ENERGY_ACCUM_VERSION       2U
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t seq;                 /* newer slot wins; wraps harmlessly */
+    double   active_import_wh;
+    double   active_export_wh;
+    double   reactive_import_varh;
+    double   reactive_export_varh;
+    float    demand_max_w;
+    uint16_t demand_window_min;
+    uint16_t reserved;
+    uint32_t crc32;               /* over everything above */
+} energy_accum_blob_t;
+
+/* The struct is 8-byte aligned because of the doubles, so it carries four bytes
+ * of TRAILING padding after crc32. That makes "sizeof(blob) - sizeof(crc32)"
+ * land four bytes past the start of crc32 instead of on it — the checksummed
+ * region would then include the checksum field itself, which is zero while
+ * saving and non-zero while loading, so every single load would fail CRC and
+ * silently reset the meter to zero. The CRC must be taken over exactly the
+ * bytes BEFORE crc32; offsetof() is the only expression that says that.
+ * The assert pins the layout so no future field insertion can reintroduce
+ * padding inside the checksummed region. */
+_Static_assert(offsetof(energy_accum_blob_t, crc32) ==
+                   sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint16_t) +
+                   4 * sizeof(double) + sizeof(float) + 2 * sizeof(uint16_t),
+               "unexpected padding inside energy_accum_blob_t");
+
+static uint16_t s_persist_seq;
+
+static uint32_t energy_accum_crc(const energy_accum_blob_t *b)
+{
+    return esp_crc32_le(0, (const uint8_t *)b,
+                        offsetof(energy_accum_blob_t, crc32));
+}
+
+/* Load the newest valid slot. Missing or corrupt on both slots is not an
+ * error: a first boot (or a flash erase) legitimately starts from zero. */
+static void energy_accum_load(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(ENERGY_ACCUM_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        ESP_LOGI(TAG, "no persisted energy yet; counters start at zero");
+        return;
+    }
+
+    const char *keys[2] = { ENERGY_ACCUM_KEY_A, ENERGY_ACCUM_KEY_B };
+    energy_accum_blob_t best;
+    bool have_best = false;
+
+    for (int i = 0; i < 2; i++) {
+        energy_accum_blob_t blob;
+        size_t len = sizeof(blob);
+        if (nvs_get_blob(nvs, keys[i], &blob, &len) != ESP_OK || len != sizeof(blob)) {
+            continue;
+        }
+        if (blob.magic != ENERGY_ACCUM_MAGIC || blob.version != ENERGY_ACCUM_VERSION) {
+            continue;
+        }
+        if (blob.crc32 != energy_accum_crc(&blob)) {
+            ESP_LOGW(TAG, "energy slot %s failed CRC; ignoring", keys[i]);
+            continue;
+        }
+        /* Signed comparison of the difference handles seq wrap-around. */
+        if (!have_best || (int16_t)(blob.seq - best.seq) > 0) {
+            best = blob;
+            have_best = true;
+        }
+    }
+    nvs_close(nvs);
+
+    if (!have_best) {
+        ESP_LOGI(TAG, "no valid persisted energy; counters start at zero");
+        return;
+    }
+
+    s_active_import_wh = best.active_import_wh;
+    s_active_export_wh = best.active_export_wh;
+    s_reactive_import_varh = best.reactive_import_varh;
+    s_reactive_export_varh = best.reactive_export_varh;
+    s_demand_max_w = best.demand_max_w;
+    if (best.demand_window_min > 0) {
+        s_demand_window_min = best.demand_window_min;
+    }
+    s_persist_seq = best.seq;
+    s_persist_saved_total_wh = s_active_import_wh + s_active_export_wh +
+                               s_reactive_import_varh + s_reactive_export_varh;
+
+    ESP_LOGI(TAG, "energy restored: %.3f kWh import, %.3f kWh export, "
+                  "%.3f kvarh import, %.3f kvarh export (seq %u)",
+             s_active_import_wh / 1000.0, s_active_export_wh / 1000.0,
+             s_reactive_import_varh / 1000.0, s_reactive_export_varh / 1000.0,
+             (unsigned)best.seq);
+}
+
+/* Write the counters to the slot NOT holding the current newest copy, so a
+ * failed write never destroys the last good value. */
+static esp_err_t energy_accum_save(void)
+{
+    if (s_measurements_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    energy_accum_blob_t blob = {
+        .magic = ENERGY_ACCUM_MAGIC,
+        .version = ENERGY_ACCUM_VERSION,
+    };
+
+    xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
+    blob.active_import_wh = s_active_import_wh;
+    blob.active_export_wh = s_active_export_wh;
+    blob.reactive_import_varh = s_reactive_import_varh;
+    blob.reactive_export_varh = s_reactive_export_varh;
+    blob.demand_max_w = s_demand_max_w;
+    blob.demand_window_min = s_demand_window_min;
+    double total = s_active_import_wh + s_active_export_wh +
+                   s_reactive_import_varh + s_reactive_export_varh;
+    xSemaphoreGive(s_measurements_mutex);
+
+    blob.seq = (uint16_t)(s_persist_seq + 1);
+    blob.crc32 = energy_accum_crc(&blob);
+
+    /* Odd sequence -> slot A, even -> slot B. Alternating on every write keeps
+     * the previous copy readable for the whole duration of this one. */
+    const char *key = (blob.seq & 1U) ? ENERGY_ACCUM_KEY_A : ENERGY_ACCUM_KEY_B;
+
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(ENERGY_ACCUM_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = nvs_set_blob(nvs, key, &blob, sizeof(blob));
+    if (ret == ESP_OK) {
+        ret = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (ret == ESP_OK) {
+        s_persist_seq = blob.seq;
+        s_persist_saved_total_wh = total;
+        s_persist_last_save_us = esp_timer_get_time();
+        s_persist_dirty = false;
+        ESP_LOGD(TAG, "energy persisted to %s (seq %u, %.3f kWh)",
+                 key, (unsigned)blob.seq, blob.active_import_wh / 1000.0);
+    }
+    return ret;
+}
+
+/* Save when enough energy has accumulated to be worth a flash write, or when
+ * the background period expires on a lightly loaded meter. */
+static void energy_accum_service(void)
+{
+    if (s_measurements_mutex == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
+    double total = s_active_import_wh + s_active_export_wh +
+                   s_reactive_import_varh + s_reactive_export_varh;
+    xSemaphoreGive(s_measurements_mutex);
+
+    double delta = total - s_persist_saved_total_wh;
+    if (delta < 0.0) {
+        delta = -delta;    /* a reset moved the counters backwards */
+    }
+    if (delta > 0.0) {
+        s_persist_dirty = true;
+    }
+
+    bool by_energy = delta >= (double)CONFIG_APP_ENERGY_PERSIST_THRESHOLD_WH;
+    bool by_time = s_persist_dirty &&
+                   (esp_timer_get_time() - s_persist_last_save_us) >=
+                       ((int64_t)CONFIG_APP_ENERGY_PERSIST_PERIOD_S * 1000000LL);
+
+    if (by_energy || by_time) {
+        esp_err_t ret = energy_accum_save();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "energy persist failed: %s", esp_err_to_name(ret));
+        }
+    }
+}
 
 /* Kconfig "ATM90E32AS Parameters" — PGA fixed at 4× per thesis requirement. */
 static atm90e32as_pga_gain_t energy_meter_kconfig_default_pga(void)
@@ -577,53 +809,187 @@ static void energy_meter_apply_noise_floor(atm90e32as_measurements_t *m)
     }
 }
 
+/* Fold one read-to-clear energy sample into the running counters.
+ *
+ * Only the fields whose valid_mask bit is set are accumulated: a register that
+ * failed to read was never cleared, so its energy is still in the chip and
+ * arrives with the next sample instead of being lost.
+ *
+ * nct_scale is the CT-ratio rescale factor, applied here for the same reason
+ * it is applied to power: the chip measured through the calibration CT, and
+ * the operator may since have fitted a different one. Without it the kWh on
+ * screen would contradict the kW beside it. */
+static void energy_meter_accumulate(const atm90e32as_energy_counts_t *counts, float nct_scale)
+{
+    if (s_measurements_mutex == NULL) {
+        return;
+    }
+    const double k = (double)ATM90E32AS_ENERGY_COUNT_TO_WH * (double)nct_scale;
+
+    xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
+    if (counts->valid_mask & ATM90E32AS_ENERGY_VALID_ACTIVE_IMPORT) {
+        s_active_import_wh += counts->active_import * k;
+    }
+    if (counts->valid_mask & ATM90E32AS_ENERGY_VALID_ACTIVE_EXPORT) {
+        s_active_export_wh += counts->active_export * k;
+    }
+    if (counts->valid_mask & ATM90E32AS_ENERGY_VALID_REACTIVE_IMPORT) {
+        s_reactive_import_varh += counts->reactive_import * k;
+    }
+    if (counts->valid_mask & ATM90E32AS_ENERGY_VALID_REACTIVE_EXPORT) {
+        s_reactive_export_varh += counts->reactive_export * k;
+    }
+    xSemaphoreGive(s_measurements_mutex);
+}
+
+#if CONFIG_APP_ENERGY_SD_LOG_ENABLE
+/* Append one CSV row to the SD energy log.
+ *
+ * Column layout (see docs/energy_logging.md — do not reorder, the PC-side
+ * tooling reads by position):
+ *   timestamp,tq,boot,uptime_s,imp_kwh,exp_kwh,imp_kvarh,exp_kvarh,
+ *   dmd_w,dmd_max_w,p_kw,pf,freq
+ *
+ * `tq` is the time-quality flag from time_source: 'U' until an RTC is fitted,
+ * which is exactly when `timestamp` reads 1970. `boot` and `uptime_s` are the
+ * trustworthy time axis meanwhile — they separate sessions and order rows
+ * within one even though every row shows the same date.
+ *
+ * Grid faults are NOT a column here: they are edges, not a periodic quantity,
+ * and a 5-minute sample would miss short ones entirely. They go to
+ * /sdcard/EVENTS/FAULTS.CSV with their own timestamps instead.
+ *
+ * Called with NO mutex held: a FAT write can take tens of milliseconds and
+ * holding s_measurements_mutex across it would stall MQTT, Modbus and the LCD.
+ * The caller passes a snapshot taken under the mutex instead. */
+#define ENERGY_CSV_HEADER \
+    "timestamp,tq,boot,uptime_s,imp_kwh,exp_kwh,imp_kvarh,exp_kvarh," \
+    "dmd_w,dmd_max_w,p_kw,pf,freq"
+
+static void energy_meter_log_to_sd(const energy_meter_energy_t *e,
+                                   const energy_meter_demand_t *d,
+                                   float p_total_w, float pf, float freq)
+{
+    /* The card is hot-pluggable, so "not mounted" is a normal state, not a
+     * fault. Log the transition once per episode rather than every period. */
+    static bool s_sd_missing_logged;
+
+    if (!sd_card_is_mounted()) {
+        if (!s_sd_missing_logged) {
+            s_sd_missing_logged = true;
+            ESP_LOGI(TAG, "no SD card mounted; energy CSV logging paused");
+        }
+        return;
+    }
+
+    char stamp[TIME_SOURCE_STAMP_LEN];
+    time_source_format_stamp(stamp, sizeof(stamp));
+
+    char line[192];
+    snprintf(line, sizeof(line),
+             "%s,%c,%u,%u,%.3f,%.3f,%.3f,%.3f,%.1f,%.1f,%.3f,%.3f,%.2f",
+             stamp,
+             time_source_quality_char(),
+             (unsigned)time_source_boot_count(),
+             (unsigned)time_source_uptime_s(),
+             e->active_import_kwh, e->active_export_kwh,
+             e->reactive_import_kvarh, e->reactive_export_kvarh,
+             d->active_power_demand_w, d->active_power_demand_max_w,
+             p_total_w / 1000.0f, pf, freq);
+
+    esp_err_t ret = sd_card_log_energy_csv(ENERGY_CSV_HEADER, line,
+                                           CONFIG_APP_ENERGY_SD_LOG_MAX_KB);
+    if (ret == ESP_OK) {
+        if (s_sd_missing_logged) {
+            s_sd_missing_logged = false;
+            ESP_LOGI(TAG, "SD card back; energy CSV logging resumed");
+        }
+    } else {
+        ESP_LOGW(TAG, "energy CSV write failed: %s", esp_err_to_name(ret));
+    }
+}
+#endif /* CONFIG_APP_ENERGY_SD_LOG_ENABLE */
+
 static void energy_meter_task(void *arg)
 {
     atm90e32as_measurements_t measurements;
     atm90e32as_energy_counts_t energy_counts;
 
-    const uint32_t demand_window_samples_base =
-        (uint32_t)(60000U / CONFIG_APP_ENERGY_METER_POLL_PERIOD_MS);
+    /* Restore the persisted counters before the first read so nothing is
+     * published as zero and then jumps. */
+    energy_accum_load();
+    s_persist_last_save_us = esp_timer_get_time();
+    s_demand_last_us = esp_timer_get_time();
+
+#if CONFIG_APP_ENERGY_SD_LOG_ENABLE
+    int64_t sd_log_last_us = esp_timer_get_time();
+#endif
+    /* While the config portal is open the poll body is skipped, but the
+     * read-to-clear energy registers keep filling: a uint16 count caps at
+     * 204.8 Wh, so a 2 kW load overflows them in about 6 minutes of portal
+     * time and the energy is lost silently. Drain them on this slower tick. */
+    int64_t config_mode_drain_us = 0;
 
     while (1) {
-        /* Config portal active: the operator is doing settings, so pause
-         * SPI polling (cooperative; resumes on the tick after it closes). */
+        /* Config portal active: the operator is doing settings, so pause the
+         * measurement poll (cooperative; resumes on the tick after it closes).
+         * Energy counts are still drained periodically — see above. */
         if (network_manager_is_config_mode()) {
+            int64_t now_us = esp_timer_get_time();
+            if ((now_us - config_mode_drain_us) >= 10LL * 1000000LL) {
+                config_mode_drain_us = now_us;
+                xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+                esp_err_t drain_ret = atm90e32as_read_energy_counts(s_meter, &energy_counts);
+                xSemaphoreGive(s_meter_mutex);
+                if (drain_ret == ESP_OK) {
+                    energy_meter_accumulate(&energy_counts, 1.0f);
+                }
+            }
+            /* The demand window must not count portal time as measured data. */
+            s_demand_last_us = 0;
             vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_ENERGY_METER_POLL_PERIOD_MS));
             continue;
         }
+        config_mode_drain_us = 0;
 
         xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
         esp_err_t ret = atm90e32as_read_measurements(s_meter, &measurements);
-        esp_err_t energy_ret = ESP_FAIL;
-        if (ret == ESP_OK) {
-            energy_ret = atm90e32as_read_energy_counts(s_meter, &energy_counts);
-        }
+        /* Independent of the measurement read: these registers are
+         * read-to-clear, so skipping them because an unrelated read failed
+         * only lets them overflow. */
+        esp_err_t energy_ret = atm90e32as_read_energy_counts(s_meter, &energy_counts);
         xSemaphoreGive(s_meter_mutex);
 
+        /* CT ratio rescale: if the operator swapped CT since calibration,
+         * rescale digitally. PGA=4 fixed → Igain stays valid; only NCT
+         * changes. ct_ratio_calib=0 (legacy/unset) → no rescale (1.0×).
+         * Energy deltas get the SAME factor as power, otherwise the kWh on
+         * screen would contradict the kW right next to it. */
+        float nct_scale = 1.0f;
+        uint16_t ct_ratio = 0, ct_ratio_calib = 0;
+        if (config_manager_get_ct_ratios(&ct_ratio, &ct_ratio_calib) == ESP_OK &&
+            ct_ratio_calib >= 1000U && ct_ratio >= 1000U && ct_ratio != ct_ratio_calib) {
+            nct_scale = (float)ct_ratio / (float)ct_ratio_calib;
+        }
+
+        if (energy_ret == ESP_OK) {
+            energy_meter_accumulate(&energy_counts, nct_scale);
+        }
+
         if (ret == ESP_OK) {
-            /* CT ratio rescale: if operator swapped CT since calibration, rescale
-             * measurements digitally. PGA=4 fixed → Igain stays valid; only NCT changes.
-             * ct_ratio_calib=0 (legacy/unset) → no rescale (1.0×). */
-            config_manager_t *cfg = malloc(sizeof(*cfg));
-            if (cfg != NULL && config_manager_get(cfg) == ESP_OK) {
-                if (cfg->ct_ratio_calib >= 1000U && cfg->ct_ratio >= 1000U &&
-                    cfg->ct_ratio != cfg->ct_ratio_calib) {
-                    float nct_scale = (float)cfg->ct_ratio / (float)cfg->ct_ratio_calib;
-                    for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
-                        measurements.current[i] *= nct_scale;
-                        measurements.current_peak[i] *= nct_scale;
-                        /* Power rescale: P=V×I, I rescaled → P rescaled */
-                        measurements.active_power[i] *= nct_scale;
-                        measurements.reactive_power[i] *= nct_scale;
-                        measurements.apparent_power[i] *= nct_scale;
-                    }
-                    measurements.total_active_power *= nct_scale;
-                    measurements.total_reactive_power *= nct_scale;
-                    measurements.total_apparent_power *= nct_scale;
+            if (nct_scale != 1.0f) {
+                for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+                    measurements.current[i] *= nct_scale;
+                    measurements.current_peak[i] *= nct_scale;
+                    /* Power rescale: P=V×I, I rescaled → P rescaled */
+                    measurements.active_power[i] *= nct_scale;
+                    measurements.reactive_power[i] *= nct_scale;
+                    measurements.apparent_power[i] *= nct_scale;
                 }
+                measurements.total_active_power *= nct_scale;
+                measurements.total_reactive_power *= nct_scale;
+                measurements.total_apparent_power *= nct_scale;
             }
-            free(cfg);
 
             /* Clean the noise floor before anything consumes this snapshot. */
             energy_meter_apply_noise_floor(&measurements);
@@ -632,28 +998,30 @@ static void energy_meter_task(void *arg)
             s_latest_measurements = measurements;
             s_measurements_valid = true;
 
-            /* Accumulate energy (read-to-clear counts -> Wh/varh). */
-            if (energy_ret == ESP_OK) {
-                s_active_import_wh += energy_counts.active_import * (double)ATM90E32AS_ENERGY_COUNT_TO_WH;
-                s_active_export_wh += energy_counts.active_export * (double)ATM90E32AS_ENERGY_COUNT_TO_WH;
-                s_reactive_import_varh += energy_counts.reactive_import * (double)ATM90E32AS_ENERGY_COUNT_TO_WH;
-                s_reactive_export_varh += energy_counts.reactive_export * (double)ATM90E32AS_ENERGY_COUNT_TO_WH;
+            /* Demand: average power over real elapsed time. Integrating P*dt
+             * (rather than averaging samples) keeps a "15 minute" window 15
+             * real minutes long even when ticks are missed. A gap longer than
+             * twice the poll period is discarded rather than extrapolated —
+             * no data is better than invented data. */
+            int64_t now_us = esp_timer_get_time();
+            if (s_demand_last_us != 0) {
+                double dt_s = (double)(now_us - s_demand_last_us) / 1000000.0;
+                if (dt_s > 0.0 &&
+                    dt_s <= (2.0 * CONFIG_APP_ENERGY_METER_POLL_PERIOD_MS / 1000.0)) {
+                    s_demand_accum_ws += (double)measurements.total_active_power * dt_s;
+                    s_demand_elapsed_s += dt_s;
+                }
             }
+            s_demand_last_us = now_us;
 
-            /* Demand: block moving average of total active power. */
-            uint32_t window_samples = demand_window_samples_base * (s_demand_window_min ? s_demand_window_min : 1);
-            if (window_samples == 0) {
-                window_samples = 1;
-            }
-            s_demand_accum_w += measurements.total_active_power;
-            s_demand_samples++;
-            if (s_demand_samples >= window_samples) {
-                s_demand_value_w = (float)(s_demand_accum_w / s_demand_samples);
+            double window_s = (double)(s_demand_window_min ? s_demand_window_min : 1) * 60.0;
+            if (s_demand_elapsed_s >= window_s) {
+                s_demand_value_w = (float)(s_demand_accum_ws / s_demand_elapsed_s);
                 if (s_demand_value_w > s_demand_max_w) {
                     s_demand_max_w = s_demand_value_w;
                 }
-                s_demand_accum_w = 0.0;
-                s_demand_samples = 0;
+                s_demand_accum_ws = 0.0;
+                s_demand_elapsed_s = 0.0;
             }
 
             /* Feed the central data model (pure copy; no hardware access). */
@@ -712,6 +1080,21 @@ static void energy_meter_task(void *arg)
             /* First successful read after init or error recovery -> READY. */
             system_status_set(SYS_MODULE_ATM90, SYS_STATUS_READY);
 
+            /* Alarm: the IC does the detection, this task owns the SPI link.
+             * Threshold writes only happen when an apply is queued (or the
+             * over-current anchor is still waiting for real load current);
+             * the evaluation below is pure decode of sys_status0/1. */
+            if (alarm_manager_ic_access_pending()) {
+                config_manager_t *acfg = malloc(sizeof(*acfg));
+                if (acfg != NULL && config_manager_get(acfg) == ESP_OK) {
+                    xSemaphoreTake(s_meter_mutex, portMAX_DELAY);
+                    alarm_manager_apply_ic(s_meter, &s_applied_calib, acfg, &measurements);
+                    xSemaphoreGive(s_meter_mutex);
+                }
+                free(acfg);
+            }
+            alarm_manager_service(&measurements);
+
 #if CONFIG_APP_ENERGY_METER_LOG_EACH_SAMPLE
             ESP_LOGI(TAG,
                      "VA=%.2fV IA=%.3fA VB=%.2fV IB=%.3fA VC=%.2fV IC=%.3fA P=%.2fW F=%.2fHz PF=%.3f ST0=0x%04X ST1=0x%04X",
@@ -741,6 +1124,39 @@ static void energy_meter_task(void *arg)
         system_status_set(SYS_MODULE_SD_CARD,
                           sd_card_is_mounted() ? SYS_STATUS_READY
                           : (sd_card_is_inserted() ? SYS_STATUS_ERROR : SYS_STATUS_OFFLINE));
+
+        /* Persist the counters (energy-triggered, with a slow backstop) and
+         * refresh the epoch floor. Both no-op on most ticks. */
+        energy_accum_service();
+        time_source_service();
+
+#if CONFIG_APP_ENERGY_SD_LOG_ENABLE
+        if (ret == ESP_OK) {
+            int64_t now_us = esp_timer_get_time();
+            if ((now_us - sd_log_last_us) >=
+                ((int64_t)CONFIG_APP_ENERGY_SD_LOG_PERIOD_S * 1000000LL)) {
+                sd_log_last_us = now_us;
+
+                /* Snapshot under the mutex, write outside it: a FAT append can
+                 * take tens of ms and must not block the other consumers. */
+                energy_meter_energy_t e;
+                energy_meter_demand_t d;
+                xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
+                e.active_import_kwh = (float)(s_active_import_wh / 1000.0);
+                e.active_export_kwh = (float)(s_active_export_wh / 1000.0);
+                e.reactive_import_kvarh = (float)(s_reactive_import_varh / 1000.0);
+                e.reactive_export_kvarh = (float)(s_reactive_export_varh / 1000.0);
+                d.active_power_demand_w = s_demand_value_w;
+                d.active_power_demand_max_w = s_demand_max_w;
+                xSemaphoreGive(s_measurements_mutex);
+
+                energy_meter_log_to_sd(&e, &d,
+                                       measurements.total_active_power,
+                                       measurements.total_power_factor,
+                                       measurements.frequency);
+            }
+        }
+#endif
 
         vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_ENERGY_METER_POLL_PERIOD_MS));
     }
@@ -785,6 +1201,14 @@ esp_err_t energy_meter_reset_energy(void)
     s_reactive_export_varh = 0.0;
     xSemaphoreGive(s_measurements_mutex);
 
+    /* Commit immediately: an operator who clears the meter and pulls the power
+     * must not find the old reading back on the next boot. */
+    s_persist_dirty = true;
+    esp_err_t ret = energy_accum_save();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "energy reset not persisted: %s", esp_err_to_name(ret));
+    }
+    ESP_LOGI(TAG, "energy counters reset by user");
     return ESP_OK;
 }
 
@@ -793,13 +1217,30 @@ esp_err_t energy_meter_reset_demand(void)
     ESP_RETURN_ON_FALSE(s_measurements_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "meter not initialized");
 
     xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
-    s_demand_accum_w = 0.0;
-    s_demand_samples = 0;
+    s_demand_accum_ws = 0.0;
+    s_demand_elapsed_s = 0.0;
+    s_demand_last_us = 0;
     s_demand_value_w = 0.0f;
     s_demand_max_w = 0.0f;
     xSemaphoreGive(s_measurements_mutex);
 
+    /* demand_max lives in the same blob as the energy counters. */
+    s_persist_dirty = true;
+    esp_err_t ret = energy_accum_save();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "demand reset not persisted: %s", esp_err_to_name(ret));
+    }
+    ESP_LOGI(TAG, "demand reset by user");
     return ESP_OK;
+}
+
+esp_err_t energy_meter_flush_persist(void)
+{
+    if (s_measurements_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    time_source_flush();
+    return energy_accum_save();
 }
 
 esp_err_t energy_meter_set_demand_window_minutes(uint16_t minutes)
@@ -809,10 +1250,12 @@ esp_err_t energy_meter_set_demand_window_minutes(uint16_t minutes)
 
     xSemaphoreTake(s_measurements_mutex, portMAX_DELAY);
     s_demand_window_min = minutes;
-    s_demand_accum_w = 0.0;
-    s_demand_samples = 0;
+    s_demand_accum_ws = 0.0;
+    s_demand_elapsed_s = 0.0;
+    s_demand_last_us = 0;
     xSemaphoreGive(s_measurements_mutex);
 
+    s_persist_dirty = true;
     return ESP_OK;
 }
 
@@ -1013,6 +1456,10 @@ static esp_err_t energy_meter_apply_locked(const atm90e32as_calib_t *target)
         s_current_calib = *target;
         s_applied_calib = *target;
         s_calib = *target;
+        /* Gains just moved, so every anchored IC threshold is scaled against a
+         * stale gain. Re-anchor or the comparators silently judge against the
+         * old calibration. */
+        alarm_manager_request_apply();
         if (wiring_changed) vTaskDelay(pdMS_TO_TICKS(ENERGY_METER_MEASUREMENT_SETTLE_MS));
     }
     return ret;

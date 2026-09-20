@@ -109,15 +109,17 @@ menu "Application Configuration"
 
         menu "TCP Server"
             help
-                Modbus TCP server (this meter on Ethernet/Wi-Fi). Service is
-                not implemented yet — options reserve defaults for later.
+                Modbus TCP server exposing the EVN rooftop-PV monitoring profile
+                (QD-EVN 12/2024) on Ethernet/Wi-Fi. Served by an own socket
+                implementation, not esp-modbus: that component keeps one
+                process-wide slave instance, which the RS485 slave already owns.
 
             config APP_MB_TCP_ENABLE
-                bool "Enable Modbus TCP server (future)"
+                bool "Enable Modbus TCP server"
                 default n
                 help
-                    Placeholder. When the TCP server is implemented this builds
-                    and starts it. Keep off until the backend exists.
+                    Start the EVN Modbus TCP server. Functions FC01/02/03/04/05/06
+                    only, which is the set the decision requires.
 
             config APP_MB_TCP_UNIT_ID
                 hex "TCP unit ID"
@@ -126,6 +128,7 @@ menu "Application Configuration"
                 depends on APP_MB_TCP_ENABLE
                 help
                     Modbus unit identifier on TCP (often matches RTU slave ID).
+                    Requests addressed to 0x00 or 0xFF are also served.
 
             config APP_MB_TCP_PORT
                 int "TCP listen port"
@@ -135,13 +138,25 @@ menu "Application Configuration"
                 help
                     Standard Modbus TCP port is 502.
 
+            config APP_MB_TCP_ADDR_BASE
+                int "Register address base"
+                range 0 1
+                default 1
+                depends on APP_MB_TCP_ENABLE
+                help
+                    How to read the addresses printed in the decision. 1 means
+                    they are 1-based data-model numbers (input register "1" is
+                    PDU address 0), which matches the 3xxxx/4xxxx notation the
+                    document uses. Set 0 if the DSO gateway turns out to publish
+                    raw PDU addresses instead.
+
             config APP_MB_TCP_TASK_STACK_SIZE
                 int "Task stack size"
                 range 3072 16384
                 default 4096
                 depends on APP_MB_TCP_ENABLE
                 help
-                    Reserved stack size for the future TCP server task.
+                    Stack for the TCP server task (socket + frame buffers).
 
             config APP_MB_TCP_TASK_PRIORITY
                 int "Task priority"
@@ -149,8 +164,8 @@ menu "Application Configuration"
                 default 7
                 depends on APP_MB_TCP_ENABLE
                 help
-                    Reserved priority for the future TCP server task. Comm
-                    tier: equal to MQTT / RTU master tasks.
+                    Priority for the TCP server task. Comm tier: equal to
+                    MQTT / RTU master tasks.
         endmenu
 
     endmenu
@@ -519,6 +534,67 @@ menu "Application Configuration"
                 a meaningless P/PF on those phases. 0 disables the gate.
                 Applies to the main ATM90E32AS meter and to Modbus slave meters.
 
+        menu "Energy persistence and logging"
+            comment "The ATM90E32AS energy registers are read-to-clear: nothing survives in the chip"
+
+            config APP_ENERGY_PERSIST_THRESHOLD_WH
+                int "NVS save threshold (Wh)"
+                range 10 1000
+                default 50
+                help
+                    Accumulated energy since the last NVS write that triggers a
+                    new write. This is the maximum energy an unexpected power
+                    cut can lose. Two alternating slots plus a CRC mean a write
+                    interrupted mid-flight never corrupts the counter — the
+                    previous slot is still intact.
+
+                    At 5 kW a 50 Wh threshold writes about once every 36 s,
+                    roughly 880 erase cycles per sector per year against a
+                    100k-cycle endurance. Lower it for tighter accounting at
+                    the cost of flash life.
+
+            config APP_ENERGY_PERSIST_PERIOD_S
+                int "NVS background save period (s)"
+                range 60 3600
+                default 600
+                help
+                    Backstop save for a lightly loaded meter that would take
+                    hours to reach the Wh threshold. Only writes when the
+                    counters actually moved since the last save.
+
+            config APP_ENERGY_SD_LOG_ENABLE
+                bool "Log energy to SD card (CSV)"
+                default y
+                help
+                    Append a CSV row to /sdcard/ENERGY/ENERGY.CSV on a fixed
+                    period. The header is written automatically whenever the
+                    file is new or empty, so swapping cards keeps the log
+                    self-describing. Rows are skipped silently while no card is
+                    mounted.
+
+            config APP_ENERGY_SD_LOG_PERIOD_S
+                int "SD energy log period (s)"
+                depends on APP_ENERGY_SD_LOG_ENABLE
+                range 10 3600
+                default 300
+                help
+                    Period between CSV rows. Each row is roughly 110 bytes, so
+                    300 s produces about 1 MB per year.
+
+            config APP_ENERGY_SD_LOG_MAX_KB
+                int "SD energy log rotate size (KB)"
+                depends on APP_ENERGY_SD_LOG_ENABLE
+                range 64 65536
+                default 8192
+                help
+                    When ENERGY.CSV grows past this size it is rotated to
+                    ENERGY.001 (and .001 to .002, .002 to .003; the oldest is
+                    dropped). Rotation is by size rather than by date because
+                    the device has no trustworthy wall clock until an RTC is
+                    fitted — see the Time menu.
+
+        endmenu
+
         menu "Calibration Defaults"
             comment "Auto-calibration tolerance and sample defaults"
 
@@ -563,6 +639,50 @@ menu "Application Configuration"
                 "calib_001.dat" instead of just "cal_001.bin"). Uses ~512 bytes
                 of heap per concurrent file operation. Disable only if RAM is
                 critically constrained and all filenames follow strict 8.3 format.
+
+    endmenu
+
+    menu "Time"
+        comment "No RTC fitted yet: timestamps read 1970 and are flagged 'U' in logs"
+
+        config APP_TIME_TZ
+            string "POSIX timezone string"
+            default "ICT-7"
+            help
+                Timezone applied with setenv(\"TZ\")/tzset() at boot. Every
+                rendered timestamp (SD CSV, LCD, console) is local time in this
+                zone; MQTT and Modbus carry raw epoch seconds instead.
+                "ICT-7" is Indochina Time, UTC+7 with no DST.
+
+        config APP_TIME_NVS_SAVE_PERIOD_S
+            int "Epoch floor save period (s)"
+            range 60 3600
+            default 600
+            help
+                How often the current epoch is written to NVS once the clock
+                has a source. On the next boot that value is restored as a
+                lower bound so log rows still sort correctly, flagged 'E'
+                (estimate) rather than 'S' (synced).
+
+        config APP_TIME_RTC_ENABLE
+            bool "Read the clock from a DS1307 RTC"
+            default n
+            help
+                Not yet implemented — the hardware is not fitted. Turning this
+                on has no effect until components/ds1307 exists and
+                time_source_init() calls it. Left here so the wiring point is
+                explicit: the driver's only job is to hand an epoch to
+                time_source_set(epoch, TIME_SOURCE_RTC); no consumer of
+                timestamps changes.
+
+        config APP_TIME_RTC_I2C_ADDR
+            hex "DS1307 I2C address"
+            depends on APP_TIME_RTC_ENABLE
+            range 0x08 0x77
+            default 0x68
+            help
+                DS1307 sits at a fixed 0x68 and joins the shared I2C bus
+                already used by the PCF8574/PCF8575 and the LCD.
 
     endmenu
 
