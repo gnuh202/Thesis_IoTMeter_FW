@@ -10,6 +10,7 @@
 #include "io_expander.h"
 #include "modbus_master_task.h"
 #include "modbus_slave_task.h"
+#include "modbus_tcp_task.h"
 #include "mqtt_manager.h"
 #include "network_comm_task.h"
 #include "network_manager.h"
@@ -131,6 +132,16 @@ esp_err_t app_tasks_start(void)
         ESP_LOGI(TAG, "Modbus Master skipped (engineering mode)");
         system_status_set(SYS_MODULE_RS485_MASTER, SYS_STATUS_OFFLINE);
     }
+
+#if CONFIG_APP_MB_TCP_ENABLE
+    /* Modbus TCP (EVN profile) — skip in engineering mode. Binds INADDR_ANY, so
+     * it survives the ETH/STA failover without knowing which netif is live. */
+    if (!engineering_mode) {
+        boot_manager_step("Modbus TCP", modbus_tcp_task_start());
+    } else {
+        ESP_LOGI(TAG, "Modbus TCP skipped (engineering mode)");
+    }
+#endif
 
 #if CONFIG_APP_CONSOLE_ENABLE
     boot_manager_step("Console", console_task_start());

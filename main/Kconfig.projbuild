@@ -109,15 +109,17 @@ menu "Application Configuration"
 
         menu "TCP Server"
             help
-                Modbus TCP server (this meter on Ethernet/Wi-Fi). Service is
-                not implemented yet — options reserve defaults for later.
+                Modbus TCP server exposing the EVN rooftop-PV monitoring profile
+                (QD-EVN 12/2024) on Ethernet/Wi-Fi. Served by an own socket
+                implementation, not esp-modbus: that component keeps one
+                process-wide slave instance, which the RS485 slave already owns.
 
             config APP_MB_TCP_ENABLE
-                bool "Enable Modbus TCP server (future)"
+                bool "Enable Modbus TCP server"
                 default n
                 help
-                    Placeholder. When the TCP server is implemented this builds
-                    and starts it. Keep off until the backend exists.
+                    Start the EVN Modbus TCP server. Functions FC01/02/03/04/05/06
+                    only, which is the set the decision requires.
 
             config APP_MB_TCP_UNIT_ID
                 hex "TCP unit ID"
@@ -126,6 +128,7 @@ menu "Application Configuration"
                 depends on APP_MB_TCP_ENABLE
                 help
                     Modbus unit identifier on TCP (often matches RTU slave ID).
+                    Requests addressed to 0x00 or 0xFF are also served.
 
             config APP_MB_TCP_PORT
                 int "TCP listen port"
@@ -135,13 +138,25 @@ menu "Application Configuration"
                 help
                     Standard Modbus TCP port is 502.
 
+            config APP_MB_TCP_ADDR_BASE
+                int "Register address base"
+                range 0 1
+                default 1
+                depends on APP_MB_TCP_ENABLE
+                help
+                    How to read the addresses printed in the decision. 1 means
+                    they are 1-based data-model numbers (input register "1" is
+                    PDU address 0), which matches the 3xxxx/4xxxx notation the
+                    document uses. Set 0 if the DSO gateway turns out to publish
+                    raw PDU addresses instead.
+
             config APP_MB_TCP_TASK_STACK_SIZE
                 int "Task stack size"
                 range 3072 16384
                 default 4096
                 depends on APP_MB_TCP_ENABLE
                 help
-                    Reserved stack size for the future TCP server task.
+                    Stack for the TCP server task (socket + frame buffers).
 
             config APP_MB_TCP_TASK_PRIORITY
                 int "Task priority"
@@ -149,8 +164,8 @@ menu "Application Configuration"
                 default 7
                 depends on APP_MB_TCP_ENABLE
                 help
-                    Reserved priority for the future TCP server task. Comm
-                    tier: equal to MQTT / RTU master tasks.
+                    Priority for the TCP server task. Comm tier: equal to
+                    MQTT / RTU master tasks.
         endmenu
 
     endmenu

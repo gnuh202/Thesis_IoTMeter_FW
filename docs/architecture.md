@@ -28,6 +28,7 @@ Ranh giới quyết định file nằm ở `main/app/` hay `components/`:
 | `time_source.c` | `time_source` | Lớp thời gian duy nhất của firmware: epoch + cờ chất lượng `S`/`E`/`U`, boot counter, mốc epoch trong NVS. Chưa có backend (DS1307 chờ phần cứng) — mọi consumer đã nối sẵn |
 | `modbus_slave_task.c` | `modbus_slave` | Modbus RTU slave (RS485) — map thanh ghi số đo |
 | `modbus_master_task.c` | `modbus_master` | Modbus RTU master (đọc thiết bị ngoài) |
+| `modbus_tcp_task.c` | `mb_tcp` | Modbus TCP server theo hồ sơ EVN ĐMTMN (socket lwIP riêng, xem [modbus_tcp_evn_map.md](modbus_tcp_evn_map.md)) |
 | `console_task.c` | `console_task` | Console esp_console + login gate; các lệnh cấu hình |
 | `network_manager.c` | `net_mgr` | State machine mạng: failover ETH↔STA, AP on-demand, auto-AP |
 | `ethernet_driver.c` | `ethernet_driver` | W5500 (SPI) bring-up + ETH/IP event → còn ở app vì phụ thuộc net infra |
@@ -61,6 +62,7 @@ main/
     ├── app_tasks.c/.h
     ├── energy_meter_task.c/.h   time_source.c/.h
     ├── modbus_slave_task.c/.h   modbus_master_task.c/.h
+    ├── modbus_tcp_task.c/.h
     ├── console_task.c/.h
     ├── network_manager.c/.h     ethernet_driver.c/.h
     ├── wifi_manager.c/.h        network_comm_task.c/.h
@@ -144,7 +146,7 @@ Chi tiết failover / AP on-demand / auto-AP: xem [ESP32_Network_Manager_Design.
 | MQTT: subscribe điều khiển relay (`cmd/out0`, `cmd/out1`) | Xong |
 | Web Config Portal (mạng/MQTT/RTU master/danh tính; cert upload) | Xong |
 | LCD 2004 + nút (menu Settings, RTU, Alarm, DISPLAY & KEYS, MQTT, Energy) | Xong |
-| Modbus TCP | Chưa (TODO-SAU) |
+| Modbus TCP (hồ sơ EVN ĐMTMN) | Xong — giám sát đầy đủ; điều khiển ở mức nhận + lưu NVS |
 
 ---
 
@@ -152,5 +154,6 @@ Chi tiết failover / AP on-demand / auto-AP: xem [ESP32_Network_Manager_Design.
 
 - [energy_logging.md](energy_logging.md) — tích luỹ energy, NVS, demand, CSV thẻ SD, time_source
 - [mqtt_payloads.md](mqtt_payloads.md) — toàn bộ topic + payload MQTT
-- [modbus_slave_register_map.md](modbus_slave_register_map.md) — bản đồ thanh ghi Modbus
+- [modbus_slave_register_map.md](modbus_slave_register_map.md) — bản đồ thanh ghi Modbus RTU
+- [modbus_tcp_evn_map.md](modbus_tcp_evn_map.md) — bản đồ thanh ghi Modbus TCP theo QĐ EVN
 - [console_commands.md](console_commands.md) — lệnh console
