@@ -668,12 +668,42 @@ esp_err_t atm90e32as_read_energy_counts(atm90e32as_handle_t handle,
 {
     ESP_RETURN_ON_FALSE(out != NULL, ESP_ERR_INVALID_ARG, TAG, "out is NULL");
 
-    /* These total-energy registers are read-to-clear; each read returns the
-     * increment accumulated since the previous read. */
-    ESP_RETURN_ON_ERROR(atm90e32as_read_register(handle, REG_APENERGY_T, &out->active_import), TAG, "read active import energy failed");
-    ESP_RETURN_ON_ERROR(atm90e32as_read_register(handle, REG_ANENERGY_T, &out->active_export), TAG, "read active export energy failed");
-    ESP_RETURN_ON_ERROR(atm90e32as_read_register(handle, REG_RPENERGY_T, &out->reactive_import), TAG, "read reactive import energy failed");
-    ESP_RETURN_ON_ERROR(atm90e32as_read_register(handle, REG_RNENERGY_T, &out->reactive_export), TAG, "read reactive export energy failed");
+    static const struct {
+        uint16_t reg;
+        uint8_t valid_bit;
+        const char *name;
+    } fields[] = {
+        { REG_APENERGY_T, ATM90E32AS_ENERGY_VALID_ACTIVE_IMPORT,   "active import"   },
+        { REG_ANENERGY_T, ATM90E32AS_ENERGY_VALID_ACTIVE_EXPORT,   "active export"   },
+        { REG_RPENERGY_T, ATM90E32AS_ENERGY_VALID_REACTIVE_IMPORT, "reactive import" },
+        { REG_RNENERGY_T, ATM90E32AS_ENERGY_VALID_REACTIVE_EXPORT, "reactive export" },
+    };
+    uint16_t *targets[] = {
+        &out->active_import, &out->active_export,
+        &out->reactive_import, &out->reactive_export,
+    };
 
-    return ESP_OK;
+    memset(out, 0, sizeof(*out));
+
+    /* These total-energy registers are read-to-clear; each read returns the
+     * increment accumulated since the previous read. Every register is
+     * attempted regardless of earlier failures: a register that WAS read is
+     * already zeroed in the chip, so aborting the sequence would throw away
+     * energy that exists nowhere else. The caller accumulates per valid_mask
+     * bit and simply misses the counts that never made it off the bus. */
+    esp_err_t first_err = ESP_OK;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        esp_err_t ret = atm90e32as_read_register(handle, fields[i].reg, targets[i]);
+        if (ret == ESP_OK) {
+            out->valid_mask |= fields[i].valid_bit;
+        } else {
+            *targets[i] = 0;
+            if (first_err == ESP_OK) {
+                first_err = ret;
+            }
+            ESP_LOGW(TAG, "read %s energy failed: %s", fields[i].name, esp_err_to_name(ret));
+        }
+    }
+
+    return out->valid_mask != 0 ? ESP_OK : first_err;
 }

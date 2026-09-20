@@ -204,6 +204,10 @@ esp_err_t energy_meter_get_energy(energy_meter_energy_t *out);
 esp_err_t energy_meter_get_demand(energy_meter_demand_t *out);
 esp_err_t energy_meter_reset_energy(void);
 esp_err_t energy_meter_reset_demand(void);
+/* Commit the RAM energy accumulators (and the time floor) to NVS right now.
+ * Call before any controlled reboot or before the AP portal takes the device
+ * out of normal operation; the periodic writer only runs inside the task loop. */
+esp_err_t energy_meter_flush_persist(void);
 esp_err_t energy_meter_set_demand_window_minutes(uint16_t minutes);
 esp_err_t energy_meter_get_demand_window_minutes(uint16_t *out_minutes);
 esp_err_t energy_meter_read_register(uint16_t reg, uint16_t *value);

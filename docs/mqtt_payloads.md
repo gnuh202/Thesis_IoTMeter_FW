@@ -4,7 +4,15 @@
 > Source code: [main/app/mqtt_manager.c](../main/app/mqtt_manager.c)  
 > Data structures: [main/app/mqtt_telemetry.h](../main/app/mqtt_telemetry.h)
 
-**Phiên bản tài liệu:** 2.4 (cập nhật 2026-09-19)  
+**Phiên bản tài liệu:** 2.5 (cập nhật 2026-09-20)  
+**Thay đổi chính (2.5):**
+- `heartbeat`: thêm `ts` (epoch giây), `tq` (time quality: `U`/`E`/`S`) và `boot`
+  (số lần khởi động). **Phải đọc `tq` trước khi tin `ts`** — xem [§3.4](#34-pmidheartbeat)
+- Đính chính: energy **KHÔNG** nằm trong thanh ghi ATM90E32AS. Thanh ghi tổng năng
+  lượng của IC là **read-to-clear** (đọc xong tự về 0), nên **bộ đếm trong RAM của
+  firmware chính là chỉ số công-tơ**; nó được ghi vào NVS theo ngưỡng/chu kỳ và
+  khôi phục khi boot — xem [§3.2](#32-pmidenergy)
+
 **Thay đổi chính (2.4):**
 - `io`: 2 digital input giờ **event-driven** — đổi mức là publish ngay (≤ 250 ms),
   không chờ hết chu kỳ publish
@@ -156,7 +164,7 @@
 | `pf_total` | number | — | System power factor | -1.0 to 1.0 |
 | `freq` | number | Hz | Line frequency | 45-65 Hz typical |
 | `temp` | number | °C | ATM90E32AS chip temperature | Internal sensor |
-| `energy_kwh` | number | kWh | Accumulated active energy (import) | Counter, never resets |
+| `energy_kwh` | number | kWh | Accumulated active energy (import) | Bộ đếm trong RAM + NVS, xem [§3.2](#32-pmidenergy) |
 | `relay1` | boolean | — | Relay output 0 state | true=closed/on |
 | `relay2` | boolean | — | Relay output 1 state | true=closed/on |
 | `input1` | boolean | — | Digital input 0 state | true=high/active |
@@ -274,9 +282,29 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
 | `dmd_max_w` | number | W | Maximum demand since reset |
 
 **Notes:**
-- Energy counters persist across reboots (stored in ATM90E32AS registers)
+
+- **Nguồn số liệu — quan trọng:** thanh ghi tổng năng lượng của ATM90E32AS
+  (`0x80 APenergyT`, `0x84 ANenergyT`, `0x88 RPenergyT`, `0x8C RNenergyT`) là
+  **read-to-clear** (datasheet Table-11 §5.5.1, kiểu R/C): mỗi lần đọc trả về
+  *phần tăng thêm kể từ lần đọc trước* rồi tự xoá về 0. IC **không lưu** tổng tích
+  luỹ. Vì vậy **bộ đếm trong RAM của firmware chính là chỉ số công-tơ** — không có
+  bản sao nào khác.
+- **Bền vững qua reboot:** bộ đếm RAM được ghi xuống NVS theo ngưỡng năng lượng
+  (`APP_ENERGY_PERSIST_THRESHOLD_WH`, mặc định 50 Wh) **hoặc** theo chu kỳ backstop
+  (`APP_ENERGY_PERSIST_PERIOD_S`, mặc định 600 s), tuỳ điều kiện nào đến trước; ghi
+  theo cơ chế **2 slot + CRC32** nên mất điện giữa chừng không hỏng dữ liệu. Mọi
+  đường reboot có kiểm soát (console `reboot`, `cfg-reset`, web portal apply, Modbus
+  HR_REBOOT) và lúc vào **AP config portal** đều commit ngay trước khi khởi động lại.
+  Mất điện đột ngột có thể mất tối đa phần năng lượng kể từ lần ghi cuối.
+- **Reset:** `imp_kwh`/`exp_kwh`/`imp_kvarh`/`exp_kvarh` chỉ về 0 khi người dùng chủ
+  động chọn **LCD → Settings → Energy → Reset Energy**. **Factory Reset KHÔNG xoá
+  energy** — chỉ số đo là kết quả đo, không phải một tuỳ chọn cấu hình.
 - Demand values in **Watts** (not kW) for precision
-- Demand window typically 15 minutes (ATM90E32AS configurable)
+- **Demand tính theo tích phân thời gian** (`Σ P·dt / Σ dt`), không phải trung bình
+  cộng số mẫu — cửa sổ mặc định 15 phút, đổi được; `dmd_max_w` reset riêng bằng
+  **LCD → Settings → Energy → Reset Demand**.
+- Cùng bộ số liệu này được ghi ra thẻ SD dạng CSV — xem
+  [energy_logging.md](energy_logging.md)
 
 ---
 
@@ -334,6 +362,9 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
 ```json
 {
   "uptime_s": 12345.67,
+  "ts": 12345,
+  "tq": "U",
+  "boot": 17,
   "heap": 180000,
   "fw_version": "1.0.0",
   "active_broker": "Main-Broker",
@@ -347,17 +378,37 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
 | Field | Type | Unit | Description |
 |-------|------|------|-------------|
 | `uptime_s` | number | seconds | Time since boot (from `esp_timer_get_time()`) |
+| `ts` | number | seconds | Wall clock, Unix epoch (UTC) — **chỉ tin khi `tq` = `"S"` hoặc `"E"`** |
+| `tq` | string | — | Time quality: `"S"` synced / `"E"` estimate / `"U"` uptime-only |
+| `boot` | number | — | Boot counter, +1 mỗi lần khởi động (lưu trong NVS) |
 | `heap` | number | bytes | Free heap memory (from `esp_get_free_heap_size()`) |
 | `fw_version` | string | — | Firmware version (from `esp_app_desc`) |
 | `active_broker` | string | — | Broker name from config (`cfg.mqtt.name`) |
 | `iface` | string | — | Active network interface: `"eth"`, `"wifi"`, or `"none"` |
 | `ip` | string | — | Current IP address |
 
+#### Time quality (`tq`) — đọc trước khi dùng `ts`
+
+Thiết bị **chưa gắn RTC (DS1307)**, nên `ts` hiện tại **không phải ngày giờ thật**.
+`tq` cho biết chính xác mức độ tin cậy:
+
+| `tq` | Tên | Ý nghĩa | Subscriber nên làm gì |
+|------|-----|---------|-----------------------|
+| `"U"` | Uptime-only | Chưa có nguồn thời gian nào. `ts` đếm từ epoch 1970-01-01 theo uptime | **Không** dùng `ts` làm mốc thời gian. Dùng `boot` + `uptime_s` để xác định thứ tự và phiên chạy; nếu cần dấu thời gian thật, lấy giờ nhận của server |
+| `"E"` | Estimate | Đã khôi phục mốc thời gian lưu trong NVS (sàn thời gian), đang trôi vì không có RTC | Dùng được cho xếp thứ tự / gom nhóm; **không** dùng cho tính tiền điện hay đối soát chính xác |
+| `"S"` | Synced | Đã đồng bộ từ RTC hoặc NTP | Tin được |
+
+Đây là **chủ ý thiết kế**: thiết bị không bao giờ bịa ra một ngày tháng trông có vẻ
+hợp lệ. Khi DS1307 được gắn, driver gọi `time_source_set()` một lần là `tq` chuyển
+sang `"S"` và **mọi consumer** (`ts` ở MQTT, cột `timestamp`/`tq` trong CSV thẻ SD,
+Modbus IR 110–113) đều đúng ngay, không phải sửa payload.
+
 **Notes:**
 - `fw_version` currently reads from compile-time `esp_app_desc`
 - Future: may read from NVS `ota_version` field after OTA updates
 - `heap` useful for memory leak detection
 - `uptime_s` wraps after ~136 years (safe for practical use)
+- `boot` là cách duy nhất phân biệt hai phiên chạy khác nhau khi `tq = "U"`
 
 ---
 
@@ -445,6 +496,9 @@ Same format and behavior as `cmd/out0`.
 | `dmd_w` | Current demand | W | energy |
 | `dmd_max_w` | Peak demand | W | energy |
 | `uptime_s` | Uptime | seconds | heartbeat |
+| `ts` | Wall clock (Unix epoch) | seconds | heartbeat |
+| `tq` | Time quality (`S`/`E`/`U`) | string | heartbeat |
+| `boot` | Boot counter | — | heartbeat |
 | `heap` | Free heap | bytes | heartbeat |
 | `fw_version` | Firmware version | string | heartbeat |
 | `active_broker` | Broker name | string | heartbeat |
@@ -551,6 +605,7 @@ client.loop_forever()
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.5 | 2026-09-20 | • `heartbeat`: thêm `ts` (epoch), `tq` (time quality `U`/`E`/`S`), `boot` (boot counter)<br>• Đính chính §3.2: energy KHÔNG nằm trong thanh ghi IC (thanh ghi là read-to-clear) — bộ đếm RAM + NVS 2-slot/CRC32 mới là chỉ số công-tơ<br>• Ghi rõ điểm commit NVS, chính sách reset, và Factory Reset không xoá energy<br>• Demand tính theo tích phân thời gian |
 | 2.4 | 2026-09-19 | • `io`: 2 digital input thành event-driven (đổi mức → publish ngay, trễ ≤ 250 ms)<br>• Thêm `warn_bits` (bitmap alarm từng pha, 16-bit) cạnh `warnings`<br>• Mô tả đầy đủ từng bit alarm: ý nghĩa, phục vụ cho gì, nguồn thanh ghi IC |
 | 2.3 | 2026-09-19 | - Alarm backend (ATM90E32AS native warning) nối vào `warnings`: bitmask latched 7 bit, reset bằng LCD Reset Latch |
 | 2.2 | 2026-09-19 | • Thêm `p_kw_ph` (P từng pha, kW, 2 số lẻ) cho main và slaves<br>• Noise floor cho slaves (|PF| < 0.1, \|P\|/\|Q\|/\|S\| < 1)<br>• Giá trị làm tròn về 0 luôn là +0, không bao giờ `-0`<br>• No-load gate theo dòng (50 mA): pha rỗi → I/P/Q/S/PF = 0 (chống crosstalk CT) |
@@ -563,6 +618,7 @@ client.loop_forever()
 ## Related Documentation
 
 - **MQTT Configuration Guide:** [mqtt_guide.md](mqtt_guide.md)
+- **Energy accumulation & SD logging:** [energy_logging.md](energy_logging.md)
 - **Console Commands:** [console_commands.md](console_commands.md) (section: mqtt-cfg)
 - **Architecture Overview:** [architecture.md](architecture.md)
 - **Modbus Register Map:** [modbus_slave_register_map.md](modbus_slave_register_map.md)

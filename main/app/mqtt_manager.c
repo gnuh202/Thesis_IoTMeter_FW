@@ -28,6 +28,7 @@
 #include "network_manager.h"
 #include "sdkconfig.h"
 #include "system_status.h"
+#include "time_source.h"
 
 /*
  * MQTT manager skeleton (step 3).
@@ -959,6 +960,15 @@ static void publish_heartbeat(void)
     }
 
     cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000));
+    /* Wall clock plus its quality flag. tq is 'U' while no RTC is fitted, and a
+     * subscriber must check it before trusting ts: 'U' means ts is uptime from
+     * the epoch, not a real date. 'E' = restored floor (drifting), 'S' = synced. */
+    cJSON_AddNumberToObject(root, "ts", (double)time_source_now());
+    {
+        const char q[2] = { time_source_quality_char(), '\0' };
+        cJSON_AddStringToObject(root, "tq", q);
+    }
+    cJSON_AddNumberToObject(root, "boot", (double)time_source_boot_count());
     cJSON_AddNumberToObject(root, "heap", (double)esp_get_free_heap_size());
 
     const esp_app_desc_t *app = esp_app_get_description();

@@ -716,6 +716,20 @@ CONFIG_APP_ENERGY_METER_POLL_PERIOD_MS=1000
 CONFIG_APP_METER_NOLOAD_CURRENT_MA=50
 
 #
+# Energy persistence and logging
+#
+
+#
+# The ATM90E32AS energy registers are read-to-clear: nothing survives in the chip
+#
+CONFIG_APP_ENERGY_PERSIST_THRESHOLD_WH=50
+CONFIG_APP_ENERGY_PERSIST_PERIOD_S=600
+CONFIG_APP_ENERGY_SD_LOG_ENABLE=y
+CONFIG_APP_ENERGY_SD_LOG_PERIOD_S=300
+CONFIG_APP_ENERGY_SD_LOG_MAX_KB=8192
+# end of Energy persistence and logging
+
+#
 # Calibration Defaults
 #
 
@@ -737,6 +751,18 @@ CONFIG_APP_SD_CS_GPIO=8
 CONFIG_APP_SD_DET_GPIO=15
 CONFIG_APP_SD_ENABLE_LFN=y
 # end of SD Card
+
+#
+# Time
+#
+
+#
+# No RTC fitted yet: timestamps read 1970 and are flagged 'U' in logs
+#
+CONFIG_APP_TIME_TZ="ICT-7"
+CONFIG_APP_TIME_NVS_SAVE_PERIOD_S=600
+# CONFIG_APP_TIME_RTC_ENABLE is not set
+# end of Time
 
 #
 # Console / Debug

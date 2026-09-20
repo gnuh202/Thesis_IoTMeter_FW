@@ -256,6 +256,15 @@ esp_err_t config_manager_get(config_manager_t *out);
  */
 esp_err_t config_manager_get_mqtt(config_mqtt_profile_t *out);
 
+/*
+ * Copy out just the two CT ratios (current NCT and the NCT in force when the
+ * meter was calibrated). Same motivation as config_manager_get_mqtt(): the
+ * energy task needs these every poll and must not copy the whole ~1.2 KB
+ * snapshot onto its stack (or malloc it) once a second. Either pointer may be
+ * NULL. Returns ESP_ERR_INVALID_STATE before the first load.
+ */
+esp_err_t config_manager_get_ct_ratios(uint16_t *ct_ratio, uint16_t *ct_ratio_calib);
+
 /* Replace the RAM snapshot (thread-safe). Does not write NVS, apply, or notify. */
 esp_err_t config_manager_update(const config_manager_t *in);
 

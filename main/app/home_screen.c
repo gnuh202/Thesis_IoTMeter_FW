@@ -3631,6 +3631,68 @@ static const lcd_menu_screen_t s_screen_mqtt = {
  * their own callback. BUZZER went the same way once its Alarm row moved to
  * ALARM SETTINGS — the single remaining key-beep toggle now lives inside
  * DISPLAY & KEYS, so one toggle does not cost a screen of its own. */
+/* ---- Energy (Settings submenu) ----
+ * The two counters an operator may legitimately clear in the field. Both are
+ * destructive and irreversible (the chip's total-energy registers are
+ * read-to-clear, so the firmware's accumulator IS the meter reading and nothing
+ * else holds a copy), so each confirms while showing the value about to be
+ * lost. Deliberately NOT part of Factory Reset: that clears settings, and a
+ * meter reading is a measurement, not a setting. */
+static esp_err_t menu_energy_reset(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
+{
+    (void)menu; (void)item; (void)ctx;
+
+    energy_meter_energy_t e = {0};
+    energy_meter_get_energy(&e);
+
+    char line[HOME_LCD_WIDTH + 1];
+    snprintf(line, sizeof(line), "Now: %.2f kWh", e.active_import_kwh);
+
+    put_line_centre(0, "RESET ENERGY?");
+    put_line_centre(1, line);
+    put_line(2, "");
+    put_line(3, "");
+    if (!wait_confirm_cancel()) {
+        return ESP_OK;
+    }
+    esp_err_t ret = energy_meter_reset_energy();
+    show_action_result(ret == ESP_OK);
+    return ESP_OK;
+}
+
+static esp_err_t menu_demand_reset(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
+{
+    (void)menu; (void)item; (void)ctx;
+
+    energy_meter_demand_t d = {0};
+    energy_meter_get_demand(&d);
+
+    char line[HOME_LCD_WIDTH + 1];
+    snprintf(line, sizeof(line), "Peak: %.0f W", d.active_power_demand_max_w);
+
+    put_line_centre(0, "RESET DEMAND?");
+    put_line_centre(1, line);
+    put_line(2, "");
+    put_line(3, "");
+    if (!wait_confirm_cancel()) {
+        return ESP_OK;
+    }
+    esp_err_t ret = energy_meter_reset_demand();
+    show_action_result(ret == ESP_OK);
+    return ESP_OK;
+}
+
+static const lcd_menu_item_t s_items_energy[] = {
+    {.label = "Reset Energy", .type = LCD_MENU_ITEM_ACTION, .action = menu_energy_reset},
+    {.label = "Reset Demand", .type = LCD_MENU_ITEM_ACTION, .action = menu_demand_reset},
+    {.label = "Back",         .type = LCD_MENU_ITEM_BACK},
+};
+static const lcd_menu_screen_t s_screen_energy = {
+    .title = "ENERGY",
+    .items = s_items_energy,
+    .item_count = sizeof(s_items_energy) / sizeof(s_items_energy[0]),
+};
+
 static const lcd_menu_item_t s_items_settings[] = {
     {.label = "Meter Setup",     .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_meter_setup},
     {.label = "Config Portal",   .type = LCD_MENU_ITEM_ACTION,  .action = menu_portal_start},
@@ -3639,6 +3701,7 @@ static const lcd_menu_item_t s_items_settings[] = {
     {.label = "MQTT",            .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_mqtt},
     {.label = "TCP Server",      .type = LCD_MENU_ITEM_ACTION,  .action = menu_tcp_server},
     {.label = "Alarm Settings",  .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_settings},
+    {.label = "Energy",          .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_energy},
     {.label = "Display & Keys",  .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_display},
     {.label = "Factory Reset",   .type = LCD_MENU_ITEM_ACTION,  .action = menu_factory_reset},
     {.label = "Back",            .type = LCD_MENU_ITEM_BACK},

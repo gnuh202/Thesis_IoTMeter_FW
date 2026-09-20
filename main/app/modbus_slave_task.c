@@ -18,13 +18,14 @@
 #include "network_manager.h"
 #include "sdkconfig.h"
 #include "system_status.h"
+#include "time_source.h"
 
 /*
  * RTU transport follows the known-good uart_echo (4) implementation: ESP-IDF
  * RS485 half-duplex mode, fixed UART pins and a single owner task.  The owner
  * task is also the only context allowed to destroy/rebuild esp-modbus.
  */
-#define MB_INPUT_REG_COUNT 110
+#define MB_INPUT_REG_COUNT 114
 #define MB_HOLDING_REG_COUNT 8
 #define MB_REBOOT_MAGIC 0x5AA5
 #define MB_REGISTER_REFRESH_MS 100
@@ -74,6 +75,15 @@
 #define IR_COMMAND_ADDRESS 107
 #define IR_COMMAND_ERROR 108
 #define IR_COMMAND_STATUS 109
+/* Wall clock, appended at the end so no existing address shifts. EPOCH is a
+ * uint32 big-endian pair (H first, like IR_UPTIME). TIME_QUALITY carries the
+ * ASCII flag from time_source: 'U' uptime-only, 'E' estimate, 'S' synced — a
+ * master MUST check it before trusting EPOCH, which reads from 1970 until an
+ * RTC is fitted. BOOT_COUNT separates power cycles while that is the case. */
+#define IR_EPOCH_H 110
+#define IR_EPOCH_L 111
+#define IR_TIME_QUALITY 112
+#define IR_BOOT_COUNT 113
 #define MB_COMMAND_PENDING 1U
 #define MB_COMMAND_SUCCESS 2U
 #define MB_COMMAND_FAILED 3U
@@ -149,6 +159,12 @@ static void modbus_refresh_inputs(void)
     uint32_t uptime_s = (uint32_t)(esp_timer_get_time() / 1000000ULL);
     s_input_regs[IR_UPTIME_H] = (uint16_t)(uptime_s >> 16);
     s_input_regs[IR_UPTIME_L] = (uint16_t)uptime_s;
+
+    uint32_t epoch = (uint32_t)time_source_now();
+    s_input_regs[IR_EPOCH_H] = (uint16_t)(epoch >> 16);
+    s_input_regs[IR_EPOCH_L] = (uint16_t)epoch;
+    s_input_regs[IR_TIME_QUALITY] = (uint16_t)(uint8_t)time_source_quality_char();
+    s_input_regs[IR_BOOT_COUNT] = (uint16_t)time_source_boot_count();
 }
 
 static void modbus_refresh_runtime_holding(void)
@@ -351,6 +367,9 @@ static esp_err_t process_holding_write(const mb_param_info_t *info, uint16_t *ou
         *out_cmd_addr = HR_REBOOT;
         if (s_holding_regs[HR_REBOOT] == MB_REBOOT_MAGIC) {
             s_holding_regs[HR_REBOOT] = 0U;
+            /* Commit the RAM energy accumulators first — see
+             * energy_meter_flush_persist(). */
+            energy_meter_flush_persist();
             vTaskDelay(pdMS_TO_TICKS(200));
             esp_restart();
         } else {
@@ -457,6 +476,7 @@ static void modbus_restart_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(300));
+    energy_meter_flush_persist();
     esp_restart();
     vTaskDelete(NULL);
 }

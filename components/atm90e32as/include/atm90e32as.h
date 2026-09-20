@@ -111,13 +111,27 @@ typedef struct {
  * Energy accumulator counts. The ATM90E32AS total-energy registers are
  * read-to-clear, so each field is the increment since the previous read.
  * Convert to Wh/varh with: count * (10.0f / 3200.0f).
+ *
+ * valid_mask says which of the four reads actually succeeded
+ * (ATM90E32AS_ENERGY_VALID_* bits). Read-to-clear makes this essential: a
+ * register that was read has already been zeroed in the chip, so its count
+ * exists nowhere else. The caller must accumulate every field whose bit is
+ * set — treating a partial read as a total failure silently discards energy
+ * that can never be recovered.
  */
 typedef struct {
     uint16_t active_import;
     uint16_t active_export;
     uint16_t reactive_import;
     uint16_t reactive_export;
+    uint8_t valid_mask;
 } atm90e32as_energy_counts_t;
+
+#define ATM90E32AS_ENERGY_VALID_ACTIVE_IMPORT   (1U << 0)
+#define ATM90E32AS_ENERGY_VALID_ACTIVE_EXPORT   (1U << 1)
+#define ATM90E32AS_ENERGY_VALID_REACTIVE_IMPORT (1U << 2)
+#define ATM90E32AS_ENERGY_VALID_REACTIVE_EXPORT (1U << 3)
+#define ATM90E32AS_ENERGY_VALID_ALL             (0x0FU)
 
 #define ATM90E32AS_ENERGY_COUNT_TO_WH (10.0f / 3200.0f)
 
@@ -158,6 +172,10 @@ esp_err_t atm90e32as_apply_calibration(atm90e32as_handle_t handle, const atm90e3
 esp_err_t atm90e32as_read_measurements(atm90e32as_handle_t handle, atm90e32as_measurements_t *out);
 esp_err_t atm90e32as_read_power_raw(atm90e32as_handle_t handle, atm90e32as_phase_t phase,
                                     bool reactive, int32_t *value);
+/* Read (and thereby clear) the four total-energy registers. Every register is
+ * attempted even when an earlier one fails; out->valid_mask reports which
+ * counts are real. Returns ESP_OK when at least one read succeeded, or the
+ * first error when all four failed. */
 esp_err_t atm90e32as_read_energy_counts(atm90e32as_handle_t handle, atm90e32as_energy_counts_t *out);
 
 #ifdef __cplusplus

@@ -1,6 +1,7 @@
 #include "alarm_manager.h"
 
 #include <string.h>
+#include <stdio.h>
 #include <math.h>
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -9,6 +10,8 @@
 #include "driver/gpio.h"
 #include "boot_manager.h"
 #include "io_expander.h"
+#include "sd_card.h"
+#include "time_source.h"
 #include "sdkconfig.h"
 
 #define ALARM_TAG "alarm_mgr"
@@ -51,6 +54,12 @@ static bool s_en_ov, s_en_oc, s_en_uv, s_en_pl, s_en_freq;
 static uint32_t s_confirm_ms;
 static uint8_t s_out_role[2];
 static bool s_out_driven[2];
+
+/* Bits that already have a FAULT row in the SD log and no CLEAR row yet. Kept
+ * apart from s_latched on purpose: clearing the latch is an operator action on
+ * the panel, not a change in the grid, so it must not close an incident that
+ * the grid itself has not ended. */
+static uint16_t s_fault_logged;
 
 static uint32_t alarm_now_ms(void)
 {
@@ -243,6 +252,87 @@ void alarm_manager_apply_ic(atm90e32as_handle_t handle, const atm90e32as_calib_t
     portEXIT_CRITICAL(&s_alarm_mux);
 }
 
+/* One row per grid incident edge in /sdcard/EVENTS/FAULTS.CSV. The column set
+ * mirrors the energy CSV's time axis (stamp + tq + boot + uptime) so a reader
+ * can line an incident up against the energy rows even while tq is 'U' and the
+ * date part is meaningless. Written from the energy-meter task with no mutex
+ * held, and only on an edge, so the FAT write cost never lands on a poll tick
+ * that matters. */
+#define FAULT_CSV_HEADER "timestamp,tq,boot,uptime_s,event,type,phase,value"
+
+/* Fault type tag and the measured quantity that tripped it, per alarm bit. */
+static const char *alarm_bit_type(int bit, char *phase_out)
+{
+    static const char phase_char[3] = {'A', 'B', 'C'};
+
+    *phase_out = '-';
+    if (bit >= ALARM_BIT_OV_A && bit <= ALARM_BIT_OV_C) {
+        *phase_out = phase_char[bit - ALARM_BIT_OV_A];
+        return "OV";
+    }
+    if (bit >= ALARM_BIT_OC_A && bit <= ALARM_BIT_OC_C) {
+        *phase_out = phase_char[bit - ALARM_BIT_OC_A];
+        return "OC";
+    }
+    if (bit >= ALARM_BIT_UV_A && bit <= ALARM_BIT_UV_C) {
+        *phase_out = phase_char[bit - ALARM_BIT_UV_A];
+        return "UV";
+    }
+    if (bit >= ALARM_BIT_PL_A && bit <= ALARM_BIT_PL_C) {
+        *phase_out = phase_char[bit - ALARM_BIT_PL_A];
+        return "PLOSS";
+    }
+    if (bit == ALARM_BIT_FREQ_HI) {
+        return "FREQ_HI";
+    }
+    if (bit == ALARM_BIT_FREQ_LO) {
+        return "FREQ_LO";
+    }
+    return "IC_ERR";
+}
+
+static float alarm_bit_value(int bit, const atm90e32as_measurements_t *m)
+{
+    if (bit >= ALARM_BIT_OC_A && bit <= ALARM_BIT_OC_C) {
+        return m->current[bit - ALARM_BIT_OC_A];
+    }
+    if (bit >= ALARM_BIT_OV_A && bit <= ALARM_BIT_OV_C) {
+        return m->voltage[bit - ALARM_BIT_OV_A];
+    }
+    if (bit >= ALARM_BIT_UV_A && bit <= ALARM_BIT_UV_C) {
+        return m->voltage[bit - ALARM_BIT_UV_A];
+    }
+    if (bit >= ALARM_BIT_PL_A && bit <= ALARM_BIT_PL_C) {
+        return m->voltage[bit - ALARM_BIT_PL_A];
+    }
+    if (bit == ALARM_BIT_FREQ_HI || bit == ALARM_BIT_FREQ_LO) {
+        return m->frequency;
+    }
+    return 0.0f;
+}
+
+static void alarm_log_edges(uint16_t bits, const char *event,
+                            const atm90e32as_measurements_t *m)
+{
+    char stamp[TIME_SOURCE_STAMP_LEN];
+    time_source_format_stamp(stamp, sizeof(stamp));
+
+    for (int b = 0; b < ALARM_BIT_COUNT; b++) {
+        if (!(bits & (uint16_t)(1U << b))) {
+            continue;
+        }
+        char phase;
+        const char *type = alarm_bit_type(b, &phase);
+        char line[128];
+        snprintf(line, sizeof(line), "%s,%c,%u,%u,%s,%s,%c,%.2f",
+                 stamp, time_source_quality_char(),
+                 (unsigned)time_source_boot_count(),
+                 (unsigned)time_source_uptime_s(),
+                 event, type, phase, alarm_bit_value(b, m));
+        sd_card_log_fault_csv(FAULT_CSV_HEADER, line);
+    }
+}
+
 /* Evaluate one snapshot: decode, confirm, latch, edge-drive. Runs in the
  * energy-meter task; engineering/calibration mode pauses evaluation so a
  * calibration jump cannot latch an alarm or drive an output. */
@@ -324,6 +414,19 @@ void alarm_manager_service(const atm90e32as_measurements_t *m)
         }
     }
     portEXIT_CRITICAL(&s_alarm_mux);
+
+    /* Grid-incident log: one FAULT row when a latch confirms, one CLEAR row
+     * when the grid condition behind it goes away. Nothing else is written —
+     * this file is a record of what the mains did, not of what the board did. */
+    uint16_t ended = (uint16_t)(s_fault_logged & ~active);
+    if (newly != 0) {
+        s_fault_logged |= newly;
+        alarm_log_edges(newly, "FAULT", m);
+    }
+    if (ended != 0) {
+        s_fault_logged &= (uint16_t)~ended;
+        alarm_log_edges(ended, "CLEAR", m);
+    }
 
     /* Alarm drives outputs ON at the latch edge only - the user keeps full
      * manual authority and can override at any time. */

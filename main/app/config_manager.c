@@ -1136,6 +1136,23 @@ esp_err_t config_manager_get_mqtt(config_mqtt_profile_t *out)
     return loaded ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
+esp_err_t config_manager_get_ct_ratios(uint16_t *ct_ratio, uint16_t *ct_ratio_calib)
+{
+    ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool loaded = s_loaded;
+    if (ct_ratio != NULL) {
+        *ct_ratio = s_cfg.ct_ratio;
+    }
+    if (ct_ratio_calib != NULL) {
+        *ct_ratio_calib = s_cfg.ct_ratio_calib;
+    }
+    xSemaphoreGive(s_lock);
+
+    return loaded ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
 static esp_err_t validate_alarm_config(const config_manager_t *c)
 {
     ESP_RETURN_ON_FALSE(c->alarm_voltage_reference <= 2U, ESP_ERR_INVALID_ARG,

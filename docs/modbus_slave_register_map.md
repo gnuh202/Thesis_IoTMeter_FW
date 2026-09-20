@@ -124,6 +124,11 @@ downstream qua web portal/LCD RTU Master) — hai link hoạt động độc l�
 
 Tích lũy trong firmware (thanh ghi energy của chip là read-to-clear, được cộng dồn mỗi chu kỳ đọc).
 
+Bộ đếm RAM **chính là chỉ số công-tơ** — IC không giữ bản sao nào. Firmware ghi nó
+xuống NVS (2 slot + CRC32) theo ngưỡng 50 Wh hoặc mỗi 600 s, tuỳ cái nào đến trước,
+và commit ngay trước mọi lần reboot có chủ đích (kể cả HR7). Chi tiết:
+[energy_logging.md](energy_logging.md).
+
 | Addr | Tên                   | Đơn vị |
 | ---- | --------------------- | ------ |
 | 60   | ActiveEnergy_Import   | kWh    |
@@ -143,7 +148,9 @@ Dòng đỉnh từng pha, lấy từ thanh ghi IPeak của chip.
 
 ### 3.12. Demand (nhu cầu công suất) — float
 
-Trung bình trượt của công suất tác dụng tổng theo cửa sổ thời gian (mặc định 15 phút), và giá trị lớn nhất kể từ lần reset.
+Trung bình công suất tác dụng tổng theo **tích phân thời gian** (`Σ P·dt / Σ dt`,
+không phải trung bình cộng số mẫu) trên cửa sổ cố định (mặc định 15 phút, đổi bằng
+HR2), và giá trị lớn nhất kể từ lần reset (HR4 hoặc LCD → Settings → Energy).
 
 | Addr | Tên                    | Đơn vị |
 | ---- | ---------------------- | ------ |
@@ -208,6 +215,39 @@ Từ PCF8574.
 | 103  | MeasureValid    | uint16 | 1 = có số đo hợp lệ        |
 | 104  | Uptime_H        | uint16 | uptime giây, high word     |
 | 105  | Uptime_L        | uint16 | uptime giây, low word      |
+| 110  | Epoch_H         | uint16 | Unix epoch giây, high word |
+| 111  | Epoch_L         | uint16 | Unix epoch giây, low word  |
+| 112  | TimeQuality     | uint16 | mã ASCII: `'S'`=83, `'E'`=69, `'U'`=85 |
+| 113  | BootCount       | uint16 | số lần khởi động (lưu NVS) |
+
+> Tổng số Input Register tăng **110 → 114**. Các địa chỉ 106–109 bỏ trống (dự
+> phòng); khối thời gian được **nối vào cuối** nên **không địa chỉ cũ nào bị dịch**.
+
+### 7.1. Đồng hồ thời gian thực (IR 110–113)
+
+Epoch là cặp uint16 **big-endian** (high word trước, giống `Uptime_H/L`).
+
+**Master BẮT BUỘC đọc `TimeQuality` (IR 112) trước khi tin `Epoch`:**
+
+| IR 112 | Ký tự | Ý nghĩa | Master nên làm gì |
+| ------ | ----- | ------- | ----------------- |
+| 85 | `'U'` | Uptime-only — chưa có nguồn thời gian. Epoch đếm từ 1970-01-01 theo uptime | **Không** dùng Epoch làm mốc thời gian; dùng `BootCount` + `Uptime` để phân biệt phiên chạy |
+| 69 | `'E'` | Estimate — khôi phục mốc lưu trong NVS, đang trôi vì chưa có RTC | Dùng để xếp thứ tự; không dùng cho đối soát chính xác |
+| 83 | `'S'` | Synced — đã đồng bộ từ RTC hoặc NTP | Tin được |
+
+Thiết bị **chưa gắn DS1307**, nên hiện tại IR 112 trả `'U'` và Epoch đọc từ 1970 —
+đây là chủ ý: firmware không bao giờ bịa ra một ngày tháng trông hợp lệ. Khi RTC
+được gắn, driver gọi `time_source_set()` một lần là IR 112 chuyển `'S'`, không cần
+đổi map thanh ghi. `BootCount` là cách duy nhất phân biệt hai phiên chạy khi ở `'U'`.
+
+Hai hành vi bình thường khi `TimeQuality = 'U'`, **không phải lỗi**:
+
+- **`Epoch_H` (IR 110) luôn bằng 0** cho tới khi epoch vượt 65535 s (~18.2 giờ) —
+  vì đồng hồ đang đếm từ 0 chứ không phải từ năm 1970 thật.
+- **`Epoch_L` không về 0 sau `reboot` mềm.** ESP32 giữ bộ đếm RTC xuyên qua
+  `esp_restart()`; chỉ cúp điện hoặc nhấn reset cứng (chân EN) mới xoá nó. Vì vậy
+  Epoch đếm tiếp còn `Uptime` (IR 104/105) về 0 — hai giá trị lệch nhau sau reboot
+  mềm là đúng.
 
 ---
 

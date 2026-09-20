@@ -14,13 +14,11 @@
 
 #include "cert_store.h"
 #include "config_manager.h"
-/* energy_meter_task.h is needed only by the portal calibration section
- * (calib_format_profile / calib_auto_post_handler / the /save persistence hook).
- * With calibration compiled out the header is unused, so it rides the same gate
- * as its only users. */
-#if CONFIG_APP_WEB_CALIB_ENABLE
+/* energy_meter_task.h: the deferred-reboot hook flushes the energy
+ * accumulators unconditionally, and the portal calibration section
+ * (calib_format_profile / calib_auto_post_handler / the /save persistence hook)
+ * uses the rest of it. */
 #include "energy_meter_task.h"
-#endif
 #include "esp_check.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -50,6 +48,13 @@ static esp_timer_handle_t s_reboot_timer;
 static void reboot_timer_cb(void *arg)
 {
     (void)arg;
+    /* The energy accumulators live in RAM between periodic NVS writes; commit
+     * them (and the time floor) or this reboot silently rolls the meter back to
+     * the last threshold crossing. */
+    esp_err_t flush_ret = energy_meter_flush_persist();
+    if (flush_ret != ESP_OK && flush_ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "energy flush before reboot failed: %s", esp_err_to_name(flush_ret));
+    }
     ESP_LOGW(TAG, "rebooting to apply web portal config");
     esp_restart();
 }
