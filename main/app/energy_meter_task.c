@@ -794,6 +794,10 @@ static void energy_meter_apply_noise_floor(atm90e32as_measurements_t *m)
         if (fabsf(m->apparent_power[i]) < ENERGY_METER_POWER_NOISE_FLOOR) {
             m->apparent_power[i] = 0.0f;
         }
+        /* ...and PF follows S, for the reason spelled out at the total below. */
+        if (m->apparent_power[i] == 0.0f) {
+            m->power_factor[i] = 0.0f;
+        }
     }
     if (fabsf(m->total_power_factor) < ENERGY_METER_PF_NOISE_FLOOR) {
         m->total_power_factor = 0.0f;
@@ -806,6 +810,15 @@ static void energy_meter_apply_noise_floor(atm90e32as_measurements_t *m)
     }
     if (fabsf(m->total_apparent_power) < ENERGY_METER_POWER_NOISE_FLOOR) {
         m->total_apparent_power = 0.0f;
+    }
+    /* PF is P/S, so with no apparent power it is 0/0 — undefined. The chip has
+     * no way to say that: the PFmean registers saturate to ±1.000 instead, and
+     * a de-energised meter typically parks at -1.000. Published verbatim that
+     * reads as a fully leading load sitting next to zero watts and zero hertz,
+     * which is what turned up in ENERGY.CSV. It is the last value to settle
+     * because it is the only derived one, so it is zeroed last, after S. */
+    if (m->total_apparent_power == 0.0f) {
+        m->total_power_factor = 0.0f;
     }
 }
 
