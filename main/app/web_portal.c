@@ -29,6 +29,7 @@
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
+#include "time_source.h"
 
 static const char *TAG = "web_portal";
 
@@ -1609,6 +1610,131 @@ static esp_err_t reboot_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/*
+ * /api/time — the browser is the one device in the room that reliably knows what
+ * time it is, so the config portal doubles as a clock-setting path for a unit
+ * that has no route to an NTP server (island install, no uplink yet).
+ *
+ * GET reports what the firmware currently believes; POST writes the value the
+ * page supplies. Plain text both ways, same as /api/cert: this is read by fetch()
+ * and by curl, never rendered as a card.
+ */
+static esp_err_t time_status_get_handler(httpd_req_t *req)
+{
+    if (require_auth_or_redirect(req) != ESP_OK) return ESP_OK;
+
+    char stamp[TIME_SOURCE_STAMP_LEN];
+    time_source_format_stamp(stamp, sizeof(stamp));
+
+    char body[320];
+    int n = snprintf(body, sizeof(body),
+                     "system %s epoch=%lld quality=%c kind=%d\n"
+                     "boot %u jumps %u\n"
+                     "rtc %s\n",
+                     stamp, (long long)time_source_now(),
+                     time_source_quality_char(), (int)time_source_kind(),
+                     (unsigned)time_source_boot_count(),
+                     (unsigned)time_source_jump_count(),
+                     time_source_rtc_present() ? "present" : "absent");
+
+    /* Read the chip directly rather than reporting the system clock twice: a
+     * drift between the two is the first thing worth seeing on this page. */
+    time_t rtc_epoch = 0;
+    if (time_source_rtc_read(&rtc_epoch) == ESP_OK && n > 0 && n < (int)sizeof(body)) {
+        struct tm tm_rtc;
+        char rtc_stamp[TIME_SOURCE_STAMP_LEN];
+        localtime_r(&rtc_epoch, &tm_rtc);
+        strftime(rtc_stamp, sizeof(rtc_stamp), "%Y-%m-%d %H:%M:%S", &tm_rtc);
+        n += snprintf(body + n, sizeof(body) - n,
+                      "rtc %s epoch=%lld drift=%ld\n", rtc_stamp,
+                      (long long)rtc_epoch,
+                      (long)(rtc_epoch - time_source_now()));
+    }
+
+    time_t last = time_source_last_sync();
+    if (n > 0 && n < (int)sizeof(body)) {
+        if (last > 0) {
+            struct tm tm_sync;
+            char sync_stamp[TIME_SOURCE_STAMP_LEN];
+            localtime_r(&last, &tm_sync);
+            strftime(sync_stamp, sizeof(sync_stamp), "%Y-%m-%d %H:%M:%S", &tm_sync);
+            snprintf(body + n, sizeof(body) - n, "last sync %s\n", sync_stamp);
+        } else {
+            snprintf(body + n, sizeof(body) - n, "last sync never\n");
+        }
+    }
+
+    return send_text(req, body);
+}
+
+static esp_err_t time_set_post_handler(httpd_req_t *req)
+{
+    if (require_auth_or_redirect(req) != ESP_OK) return ESP_OK;
+
+    char *body = read_form_body(req);
+    if (body == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+        return ESP_OK;
+    }
+
+    /* Two ways in: epoch= for the page's script (a JS Date is already a number,
+     * and a number carries no timezone ambiguity), datetime= for curl typed by
+     * hand. Either is interpreted through the device's configured timezone. */
+    char value[32];
+    time_t epoch = 0;
+    if (form_get_value(body, "epoch", value, sizeof(value))) {
+        epoch = (time_t)strtoll(value, NULL, 10);
+    } else if (form_get_value(body, "datetime", value, sizeof(value))) {
+        struct tm tm_in;
+        int year, mon, mday, hour, min, sec;
+        /* 'T' as well as ' ': that is what <input type="datetime-local"> sends. */
+        if (sscanf(value, "%d-%d-%d%*[ T]%d:%d:%d",
+                   &year, &mon, &mday, &hour, &min, &sec) != 6) {
+            free(body);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "need datetime=YYYY-MM-DD HH:MM:SS");
+            return ESP_OK;
+        }
+        memset(&tm_in, 0, sizeof(tm_in));
+        tm_in.tm_year = year - 1900;
+        tm_in.tm_mon  = mon - 1;
+        tm_in.tm_mday = mday;
+        tm_in.tm_hour = hour;
+        tm_in.tm_min  = min;
+        tm_in.tm_sec  = sec;
+        tm_in.tm_isdst = -1;
+        epoch = mktime(&tm_in);
+    } else {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "need epoch= or datetime=");
+        return ESP_OK;
+    }
+    free(body);
+
+    if (epoch == (time_t)-1 || epoch < TIME_SOURCE_EPOCH_MIN) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "time out of range");
+        return ESP_OK;
+    }
+
+    /* Writes the chip and adopts the value as the system clock in one step, so
+     * the reply already reflects the new time. */
+    esp_err_t ret = time_source_rtc_write(epoch);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "web time set failed: %s", esp_err_to_name(ret));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "clock write failed (no RTC?)");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "web time set: epoch %lld", (long long)epoch);
+    if (query_flag_set(req, "api")) {
+        return time_status_get_handler(req);
+    }
+    char msg[64];
+    snprintf(msg, sizeof(msg), "clock set to epoch %lld\n", (long long)epoch);
+    return send_text(req, msg);
+}
+
 static esp_err_t captive_redirect_handler(httpd_req_t *req)
 {
     send_redirect(req, "/");
@@ -2159,6 +2285,24 @@ static esp_err_t register_handlers(void)
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &calib_auto), TAG, "register POST /api/calib/auto failed");
 #endif /* CONFIG_APP_WEB_CALIB_ENABLE */
 
+    /* Clock. GET is the diagnostic view, POST accepts the browser's own time --
+     * the only trustworthy clock available to a unit with no uplink. */
+    const httpd_uri_t time_status = {
+        .uri = "/api/time",
+        .method = HTTP_GET,
+        .handler = time_status_get_handler,
+        .user_ctx = NULL,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &time_status), TAG, "register GET /api/time failed");
+
+    const httpd_uri_t time_set = {
+        .uri = "/api/time",
+        .method = HTTP_POST,
+        .handler = time_set_post_handler,
+        .user_ctx = NULL,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &time_set), TAG, "register POST /api/time failed");
+
     const httpd_uri_t reboot = {
         .uri = "/reboot",
         .method = HTTP_POST,
@@ -2193,7 +2337,7 @@ esp_err_t web_portal_start(void)
      * path, so its worker runs at comm-tier priority: page loads must not be
      * preempted by LCD redraws (HMI) or anything else below the comm tier. */
     cfg.task_priority = CONFIG_APP_NETWORK_COMM_TASK_PRIORITY;
-    /* Base + cert(3) + calib auto + reboot. */
+    /* Base + cert(3) + calib(2) + time(2) + reboot = 19; headroom for two more. */
     cfg.max_uri_handlers = 22;
 
     esp_err_t ret = httpd_start(&s_httpd, &cfg);

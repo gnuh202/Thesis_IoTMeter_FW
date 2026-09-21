@@ -27,6 +27,7 @@ typedef enum {
     SYS_MODULE_SD_CARD,
     SYS_MODULE_DIGITAL_INPUT,
     SYS_MODULE_DIGITAL_OUTPUT,
+    SYS_MODULE_RTC,
     SYS_MODULE_COUNT,
 } system_module_t;
 

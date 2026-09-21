@@ -148,7 +148,7 @@ công suất ở 1109 cũng không được quy định dấu.
 | Lưu 5 phút / ≥7 ngày + gửi bù | CSV thẻ SD + MQTT (xem [energy_logging.md](energy_logging.md)). Modbus TCP là poll-only, không có cơ chế gửi bù |
 | Mã hoá kênh truyền | Modbus TCP không có TLS. Dùng VPN (OpenVPN/IPSec) ở lớp mạng, đúng như quyết định cho phép |
 | Đường truyền ≥64 kbps, trễ ≤125 ms | Hạ tầng; W5500 100M đáp ứng |
-| Mốc thời gian tin cậy cho dữ liệu 5 phút | **Chưa có** — phụ thuộc RTC DS1307 chưa gắn, `time_source` hiện báo cờ `U` |
+| Mốc thời gian tin cậy cho dữ liệu 5 phút | **Đã có** — DS1307 + đồng bộ SNTP; `time_source` báo cờ `S` khi tin được, `E`/`U` khi không, xem [energy_logging.md §4](energy_logging.md#4-nguồn-thời-gian-time_source) |
 
 ## 10. Ghi chú triển khai
 

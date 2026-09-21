@@ -44,14 +44,20 @@ esp_err_t app_tasks_start(void)
      * or notify modules, so boot behavior is unchanged. */
     ESP_RETURN_ON_ERROR(config_manager_init(), TAG, "init configuration manager failed");
 
-    /* Wall-clock abstraction. With no RTC wired yet this only sets the timezone
-     * and bumps the boot counter, so stamps read 1970-01-01 with quality 'U' —
-     * intentional and visible, never a fabricated date. Must run before the
-     * energy task so the first CSV row is already stamped. */
+    /* Wall-clock abstraction: timezone, boot counter, and the DS1307 on the
+     * shared I2C bus. Runs here, before boot_manager_begin(), because the
+     * energy task must find the clock already established when it writes its
+     * first CSV row. A missing or untrusted RTC is non-fatal — stamps fall
+     * back to the NVS floor ('E') or 1970 ('U'), never to a fabricated date.
+     *
+     * Reported through system_status only: boot_manager_step() draws to an LCD
+     * that does not exist yet at this point in boot. */
     esp_err_t time_ret = time_source_init();
     if (time_ret != ESP_OK) {
         ESP_LOGW(TAG, "time source init failed: %s", esp_err_to_name(time_ret));
     }
+    system_status_set(SYS_MODULE_RTC,
+                      time_source_rtc_present() ? SYS_STATUS_READY : SYS_STATUS_ERROR);
 
     /* Boot UI: bring up the LCD + PCF8575 (idempotent hmi_bsp_init), show the
      * splash, then the "Initializing..." progress screen. LCD failure is

@@ -389,19 +389,21 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
 
 #### Time quality (`tq`) — đọc trước khi dùng `ts`
 
-Thiết bị **chưa gắn RTC (DS1307)**, nên `ts` hiện tại **không phải ngày giờ thật**.
-`tq` cho biết chính xác mức độ tin cậy:
+Thiết bị **đã gắn RTC (DS1307)** và tự đồng bộ SNTP, nên `ts` thường là ngày giờ
+thật. `tq` vẫn phải đọc trước: nó cho biết chính xác mức độ tin cậy của `ts` ở thời
+điểm publish.
 
 | `tq` | Tên | Ý nghĩa | Subscriber nên làm gì |
 |------|-----|---------|-----------------------|
 | `"U"` | Uptime-only | Chưa có nguồn thời gian nào. `ts` đếm từ epoch 1970-01-01 theo uptime | **Không** dùng `ts` làm mốc thời gian. Dùng `boot` + `uptime_s` để xác định thứ tự và phiên chạy; nếu cần dấu thời gian thật, lấy giờ nhận của server |
-| `"E"` | Estimate | Đã khôi phục mốc thời gian lưu trong NVS (sàn thời gian), đang trôi vì không có RTC | Dùng được cho xếp thứ tự / gom nhóm; **không** dùng cho tính tiền điện hay đối soát chính xác |
+| `"E"` | Estimate | Đã khôi phục mốc thời gian lưu trong NVS (sàn thời gian), đang trôi vì RTC không tin được | Dùng được cho xếp thứ tự / gom nhóm; **không** dùng cho tính tiền điện hay đối soát chính xác |
 | `"S"` | Synced | Đã đồng bộ từ RTC hoặc NTP | Tin được |
 
 Đây là **chủ ý thiết kế**: thiết bị không bao giờ bịa ra một ngày tháng trông có vẻ
-hợp lệ. Khi DS1307 được gắn, driver gọi `time_source_set()` một lần là `tq` chuyển
-sang `"S"` và **mọi consumer** (`ts` ở MQTT, cột `timestamp`/`tq` trong CSV thẻ SD,
-Modbus IR 110–113) đều đúng ngay, không phải sửa payload.
+hợp lệ để che một RTC pin hết hay một chip không trả lời. `tq` xuống `"E"`/`"U"` là
+tín hiệu thật, không phải lỗi payload — và **mọi consumer** (`ts` ở MQTT, cột
+`timestamp`/`tq` trong CSV thẻ SD, Modbus IR 110–113) đều mang cùng một cờ đó. Chính
+sách tin/không tin: [energy_logging.md §4](energy_logging.md#4-nguồn-thời-gian-time_source).
 
 **Notes:**
 - `fw_version` currently reads from compile-time `esp_app_desc`

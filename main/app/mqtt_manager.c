@@ -960,9 +960,10 @@ static void publish_heartbeat(void)
     }
 
     cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000));
-    /* Wall clock plus its quality flag. tq is 'U' while no RTC is fitted, and a
-     * subscriber must check it before trusting ts: 'U' means ts is uptime from
-     * the epoch, not a real date. 'E' = restored floor (drifting), 'S' = synced. */
+    /* Wall clock plus its quality flag. A subscriber must check tq before
+     * trusting ts: 'S' = RTC or network sync, 'E' = restored NVS floor
+     * (drifting), 'U' = no source at all, so ts is uptime from the epoch
+     * rather than a real date. A dead RTC backup battery drops it to 'E'. */
     cJSON_AddNumberToObject(root, "ts", (double)time_source_now());
     {
         const char q[2] = { time_source_quality_char(), '\0' };

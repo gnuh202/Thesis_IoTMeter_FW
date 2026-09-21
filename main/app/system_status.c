@@ -83,6 +83,7 @@ const char *system_status_module_name(system_module_t module)
     case SYS_MODULE_SD_CARD: return "SD Card";
     case SYS_MODULE_DIGITAL_INPUT: return "Digital Input";
     case SYS_MODULE_DIGITAL_OUTPUT: return "Digital Output";
+    case SYS_MODULE_RTC: return "RTC";
     default: return "unknown";
     }
 }
