@@ -64,8 +64,10 @@ esp_err_t sd_card_log_energy(const char *line);
  *             ENERGY.CSV -> ENERGY.001 -> ENERGY.002 -> ENERGY.003 -> deleted,
  *             so the card keeps the newest four generations and never fills.
  *
- * Rotation is size-based on purpose: date-based names would need a trustworthy
- * clock, which this device does not have until an RTC is fitted.
+ * Rotation is size-based rather than date-based even now that a DS1307 is
+ * fitted: a dead backup battery or an unsynced clock would make a date-named
+ * file land in the wrong place or collide with an existing one, and a size cap
+ * is the only bound that also guarantees the card cannot fill.
  */
 esp_err_t sd_card_log_energy_csv(const char *header, const char *line, uint32_t max_kb);
 

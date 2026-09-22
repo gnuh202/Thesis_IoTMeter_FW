@@ -589,9 +589,10 @@ menu "Application Configuration"
                 help
                     When ENERGY.CSV grows past this size it is rotated to
                     ENERGY.001 (and .001 to .002, .002 to .003; the oldest is
-                    dropped). Rotation is by size rather than by date because
-                    the device has no trustworthy wall clock until an RTC is
-                    fitted — see the Time menu.
+                    dropped). Rotation is by size rather than by date even
+                    with the RTC fitted: a dead backup battery or an unsynced
+                    clock would name a file wrongly, and only a size cap
+                    guarantees the card cannot fill.
 
         endmenu
 
@@ -643,7 +644,6 @@ menu "Application Configuration"
     endmenu
 
     menu "Time"
-        comment "No RTC fitted yet: timestamps read 1970 and are flagged 'U' in logs"
 
         config APP_TIME_TZ
             string "POSIX timezone string"
@@ -660,20 +660,27 @@ menu "Application Configuration"
             default 600
             help
                 How often the current epoch is written to NVS once the clock
-                has a source. On the next boot that value is restored as a
-                lower bound so log rows still sort correctly, flagged 'E'
-                (estimate) rather than 'S' (synced).
+                has a source. The stored value is a monotonic floor with two
+                jobs: on the next boot it is restored as a lower bound so log
+                rows still sort correctly (flagged 'E', estimate), and it is
+                compared against the RTC reading to catch a clock that has
+                gone backwards after a dead backup battery.
+
+                With a trusted RTC or NTP source the floor only has to stay
+                fresh, so the period is stretched internally to one hour and
+                this value applies to the no-RTC case.
 
         config APP_TIME_RTC_ENABLE
             bool "Read the clock from a DS1307 RTC"
-            default n
+            default y
             help
-                Not yet implemented — the hardware is not fitted. Turning this
-                on has no effect until components/ds1307 exists and
-                time_source_init() calls it. Left here so the wiring point is
-                explicit: the driver's only job is to hand an epoch to
-                time_source_set(epoch, TIME_SOURCE_RTC); no consumer of
-                timestamps changes.
+                Read the wall clock from a DS1307 on the shared I2C bus at
+                boot and hand it to time_source_set(epoch, TIME_SOURCE_RTC).
+
+                Failure is non-fatal: a missing or halted chip only means the
+                clock falls back to the NVS epoch floor ('E') and the device
+                tries to sync from the network instead. No consumer of
+                timestamps changes either way.
 
         config APP_TIME_RTC_I2C_ADDR
             hex "DS1307 I2C address"
@@ -683,6 +690,46 @@ menu "Application Configuration"
             help
                 DS1307 sits at a fixed 0x68 and joins the shared I2C bus
                 already used by the PCF8574/PCF8575 and the LCD.
+
+        config APP_TIME_SYNC_ENABLE
+            bool "Sync the clock from the network (SNTP)"
+            default y
+            help
+                Periodically fetch the time over SNTP once an interface has an
+                IP, then write it back to the RTC so the next boot is accurate
+                without a network. Useful even with no RTC fitted: it upgrades
+                the clock from 'E' to 'S' for the rest of the session.
+
+                Skipped entirely while the AP config portal is up.
+
+        config APP_TIME_SYNC_SERVER
+            string "SNTP server"
+            depends on APP_TIME_SYNC_ENABLE
+            default "pool.ntp.org"
+
+        config APP_TIME_SYNC_PERIOD_DAYS
+            int "Resync period (days)"
+            depends on APP_TIME_SYNC_ENABLE
+            range 1 30
+            default 7
+            help
+                The DS1307 crystal drifts about 20 ppm, roughly 12 s a week,
+                which is well inside what the 5-minute logs and the 30-minute
+                demand window need. Seven days keeps the clock honest without
+                generating pointless traffic.
+
+                A sync is also forced, regardless of this period, whenever the
+                clock is not already trusted: no RTC fitted, RTC halted, or
+                the RTC reading rejected as going backwards.
+
+        config APP_TIME_SYNC_TIMEOUT_S
+            int "SNTP attempt timeout (s)"
+            depends on APP_TIME_SYNC_ENABLE
+            range 5 120
+            default 30
+            help
+                How long one attempt waits for a reply before giving up. A
+                failed attempt is retried in an hour, not immediately.
 
     endmenu
 

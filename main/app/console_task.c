@@ -13,6 +13,7 @@
 #include "config_manager.h"
 #include "config_store.h"
 #include "energy_meter_task.h"
+#include "hmi_bsp.h"
 #include "esp_check.h"
 #include "esp_console.h"
 #include "esp_log.h"
@@ -29,6 +30,8 @@
 #include "nvs.h"
 #include "ping/ping_sock.h"
 #include "sdkconfig.h"
+#include "system_status.h"
+#include "time_source.h"
 #if CONFIG_APP_DP_DEBUG
 #include "config_manager.h"
 #include "register_access.h"
@@ -1195,6 +1198,119 @@ static int cmd_mb_slave_diag(int argc, char **argv)
     return 0;
 }
 
+/* rtc: read, set and inspect the DS1307 directly. Deliberately separate from
+ * the system clock so a hardware fault (chip absent, halted, dead battery)
+ * can be told apart from an integration fault in time_source. */
+static struct {
+    struct arg_str *sub;
+    struct arg_str *datetime;
+    struct arg_end *end;
+} s_rtc_args;
+
+static void rtc_print_epoch(const char *label, time_t epoch)
+{
+    struct tm tm_local;
+    char stamp[32];
+    localtime_r(&epoch, &tm_local);
+    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm_local);
+    printf("%-12s: %s (epoch %lld)\n", label, stamp, (long long)epoch);
+}
+
+static int cmd_rtc(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&s_rtc_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, s_rtc_args.end, argv[0]);
+        return 1;
+    }
+
+    const char *sub = s_rtc_args.sub->sval[0];
+
+    if (strcmp(sub, "get") == 0) {
+        time_t epoch = 0;
+        esp_err_t ret = time_source_rtc_read(&epoch);
+        if (ret != ESP_OK) {
+            printf("RTC read failed: %s\n", esp_err_to_name(ret));
+            return 1;
+        }
+        rtc_print_epoch("rtc", epoch);
+        return 0;
+    }
+
+    if (strcmp(sub, "set") == 0) {
+        if (s_rtc_args.datetime->count == 0) {
+            printf("usage: rtc set --time \"YYYY-MM-DD HH:MM:SS\" (local time)\n");
+            return 1;
+        }
+
+        struct tm tm_in;
+        memset(&tm_in, 0, sizeof(tm_in));
+        int year, mon, mday, hour, min, sec;
+        if (sscanf(s_rtc_args.datetime->sval[0], "%d-%d-%d %d:%d:%d",
+                   &year, &mon, &mday, &hour, &min, &sec) != 6) {
+            printf("bad time format, expected \"YYYY-MM-DD HH:MM:SS\"\n");
+            return 1;
+        }
+        tm_in.tm_year = year - 1900;
+        tm_in.tm_mon  = mon - 1;
+        tm_in.tm_mday = mday;
+        tm_in.tm_hour = hour;
+        tm_in.tm_min  = min;
+        tm_in.tm_sec  = sec;
+        tm_in.tm_isdst = -1;
+
+        time_t epoch = mktime(&tm_in);
+        if (epoch == (time_t)-1) {
+            printf("invalid date/time\n");
+            return 1;
+        }
+
+        esp_err_t ret = time_source_rtc_write(epoch);
+        if (ret != ESP_OK) {
+            printf("RTC write failed: %s\n", esp_err_to_name(ret));
+            return 1;
+        }
+        rtc_print_epoch("rtc set", epoch);
+        printf("system clock adopted the new value\n");
+        return 0;
+    }
+
+    if (strcmp(sub, "status") == 0) {
+        printf("chip        : %s\n", time_source_rtc_present() ? "present" : "absent");
+        printf("status      : %s\n",
+               system_status_state_name(system_status_get(SYS_MODULE_RTC)));
+        printf("quality     : %c\n", time_source_quality_char());
+        printf("source kind : %d\n", (int)time_source_kind());
+        printf("boot count  : %u\n", (unsigned)time_source_boot_count());
+        printf("clock jumps : %u\n", (unsigned)time_source_jump_count());
+        rtc_print_epoch("system", time_source_now());
+
+        time_t rtc_epoch = 0;
+        if (time_source_rtc_read(&rtc_epoch) == ESP_OK) {
+            rtc_print_epoch("rtc", rtc_epoch);
+            long drift = (long)(rtc_epoch - time_source_now());
+            printf("%-12s: %ld s\n", "rtc - system", drift);
+        }
+
+        time_t last = time_source_last_sync();
+        if (last > 0) {
+            rtc_print_epoch("last sync", last);
+        } else {
+            printf("%-12s: never\n", "last sync");
+        }
+        return 0;
+    }
+
+    if (strcmp(sub, "sync") == 0) {
+        time_source_request_sync();
+        printf("network sync requested; it runs on the next service tick\n");
+        return 0;
+    }
+
+    printf("unknown subcommand '%s' (get|set|status|sync)\n", sub);
+    return 1;
+}
+
 /* reboot: restart the device from the console, same effect as the physical
  * reset button or the existing Modbus HR_REBOOT command. A short delay lets
  * the "rebooting..." line actually reach the terminal before the restart. */
@@ -2330,6 +2446,45 @@ static int cmd_dp(int argc, char **argv)
 }
 #endif /* CONFIG_APP_DP_DEBUG */
 
+/*
+ * `btn` — report which logical key each physical button produces.
+ *
+ * The physical-to-logical mapping is one table in hmi_bsp.c, and the only way
+ * to check it against the board in hand is to press a key and see what comes
+ * out. Printing the flag name identifies the pin, because the table is 1:1.
+ */
+static int cmd_btn(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    printf("Press each key in turn. Runs for 20 s.\n");
+    printf("The key at the TOP of the pad should print TOP.\n\n");
+
+    uint8_t previous = 0;
+    for (int elapsed_ms = 0; elapsed_ms < 20000; elapsed_ms += 30) {
+        uint8_t buttons = 0;
+        if (hmi_bsp_read_buttons(&buttons) != ESP_OK) {
+            printf("read failed\n");
+            return 1;
+        }
+        uint8_t edges = (uint8_t)(buttons & ~previous);
+        previous = buttons;
+        if (edges != 0) {
+            printf("pressed:");
+            if (edges & HMI_BSP_BUTTON_TOP)    printf(" TOP");
+            if (edges & HMI_BSP_BUTTON_BOTTOM) printf(" BOTTOM");
+            if (edges & HMI_BSP_BUTTON_LEFT)   printf(" LEFT");
+            if (edges & HMI_BSP_BUTTON_RIGHT)  printf(" RIGHT");
+            if (edges & HMI_BSP_BUTTON_CENTER) printf(" CENTER");
+            printf("  (mask 0x%02X)\n", edges);
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    printf("\ndone\n");
+    return 0;
+}
+
 static esp_err_t register_meter_commands(void)
 {
     const esp_console_cmd_t latest_cmd = {
@@ -2486,6 +2641,26 @@ static esp_err_t register_meter_commands(void)
         .func = &cmd_mb_slave_diag,
     };
     ESP_RETURN_ON_ERROR(esp_console_cmd_register(&mb_slave_diag_cmd), TAG, "register mb-slave-diag failed");
+
+    s_rtc_args.sub = arg_str1(NULL, NULL, "<get|set|status|sync>", "rtc subcommand");
+    s_rtc_args.datetime = arg_str0(NULL, "time", "<YYYY-MM-DD HH:MM:SS>", "local time to write (set)");
+    s_rtc_args.end = arg_end(3);
+    const esp_console_cmd_t rtc_cmd = {
+        .command = "rtc",
+        .help = "DS1307: rtc get | rtc set --time \"2026-09-20 14:30:00\" | rtc status | rtc sync",
+        .hint = NULL,
+        .func = &cmd_rtc,
+        .argtable = &s_rtc_args,
+    };
+    ESP_RETURN_ON_ERROR(esp_console_cmd_register(&rtc_cmd), TAG, "register rtc failed");
+
+    const esp_console_cmd_t btn_cmd = {
+        .command = "btn",
+        .help = "Show which logical key each physical button produces (20 s)",
+        .hint = NULL,
+        .func = &cmd_btn,
+    };
+    ESP_RETURN_ON_ERROR(esp_console_cmd_register(&btn_cmd), TAG, "register btn failed");
 
     const esp_console_cmd_t reboot_cmd = {
         .command = "reboot",

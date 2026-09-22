@@ -4,9 +4,10 @@
 > ghi log ra thẻ SD.
 > Source: [main/app/energy_meter_task.c](../main/app/energy_meter_task.c),
 > [main/app/time_source.c](../main/app/time_source.c),
-> [components/sd_card/sd_card.c](../components/sd_card/sd_card.c)
+> [components/sd_card/sd_card.c](../components/sd_card/sd_card.c),
+> [components/ds1307/ds1307.c](../components/ds1307/ds1307.c)
 
-**Phiên bản tài liệu:** 1.0 (2026-09-20)
+**Phiên bản tài liệu:** 1.1 (2026-09-20) — DS1307 đã gắn, thêm đồng bộ SNTP
 
 ---
 
@@ -20,7 +21,7 @@
 6. [Các đường xuất dữ liệu khác](#6-các-đường-xuất-dữ-liệu-khác)
 7. [Reset: cái gì xoá cái gì](#7-reset-cái-gì-xoá-cái-gì)
 8. [Kconfig](#8-kconfig)
-9. [Gắn DS1307 sau này](#9-gắn-ds1307-sau-này)
+9. [DS1307: đã gắn, còn lại gì](#9-ds1307-đã-gắn-còn-lại-gì)
 10. [Kiểm thử](#10-kiểm-thử)
 
 ---
@@ -204,16 +205,30 @@ Cửa sổ mặc định **15 phút**, đổi bằng Modbus HR2 hoặc
 
 ## 4. Nguồn thời gian (time_source)
 
-**Thiết bị chưa gắn DS1307.** Mọi consumer cần ngày giờ đều đi qua
-[time_source.h](../main/app/time_source.h) thay vì gọi `time()`/`localtime()` trực
-tiếp — đó chính là mục đích của lớp này: backend đổi mà không consumer nào phải sửa.
+Mọi consumer cần ngày giờ đều đi qua [time_source.h](../main/app/time_source.h) thay
+vì gọi `time()`/`localtime()` trực tiếp — đó chính là mục đích của lớp này: backend
+đổi mà không consumer nào phải sửa.
 
-### 4.1. Không có stub, và đó là chủ ý
+Thiết bị **đã gắn DS1307** (I2C `0x68`, cùng bus dùng chung với PCF8574 / PCF8575 /
+LCD). Driver nằm ở [components/ds1307/](../components/ds1307/ds1307.c) và chỉ biết
+BCD, bit CH và 7 thanh ghi đồng hồ — toàn bộ chính sách "tin ai" nằm ở `time_source`.
 
-ESP-IDF để đồng hồ hệ thống ở epoch cho tới khi có ai gọi `settimeofday()`. Vì chưa
-có backend nào, `localtime()` **tự nhiên** trả về `1970-01-01` cộng thêm uptime. Đây
-**không phải code giả để xoá sau**: thiết bị không bao giờ bịa ra một ngày tháng
-trông có vẻ hợp lệ, và cờ chất lượng nói rõ cho người đọc log biết tin được tới đâu.
+### 4.1. Ba backend và thứ tự tin cậy
+
+| Backend | Chất lượng | Vai trò |
+| ------- | ---------- | ------- |
+| NTP | `'S'` | Đồng bộ mạng. Ghi ngược lại vào DS1307 sau mỗi lần thành công |
+| RTC | `'S'` | Đọc DS1307 lúc boot — **chỉ khi** vượt qua kiểm tra ở §4.4 |
+| mốc NVS | `'E'` | **Không phải nguồn thời gian**: là cận dưới đơn điệu |
+
+Trong một phiên chạy, nguồn chất lượng thấp **không bao giờ** ghi đè nguồn chất
+lượng cao hơn (`time_source_set()` trả `ESP_ERR_INVALID_STATE`). Nhờ vậy một lần
+đồng bộ NTP thành công không thể bị một lần đọc RTC muộn hơn đẩy lùi.
+
+Nếu không backend nào trả lời, ESP-IDF để đồng hồ hệ thống ở epoch và `localtime()`
+**tự nhiên** trả về `1970-01-01` cộng uptime. Thiết bị không bao giờ bịa ra một ngày
+tháng trông có vẻ hợp lệ, và cờ chất lượng nói rõ cho người đọc log biết tin được
+tới đâu.
 
 ### 4.2. Cờ chất lượng (`tq`)
 
@@ -232,7 +247,7 @@ heartbeat, và Modbus IR 112 (mã ASCII).
   **Cách duy nhất** phân biệt hai phiên chạy khi mọi dòng đều ghi cùng một ngày.
 - `uptime_s` — thứ tự các dòng **trong cùng một phiên**.
 
-Cặp `(boot, uptime_s)` sắp xếp đúng mọi dòng log kể cả khi chưa có RTC.
+Cặp `(boot, uptime_s)` sắp xếp đúng mọi dòng log kể cả khi đồng hồ chưa tin được.
 
 > **Vì sao `ts` không về 0 sau `reboot` mềm.** ESP32 giữ bộ đếm RTC xuyên qua
 > `esp_restart()`, nên đồng hồ hệ thống **đếm tiếp** sau reboot mềm; chỉ **cúp
@@ -241,13 +256,72 @@ Cặp `(boot, uptime_s)` sắp xếp đúng mọi dòng log kể cả khi chưa 
 > `uptime_s` (về 0 mỗi lần boot) và `ts` lệch nhau sau reboot mềm. Khi `tq = 'U'`,
 > **chỉ `boot` mới phân biệt được phiên chạy**, `ts` thì không.
 
-### 4.4. Mốc thời gian (epoch floor)
+### 4.4. Mốc NVS: vì sao vẫn cần khi đã có RTC
 
-Khi đã có backend, `time_source_service()` ghi epoch hiện tại xuống NVS mỗi
-`APP_TIME_NVS_SAVE_PERIOD_S` (mặc định 600 s). Lần boot sau, giá trị đó được khôi
-phục làm **cận dưới** và chất lượng là `'E'`. Bất kỳ epoch nào nhỏ hơn
-`TIME_SOURCE_EPOCH_MIN` (2020-01-01 UTC) bị coi là "chưa từng đặt" — chặn trường hợp
-NVS hỏng khôi phục thành một ngày trông hợp lệ.
+Bit CH của DS1307 (thanh ghi `0x00` bit 7) **không phải** cờ "dao động đã từng
+dừng" như OSF của DS3231. Nó chỉ nói dao động đang dừng *ngay lúc này*. Hệ quả:
+**pin CR2032 hết thì CH vẫn bằng 0**, chip vẫn trả về một ngày tháng đúng dạng BCD,
+hợp lệ về dải giá trị, nhưng là ngày cũ. Không có phép kiểm tra dải nào bắt được
+tình huống đó.
+
+Thứ duy nhất firmware có thể so sánh là **một giá trị do chính nó ghi ra**:
+`time_source_service()` ghi epoch hiện tại xuống NVS (namespace `timekeep`, key
+`epoch`) theo chu kỳ, và lần boot sau giá trị đó là **cận dưới**.
+
+- `rtc_epoch >= mốc` → tin, đặt đồng hồ, chất lượng `'S'`.
+- `rtc_epoch < mốc` → chip đã đi lùi ⇒ **không tin**, và yêu cầu đồng bộ mạng ngay.
+- Không đọc được chip (hoặc không có chip) → cũng yêu cầu đồng bộ mạng.
+- Chỉ khi không backend nào thành công, mốc mới được `settimeofday()` với cờ `'E'`.
+
+Chu kỳ ghi mốc **thích nghi theo chất lượng**: 3600 s khi đang `'S'` (đồng hồ tin
+được, ghi dày chỉ tốn ghi flash), `APP_TIME_NVS_SAVE_PERIOD_S` (mặc định 600 s) khi
+đang `'E'` (đang trôi, mốc càng mới càng chặt).
+
+Bất kỳ epoch nào nhỏ hơn `TIME_SOURCE_EPOCH_MIN` (2020-01-01 UTC) bị coi là "chưa
+từng đặt" — chặn trường hợp NVS hỏng khôi phục thành một ngày trông hợp lệ.
+
+### 4.5. Đồng bộ mạng (SNTP)
+
+**Không có task riêng.** Một máy trạng thái one-shot chạy trong
+`time_source_service()`, mà vòng lặp energy đã gọi mỗi 1 s.
+
+| Điều kiện | Giá trị |
+| --------- | ------- |
+| Server | `APP_TIME_SYNC_SERVER`, mặc định `pool.ntp.org` |
+| Chu kỳ định kỳ | `APP_TIME_SYNC_PERIOD_DAYS`, mặc định 7 ngày |
+| Timeout một lần thử | `APP_TIME_SYNC_TIMEOUT_S`, mặc định 30 s |
+| Khoảng cách giữa hai lần thử khi đang cần gấp | 1 giờ |
+| Điều kiện chạy | có IP **và** không ở chế độ AP config |
+
+Chế độ AP bị loại vì lúc đó đường mạng duy nhất là điện thoại đang cấu hình thiết
+bị, không có route ra Internet. Chế độ đồng bộ là `SNTP_SYNC_MODE_IMMED` — bước
+nhảy từ 1970 quá lớn cho chế độ smooth.
+
+Callback SNTP chỉ ghi epoch và một cờ; `settimeofday()`, ghi ngược DS1307 và ghi NVS
+đều xảy ra trên service task. Mốc lần đồng bộ cuối lưu ở key `lastsync`.
+
+### 4.6. Hai đường đặt đồng hồ bằng tay
+
+Dùng khi thiết bị chưa có uplink (lắp đảo, mạng chưa kéo):
+
+**Console** — `rtc get | rtc set --time "YYYY-MM-DD HH:MM:SS" | rtc status | rtc sync`.
+`rtc status` in cả đồng hồ hệ thống, số đọc trực tiếp từ chip và **độ lệch giữa hai
+cái** — đó là con số đầu tiên cần xem khi nghi pin RTC yếu.
+
+**Web portal** — `GET /api/time` trả trạng thái dạng text; `POST /api/time` với
+`epoch=<số>` (script của trang gửi) hoặc `datetime=YYYY-MM-DD HH:MM:SS` (curl gõ
+tay). Trình duyệt là thiết bị duy nhất trong phòng chắc chắn biết đúng giờ.
+
+Cả hai đường đều đi qua `time_source_rtc_write()`: ghi chip **và** nhận giá trị đó
+làm đồng hồ hệ thống trong một bước.
+
+### 4.7. Bộ đếm bước nhảy
+
+`time_source_jump_count()` tăng mỗi khi `time_source_set()` dịch đồng hồ quá 60 s.
+Consumer nào giữ một giá trị dẫn xuất từ wall clock có thể dùng nó để biết mình cần
+tính lại. Hiện chưa consumer nào cần: cửa sổ demand tích phân trên `esp_timer`, và
+CSV mở/ghi/đóng từng dòng với tên file cố định, nên một bước nhảy đồng hồ không làm
+hỏng gì cả.
 
 Múi giờ: `APP_TIME_TZ`, mặc định `"ICT-7"` (UTC+7, không DST). Timestamp **hiển thị**
 (CSV, LCD, console) là giờ địa phương; MQTT và Modbus mang **epoch thô**.
@@ -289,7 +363,7 @@ cố định — thêm cột mới phải **nối vào cuối**.
 > không nói được sự cố xảy ra **lúc nào**. Sự cố có file riêng —
 > [§5.6 FAULTS.CSV](#56-nhật-ký-sự-cố-faultscsv).
 
-Ví dụ (khi chưa có RTC):
+Ví dụ (đồng hồ chưa tin được, `tq = 'U'` — pin RTC hết và chưa có mạng):
 
 ```csv
 timestamp,tq,boot,uptime_s,imp_kwh,exp_kwh,imp_kvarh,exp_kvarh,dmd_w,dmd_max_w,p_kw,pf,freq
@@ -440,27 +514,43 @@ tồn tại.
 | Symbol | Mặc định | Ý nghĩa |
 | ------ | -------- | ------- |
 | `APP_TIME_TZ` | `"ICT-7"` | Chuỗi TZ POSIX cho mọi timestamp hiển thị |
-| `APP_TIME_NVS_SAVE_PERIOD_S` | 600 | Chu kỳ ghi mốc epoch xuống NVS |
-| `APP_TIME_RTC_ENABLE` | n | **Chưa thực thi** — phần cứng chưa gắn |
+| `APP_TIME_NVS_SAVE_PERIOD_S` | 600 | Chu kỳ ghi mốc epoch xuống NVS khi đang `'E'` (khi `'S'` tự giãn thành 3600 s) |
+| `APP_TIME_RTC_ENABLE` | y | Đọc đồng hồ từ DS1307 lúc boot |
 | `APP_TIME_RTC_I2C_ADDR` | `0x68` | Địa chỉ cố định của DS1307 |
+| `APP_TIME_SYNC_ENABLE` | y | Đồng bộ SNTP và ghi ngược vào RTC |
+| `APP_TIME_SYNC_SERVER` | `"pool.ntp.org"` | Server SNTP |
+| `APP_TIME_SYNC_PERIOD_DAYS` | 7 | Chu kỳ đồng bộ định kỳ |
+| `APP_TIME_SYNC_TIMEOUT_S` | 30 | Timeout một lần thử; thất bại thì thử lại sau 1 giờ |
 
 ---
 
-## 9. Gắn DS1307 sau này
+## 9. DS1307: đã gắn, còn lại gì
 
-Bốn bước, **không consumer nào phải sửa**:
+Việc tích hợp đã xong và **không consumer nào phải sửa** — đúng như lớp
+`time_source` hứa từ đầu. Những gì đã thêm:
 
-1. Tạo `components/ds1307/` — I2C `0x68` trên bus dùng chung sẵn có
-   (`i2c_bus_get_handle()`, cùng bus với PCF8574 / PCF8575 / LCD).
-2. Trong `time_source_init()`, dưới `CONFIG_APP_TIME_RTC_ENABLE`, đọc chip và gọi
-   `time_source_set(epoch, TIME_SOURCE_RTC)`.
-3. Bật `APP_TIME_RTC_ENABLE=y`.
-4. Thêm màn hình LCD **Settings → Time → Set Clock**: ghi chip rồi gọi
-   `time_source_set()`.
+| Thành phần | Nơi |
+| ---------- | --- |
+| Driver thanh ghi | [components/ds1307/](../components/ds1307/ds1307.c) |
+| Chính sách tin/không tin, SNTP, mốc NVS | [main/app/time_source.c](../main/app/time_source.c) |
+| Khởi tạo lúc boot | [main/app/app_tasks.c](../main/app/app_tasks.c) |
+| Trạng thái module | `SYS_MODULE_RTC` trong [system_status.h](../main/app/system_status.h) |
+| Đặt/xem bằng tay | lệnh `rtc` (console) và `/api/time` (web portal) |
 
-Sau đó: cột `timestamp` của CSV ra ngày thật, `tq` thành `'S'`, MQTT `ts` và Modbus
-IR 110–111 đúng ngay. **Schema CSV, payload MQTT và register map giữ nguyên
-byte-for-byte** — không có bước migration nào.
+`time_source_init()` chạy **trước** `boot_manager_begin()` vì task energy phải thấy
+đồng hồ đã dựng xong khi ghi dòng CSV đầu tiên. Ở thời điểm đó LCD chưa tồn tại, nên
+kết quả báo qua `system_status_set()` chứ không qua `boot_manager_step()`.
+
+Khởi tạo thất bại là **không nghiêm trọng**, đúng rule của các BSP khác: `ds1307_create()`
+gỡ sạch mọi thứ nó đã cấp ở từng nhánh lỗi, handle để NULL, và đồng hồ lùi về mốc NVS
+(`'E'`) hoặc 1970 (`'U'`) — không bao giờ lùi về một ngày bịa ra.
+
+**Schema CSV, payload MQTT và register map giữ nguyên byte-for-byte** — không có bước
+migration nào.
+
+Còn lại (không bắt buộc): màn hình LCD **Settings → Time → Set Clock**. Console và web
+portal đã phủ nhu cầu đặt đồng hồ bằng tay, nên đây chỉ là tiện lợi thêm cho người
+đứng trước tủ mà không có laptop.
 
 ---
 
@@ -480,12 +570,19 @@ byte-for-byte** — không có bước migration nào.
 | 10 | Đổi cửa sổ demand qua HR2 | Cửa sổ đang chạy bị huỷ, cửa sổ mới dài đúng số phút mới |
 | 11 | LCD → Energy → Reset Energy → rút điện ngay | Sau boot chỉ số vẫn là **0**, không quay lại số cũ |
 | 12 | Factory Reset | Cấu hình về mặc định, **energy giữ nguyên** |
-| 13 | Đọc Modbus IR 110–113 | `TimeQuality` = 85 (`'U'`), `BootCount` tăng mỗi lần boot |
-| 14 | Subscribe MQTT heartbeat | Có `ts` / `tq` / `boot`; `tq` = `"U"` |
+| 13 | Đọc Modbus IR 110–113 | `TimeQuality` = 83 (`'S'`) khi RTC tốt, `BootCount` tăng mỗi lần boot |
+| 14 | Subscribe MQTT heartbeat | Có `ts` / `tq` / `boot`; `tq` = `"S"` khi RTC tốt |
 | 15 | Ép quá dòng một pha quá cửa sổ xác nhận | `FAULTS.CSV` có **một** dòng `FAULT,OC,<pha>` với giá trị dòng thật |
 | 16 | Bỏ tải sau khi đã chốt | Thêm dòng `CLEAR,OC,<pha>`; **không** cần Reset Latch mới có |
 | 17 | Reset Latch trong lúc sự cố còn | Không sinh dòng nào; khi lưới hết sự cố vẫn ra đúng một `CLEAR` |
 | 18 | Boot / rút-cắm thẻ / mất mạng | `FAULTS.CSV` **không** có thêm dòng nào |
+| 19 | `rtc set --time ...` → `rtc status` | `rtc - system` ≈ 0 s, `quality` = `S`; CSV dòng tiếp có ngày thật |
+| 20 | Cúp điện cả thiết bị **qua đêm** (pin RTC còn) | Sau boot `tq` = `'S'` ngay, ngày giờ đúng, **không** cần mạng |
+| 21 | Tháo pin CR2032 rồi cấp điện lại | RTC đọc lùi hơn mốc NVS ⇒ log `not trusted`, `tq` = `'E'`, và ép đồng bộ mạng |
+| 22 | Có mạng, đợi một lần đồng bộ | `rtc status` báo `last sync`; chip được ghi ngược (`rtc - system` ≈ 0) |
+| 23 | Rút DS1307 khỏi bus rồi boot | `SYS_MODULE_RTC` = error, thiết bị vẫn boot bình thường, `tq` = `'E'` hoặc `'U'` |
+| 24 | Mở AP portal trong lúc chưa đồng bộ | **Không** có lần thử SNTP nào (không có route ra Internet) |
+| 25 | `POST /api/time` từ trình duyệt | Đồng hồ nhận ngay, `GET /api/time` phản ánh giá trị mới |
 
 ---
 
@@ -496,5 +593,3 @@ byte-for-byte** — không có bước migration nào.
 - **Architecture Overview:** [architecture.md](architecture.md)
 - **Console Commands:** [console_commands.md](console_commands.md)
 - **SD Card:** [sd_card_fixes.md](sd_card_fixes.md), [sd_card_ram_usage.md](sd_card_ram_usage.md)
-</content>
-</invoke>

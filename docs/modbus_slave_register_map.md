@@ -232,13 +232,15 @@ Epoch là cặp uint16 **big-endian** (high word trước, giống `Uptime_H/L`)
 | IR 112 | Ký tự | Ý nghĩa | Master nên làm gì |
 | ------ | ----- | ------- | ----------------- |
 | 85 | `'U'` | Uptime-only — chưa có nguồn thời gian. Epoch đếm từ 1970-01-01 theo uptime | **Không** dùng Epoch làm mốc thời gian; dùng `BootCount` + `Uptime` để phân biệt phiên chạy |
-| 69 | `'E'` | Estimate — khôi phục mốc lưu trong NVS, đang trôi vì chưa có RTC | Dùng để xếp thứ tự; không dùng cho đối soát chính xác |
+| 69 | `'E'` | Estimate — khôi phục mốc lưu trong NVS, đang trôi vì RTC không tin được | Dùng để xếp thứ tự; không dùng cho đối soát chính xác |
 | 83 | `'S'` | Synced — đã đồng bộ từ RTC hoặc NTP | Tin được |
 
-Thiết bị **chưa gắn DS1307**, nên hiện tại IR 112 trả `'U'` và Epoch đọc từ 1970 —
-đây là chủ ý: firmware không bao giờ bịa ra một ngày tháng trông hợp lệ. Khi RTC
-được gắn, driver gọi `time_source_set()` một lần là IR 112 chuyển `'S'`, không cần
-đổi map thanh ghi. `BootCount` là cách duy nhất phân biệt hai phiên chạy khi ở `'U'`.
+Thiết bị **đã gắn DS1307** và có đồng bộ SNTP, nên IR 112 thường trả `'S'`. Nhưng
+master vẫn phải đọc nó: pin RTC hết hoặc chip không trả lời sẽ hạ xuống `'E'` (mốc
+NVS, đang trôi) hoặc `'U'` (chưa có gì) — firmware không bao giờ bịa ra một ngày
+tháng trông hợp lệ để che tình huống đó. Chi tiết chính sách: [energy_logging.md
+§4](energy_logging.md#4-nguồn-thời-gian-time_source). `BootCount` là cách duy nhất
+phân biệt hai phiên chạy khi ở `'U'`.
 
 Hai hành vi bình thường khi `TimeQuality = 'U'`, **không phải lỗi**:
 
