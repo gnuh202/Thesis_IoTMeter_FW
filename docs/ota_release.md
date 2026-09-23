@@ -172,12 +172,16 @@ git push origin :refs/tags/v1.0.0
 
 1. `actions/checkout@v4` với **`fetch-depth: 0`** — bắt buộc, clone nông không có
    tag thì `git describe` rơi về commit hash.
-2. `espressif/esp-idf-ci-action@v1` build với ESP-IDF v5.5.1, target esp32s3.
+2. `git fetch --force origin refs/tags/<tag>:refs/tags/<tag>` — checkout trên
+   tag-push event dựng ref tag trỏ thẳng vào **commit**, tag object (chứa
+   message) không được kéo theo: `git describe` vẫn đúng nhưng release note rơi
+   về subject của commit. Học từ chính lần phát hành `v1.0.0`.
+3. `espressif/esp-idf-ci-action@v1` build với ESP-IDF v5.5.1, target esp32s3.
    Lệnh chạy có `git config --global --add safe.directory "$PWD"` vì container
    chạy bằng root, thiếu dòng này thì `git describe` im lặng thất bại.
-3. Lấy release note từ subject của tag.
-4. `tools/make_manifest.py` sinh `manifest.json`.
-5. `softprops/action-gh-release@v2` tạo release và upload hai asset.
+4. Lấy release note từ subject của tag.
+5. `tools/make_manifest.py` sinh `manifest.json`.
+6. `softprops/action-gh-release@v2` tạo release và upload hai asset.
 
 ### 5.3. Chốt chặn của make_manifest.py
 
