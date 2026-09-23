@@ -28,6 +28,17 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Restore the annotated tag object
+        # On a tag-push event actions/checkout materialises refs/tags/<name>
+        # pointing straight at the commit, so the annotated tag object -- and
+        # the tag message with it -- never lands in the runner's object store.
+        # `git describe` only needs the ref name, so the build still stamps
+        # the right version and the manifest check still passes; but the
+        # note step's %(contents:subject) reads empty and falls back to the
+        # commit subject (here: a merge-commit title). Fetching the ref by
+        # name brings the tag object along.
+        run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
       - name: Build with ESP-IDF v5.5.1
         uses: espressif/esp-idf-ci-action@v1
         with:
