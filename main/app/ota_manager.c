@@ -186,13 +186,19 @@ static esp_err_t fetch_manifest(char *buf, size_t cap)
     http_sink_t sink = { .buf = buf, .cap = cap, .len = 0 };
     buf[0] = '\0';
 
-    /* GitHub asset URLs answer with a 302 whose Location is a signed CDN URL
-     * of roughly 1.4 KB -- far past the default 512-byte header buffer, which
-     * made the first real-world check die with "HTTP_CLIENT: Out of buffer". */
+    /*
+     * GitHub asset URLs answer with a 302 whose Location is a signed CDN URL of
+     * roughly 1.4 KB. Following it means *sending* "GET <1.4 KB path> HTTP/1.1",
+     * and that request line is built in the transmit buffer -- 512 bytes by
+     * default, which is what "HTTP_CLIENT: Out of buffer" reports. buffer_size
+     * alone does not cover it: esp_http_client maps it to buffer_size_rx only,
+     * so the redirect kept failing until buffer_size_tx was raised as well.
+     */
     esp_http_client_config_t cfg = {
         .url               = CONFIG_APP_OTA_MANIFEST_URL,
         .timeout_ms        = CONFIG_APP_OTA_HTTP_TIMEOUT_MS,
         .buffer_size       = 4096,
+        .buffer_size_tx    = 4096,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .event_handler     = http_event,
         .user_data         = &sink,
@@ -307,12 +313,13 @@ static void do_update(const char *url)
 
     ESP_LOGI(TAG, "downloading %s", url);
 
-    /* Same signed-CDN redirect as the manifest fetch: the 302 Location needs
-     * more than the default 512-byte header buffer to even be parsed. */
+    /* Same signed-CDN redirect as the manifest fetch: both buffers, because the
+     * 1.4 KB request line is built in the transmit one. */
     esp_http_client_config_t http_cfg = {
         .url               = url,
         .timeout_ms        = CONFIG_APP_OTA_HTTP_TIMEOUT_MS,
         .buffer_size       = 4096,
+        .buffer_size_tx    = 4096,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .keep_alive_enable = true,
     };
