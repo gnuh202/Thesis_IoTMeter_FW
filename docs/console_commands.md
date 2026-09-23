@@ -422,6 +422,38 @@ Command `phi-err` sẽ:
 
 ---
 
+## 9. `ota` — cập nhật firmware từ GitHub Releases
+
+```
+ota <status|check|update|confirm|rollback> [--url <URL>]
+```
+
+| Subcommand | Việc |
+|---|---|
+| `status` | version đang chạy, trạng thái worker, %, lỗi, `probation`, release mới nhất từ lần check gần nhất |
+| `check` | tải `manifest.json` và so version — không chặn console |
+| `update` | cài bản từ lần `check` gần nhất; `--url` để chỉ thẳng một `.bin` |
+| `confirm` | commit ảnh đang chạy ngay, bỏ qua cửa sổ self-test |
+| `rollback` | quay về slot cũ và reboot |
+
+`check` và `update` trả về ngay khi worker task đã được tạo; theo dõi tiến trình bằng
+`ota status` hoặc xem log. Cài xong máy **tự reboot**.
+
+```
+ota check
+ota status
+ota update
+ota update --url https://github.com/gnuh202/Thesis_IoTMeter_FW/releases/download/v1.0.1/luanvan_firmware.bin
+```
+
+Dòng `probation` trong `ota status` cho biết ảnh đang chạy đã commit hay chưa:
+`yes (not committed)` nghĩa là lần reset kế tiếp sẽ quay về ảnh cũ nếu self-test không
+đạt. Chi tiết điều kiện self-test và quy trình phát hành: [ota_release.md](ota_release.md).
+
+Trả về `OTA is disabled in this build` nếu `CONFIG_APP_OTA_ENABLE=n`.
+
+---
+
 ## Ghi chú áp dụng cấu hình
 
 | Lệnh | Áp dụng khi |

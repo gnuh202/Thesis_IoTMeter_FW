@@ -28,6 +28,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
+#include "ota_manager.h"
 #include "lwip/sockets.h"
 #include "time_source.h"
 
@@ -409,6 +410,60 @@ static const char *HTML_SCRIPT_CALIB =
     "calibApplyPhaseUi();"
     "});";
 #endif
+
+#if CONFIG_APP_OTA_ENABLE
+/*
+ * Firmware section behaviour. It polls /api/ota rather than pushing state,
+ * because the interesting transitions all happen on the device: an update
+ * started from the LCD or over MQTT shows up on this page too. The poll runs at
+ * 1 s while something is in flight and 10 s when idle, so an open browser tab
+ * costs the device almost nothing.
+ */
+static const char *HTML_SCRIPT_OTA =
+    "function fwParse(t){var o={};t.split('\\n').forEach(function(l){"
+    "var i=l.indexOf(' ');if(i>0)o[l.slice(0,i)]=l.slice(i+1);});return o;}"
+    "function fwSay(cls,msg){var s=document.getElementById('fw-st');"
+    "if(s){s.className='st'+(cls?' '+cls:'');s.textContent=msg;}}"
+    "function fwRender(o){"
+    "var r=document.getElementById('fw-run');"
+    "if(r)r.textContent=o.running||'?';"
+    "var inst=document.getElementById('fw-install');"
+    "var chk=document.getElementById('fw-check');"
+    "var busy=(o.state==='checking'||o.state==='downloading');"
+    "if(chk)chk.disabled=busy;"
+    "if(inst)inst.hidden=!(o.state==='check_done'&&o.available==='1');"
+    "if(inst)inst.disabled=busy;"
+    "if(o.state==='checking'){fwSay('','Checking...');}"
+    "else if(o.state==='downloading'){fwSay('','Downloading '+(o.percent||'0')+'%');}"
+    "else if(o.state==='reboot_pending'){fwSay('ok','Installed. Restarting...');}"
+    "else if(o.state==='failed'){fwSay('bad',o.error||'Update failed.');}"
+    "else if(o.state==='check_done'){fwSay(o.available==='1'?'ok':'',"
+    "o.available==='1'?(o.latest+' is available'+(o.notes?' - '+o.notes:'')):'Up to date.');}"
+    "else{fwSay('',o.pending_verify==='1'?'On probation; committing after the self-test.':'Idle.');}"
+    "return busy;}"
+    "function fwPoll(){"
+    "fetch('/api/ota').then(function(r){return r.text();}).then(function(t){"
+    "var busy=fwRender(fwParse(t));setTimeout(fwPoll,busy?1000:10000);})"
+    ".catch(function(){setTimeout(fwPoll,10000);});}"
+    "function fwPost(action){"
+    "fwSay('','Working...');"
+    "fetch('/api/ota',{method:'POST',"
+    "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+    "body:'action='+action})"
+    ".then(function(r){return r.text().then(function(t){"
+    "if(!r.ok)fwSay('bad',t);else fwSay('',t);});})"
+    ".catch(function(){fwSay('bad','Lost connection to the device.');});}"
+    "document.addEventListener('DOMContentLoaded',function(){"
+    "var c=document.getElementById('fw-check');"
+    "var i=document.getElementById('fw-install');"
+    "if(!c)return;"
+    "c.addEventListener('click',function(){fwPost('check');});"
+    "if(i)i.addEventListener('click',function(){"
+    "if(confirm('Download and install the new firmware? The device restarts on its own.'))"
+    "fwPost('update');});"
+    "fwPoll();"
+    "});";
+#endif /* CONFIG_APP_OTA_ENABLE */
 
 static const char *HTML_SCRIPT =
     "document.addEventListener('submit',function(e){"
@@ -1735,6 +1790,100 @@ static esp_err_t time_set_post_handler(httpd_req_t *req)
     return send_text(req, msg);
 }
 
+#if CONFIG_APP_OTA_ENABLE
+/*
+ * /api/ota -- the same worker the LCD menu and MQTT drive, over HTTP.
+ *
+ * GET returns one "key value" line per fact, like /api/time: it is read by the
+ * page's poll loop and by curl, never rendered as a card. POST takes
+ * action=check or action=update (with an optional url=) and returns as soon as
+ * the worker task is spawned. Nothing here blocks: an HTTP handler that sat
+ * through a firmware download would hold an httpd socket for the whole
+ * transfer and time the browser out long before it finished.
+ */
+static esp_err_t ota_status_get_handler(httpd_req_t *req)
+{
+    if (require_auth_or_redirect(req) != ESP_OK) return ESP_OK;
+
+    int percent = 0;
+    char err[OTA_ERR_MAX];
+    ota_state_t st = ota_manager_get_state(&percent, err, sizeof(err));
+
+    static const char *const names[] = {
+        "idle", "checking", "check_done", "downloading", "reboot_pending", "failed",
+    };
+
+    char body[OTA_URL_MAX + 256];
+    int n = snprintf(body, sizeof(body),
+                     "state %s\n"
+                     "running %s\n"
+                     "percent %d\n"
+                     "pending_verify %d\n",
+                     (st < (ota_state_t)(sizeof(names) / sizeof(names[0]))) ? names[st] : "?",
+                     ota_manager_running_version(), percent,
+                     ota_manager_pending_verify() ? 1 : 0);
+
+    if (st == OTA_STATE_FAILED && err[0] != '\0' && n > 0 && n < (int)sizeof(body)) {
+        n += snprintf(body + n, sizeof(body) - n, "error %s\n", err);
+    }
+
+    ota_release_t rel;
+    if (ota_manager_get_release(&rel) && n > 0 && n < (int)sizeof(body)) {
+        n += snprintf(body + n, sizeof(body) - n,
+                      "latest %s\navailable %d\n", rel.latest, rel.available ? 1 : 0);
+        if (rel.notes[0] != '\0' && n > 0 && n < (int)sizeof(body)) {
+            n += snprintf(body + n, sizeof(body) - n, "notes %s\n", rel.notes);
+        }
+    }
+
+    return send_text(req, body);
+}
+
+static esp_err_t ota_action_post_handler(httpd_req_t *req)
+{
+    if (require_auth_or_redirect(req) != ESP_OK) return ESP_OK;
+
+    char *body = read_form_body(req);
+    if (body == NULL) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return send_text(req, "bad form");
+    }
+
+    char action[16] = { 0 };
+    char url[OTA_URL_MAX] = { 0 };
+    form_get_value(body, "action", action, sizeof(action));
+    form_get_value(body, "url", url, sizeof(url));
+    free(body);
+
+    esp_err_t ret;
+    const char *ok_msg;
+    if (strcmp(action, "check") == 0) {
+        ret = ota_manager_request_check();
+        ok_msg = "Checking for a new release...";
+    } else if (strcmp(action, "update") == 0) {
+        ret = ota_manager_request_update(url[0] != '\0' ? url : NULL);
+        ok_msg = "Downloading. The device restarts by itself when it finishes.";
+    } else {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return send_text(req, "action must be check or update");
+    }
+
+    if (ret == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return send_text(req, "An update task is already running.");
+    }
+    if (ret == ESP_ERR_INVALID_ARG) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return send_text(req, "Check for a release first, or give a URL.");
+    }
+    if (ret != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return send_text(req, esp_err_to_name(ret));
+    }
+    return send_text(req, ok_msg);
+}
+#endif /* CONFIG_APP_OTA_ENABLE */
+
 static esp_err_t captive_redirect_handler(httpd_req_t *req)
 {
     send_redirect(req, "/");
@@ -2100,10 +2249,29 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<button class=\"btn block\" type=\"submit\">Save and restart</button>"
         "</form></section>");
 
+#if CONFIG_APP_OTA_ENABLE
+    /* Firmware. Outside the config form on purpose: nothing here is a setting,
+     * and an accidental "Save and restart" in the middle of a download is the
+     * one thing this page must not make easy. Everything on it is filled in by
+     * the poll in HTML_SCRIPT_OTA, so the markup ships empty. */
+    httpd_resp_sendstr_chunk(req,
+        "<details class=\"section\" id=\"fw\"><summary>Firmware</summary><div class=\"sbody\">"
+        "<p>Running: <span id=\"fw-run\" class=\"st\">...</span></p>"
+        "<p>Status: <span id=\"fw-st\" class=\"st\">...</span></p>"
+        "<button class=\"btn\" type=\"button\" id=\"fw-check\">Check for updates</button> "
+        "<button class=\"btn\" type=\"button\" id=\"fw-install\" hidden>Install</button>"
+        "<p class=\"muted\">The device downloads into its spare slot and restarts by "
+        "itself. If the new image fails to start, the bootloader returns to this one.</p>"
+        "</div></details>");
+#endif
+
     /* At the end of the body so the handlers bind to a page that already exists. */
     httpd_resp_sendstr_chunk(req, "<script>");
 #if CONFIG_APP_WEB_CALIB_ENABLE
     httpd_resp_sendstr_chunk(req, HTML_SCRIPT_CALIB);
+#endif
+#if CONFIG_APP_OTA_ENABLE
+    httpd_resp_sendstr_chunk(req, HTML_SCRIPT_OTA);
 #endif
     httpd_resp_sendstr_chunk(req, HTML_SCRIPT);
     httpd_resp_sendstr_chunk(req, "</script>");
@@ -2303,6 +2471,26 @@ static esp_err_t register_handlers(void)
     };
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &time_set), TAG, "register POST /api/time failed");
 
+#if CONFIG_APP_OTA_ENABLE
+    /* Firmware update. GET is polled by the page while an update runs; POST
+     * only ever starts the worker, so neither call can block httpd. */
+    const httpd_uri_t ota_status = {
+        .uri = "/api/ota",
+        .method = HTTP_GET,
+        .handler = ota_status_get_handler,
+        .user_ctx = NULL,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &ota_status), TAG, "register GET /api/ota failed");
+
+    const httpd_uri_t ota_action = {
+        .uri = "/api/ota",
+        .method = HTTP_POST,
+        .handler = ota_action_post_handler,
+        .user_ctx = NULL,
+    };
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &ota_action), TAG, "register POST /api/ota failed");
+#endif /* CONFIG_APP_OTA_ENABLE */
+
     const httpd_uri_t reboot = {
         .uri = "/reboot",
         .method = HTTP_POST,
@@ -2338,7 +2526,7 @@ esp_err_t web_portal_start(void)
      * preempted by LCD redraws (HMI) or anything else below the comm tier. */
     cfg.task_priority = CONFIG_APP_NETWORK_COMM_TASK_PRIORITY;
     /* Base + cert(3) + calib(2) + time(2) + reboot = 19; headroom for two more. */
-    cfg.max_uri_handlers = 22;
+    cfg.max_uri_handlers = 24;
 
     esp_err_t ret = httpd_start(&s_httpd, &cfg);
     if (ret != ESP_OK) {

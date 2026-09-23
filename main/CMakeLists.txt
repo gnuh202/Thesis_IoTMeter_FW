@@ -22,5 +22,6 @@ idf_component_register(SRCS "app_main.c"
                             "app/alarm_manager.c"
                             "app/cert_store.c"
                             "app/time_source.c"
-                    REQUIRES esp_driver_uart esp_driver_gpio esp_driver_spi esp_eth esp_event esp_netif esp_wifi esp_http_server esp_http_client esp_timer console nvs_flash lwip i2c_bus pcf8574 ds1307 spi_bus_shared sd_card atm90e32as espressif__esp-modbus mqtt esp-tls mbedtls json esp_app_format app_update esp_psram config_store io_expander hmi_bsp lcd_menu gpio_isr_service modbus_meters fatfs wear_levelling
+                            "app/ota_manager.c"
+                    REQUIRES esp_driver_uart esp_driver_gpio esp_driver_spi esp_eth esp_event esp_netif esp_wifi esp_http_server esp_http_client esp_timer console nvs_flash lwip i2c_bus pcf8574 ds1307 spi_bus_shared sd_card atm90e32as espressif__esp-modbus mqtt esp-tls mbedtls json esp_app_format app_update esp_https_ota esp_psram config_store io_expander hmi_bsp lcd_menu gpio_isr_service modbus_meters fatfs wear_levelling
                     INCLUDE_DIRS ".")
