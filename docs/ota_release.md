@@ -352,7 +352,7 @@ rollback ở lần reset sau — thà commit sớm còn hơn bỏ rơi một thi
 |---|---|---|
 | LCD `No network` | chưa có IP | cắm Ethernet hoặc kiểm tra WiFi STA |
 | LCD `Bad server reply` / `Download failed` | URL sai, release chưa publish, DNS chết | `curl` thử URL manifest từ PC cùng mạng |
-| log `HTTP_CLIENT: Out of buffer` | GitHub trả 302 sang CDN, header `Location` (URL ký) ~1,4 KB > buffer header mặc định 512 B | đã sửa bằng `buffer_size` 4096 cho cả manifest lẫn download (sau v1.0.0); bản v1.0.0 phải flash lại qua USB |
+| log `HTTP_CLIENT: Out of buffer` | GitHub trả 302 sang CDN; theo redirect nghĩa là phải **gửi** `GET <path ký ~1,4 KB> HTTP/1.1`, mà dòng request được dựng trong buffer **TX** mặc định 512 B | phải set **cả hai**: `buffer_size` *và* `buffer_size_tx` = 4096. `buffer_size` chỉ map sang `buffer_size_rx` — đó là lý do lần sửa đầu (chỉ `buffer_size`) không hết lỗi. Đã sửa sau v1.0.1; các bản ≤ v1.0.1 phải flash lại qua USB |
 | LCD `Bad manifest` | JSON thiếu `version` hoặc `url` | chạy lại `tools/make_manifest.py` |
 | LCD `Same version` | ảnh tải về không mới hơn ảnh đang chạy | tag lại cho đúng; đây là chốt chặn ở nguyên tắc 1.2 đang làm việc |
 | LCD `Image invalid` | ảnh hỏng hoặc không phải app image hợp lệ | build lại, kiểm `sha256` trong manifest |
