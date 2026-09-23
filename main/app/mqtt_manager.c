@@ -26,6 +26,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "network_manager.h"
+#include "ota_manager.h"
 #include "sdkconfig.h"
 #include "system_status.h"
 #include "time_source.h"
@@ -84,6 +85,8 @@ static char s_topic_io[MQTT_TOPIC_MAX];
 static char s_topic_heartbeat[MQTT_TOPIC_MAX];
 static char s_topic_cmd_out0[MQTT_TOPIC_MAX];   /* subscribed: relay out0 control */
 static char s_topic_cmd_out1[MQTT_TOPIC_MAX];   /* subscribed: relay out1 control */
+static char s_topic_cmd_ota[MQTT_TOPIC_MAX];    /* subscribed: firmware update control */
+static char s_topic_ota[MQTT_TOPIC_MAX];        /* published: firmware update state */
 static char s_active_broker[CONFIG_MANAGER_MQTT_NAME_LEN];  /* broker label, for heartbeat */
 
 /*
@@ -96,6 +99,12 @@ static char s_active_broker[CONFIG_MANAGER_MQTT_NAME_LEN];  /* broker label, for
 static char *s_tls_ca_pem;
 static char *s_tls_cert_pem;
 static char *s_tls_key_pem;
+
+/* Set by the event handler and by an accepted ota command; the manager task
+ * turns it into one pm/<id>/ota publish on its next pass. Neither context
+ * publishes directly: the event handler can run before s_client is assigned,
+ * and TLS writes belong on the manager task. */
+static volatile bool s_ota_report_pending;
 
 /* Defined below; the event handler echoes io state after a relay command. */
 static void publish_io(void);
@@ -158,12 +167,14 @@ static void build_identity(const config_mqtt_profile_t *profile)
         snprintf(s_topic_energy, sizeof(s_topic_energy), "%s/energy", publish_base);
         snprintf(s_topic_io, sizeof(s_topic_io), "%s/io", publish_base);
         snprintf(s_topic_heartbeat, sizeof(s_topic_heartbeat), "%s/heartbeat", publish_base);
+        snprintf(s_topic_ota, sizeof(s_topic_ota), "%s/ota", publish_base);
     } else {
         snprintf(s_topic_status, sizeof(s_topic_status), "pm/%s/status", s_device_id);
         snprintf(s_topic_telemetry, sizeof(s_topic_telemetry), "pm/%s/telemetry", s_device_id);
         snprintf(s_topic_energy, sizeof(s_topic_energy), "pm/%s/energy", s_device_id);
         snprintf(s_topic_io, sizeof(s_topic_io), "pm/%s/io", s_device_id);
         snprintf(s_topic_heartbeat, sizeof(s_topic_heartbeat), "pm/%s/heartbeat", s_device_id);
+        snprintf(s_topic_ota, sizeof(s_topic_ota), "pm/%s/ota", s_device_id);
     }
 
     const char *subscribe_base = profile->subscribe_topic[0] != '\0'
@@ -171,9 +182,11 @@ static void build_identity(const config_mqtt_profile_t *profile)
     if (subscribe_base != NULL) {
         snprintf(s_topic_cmd_out0, sizeof(s_topic_cmd_out0), "%s/out0", subscribe_base);
         snprintf(s_topic_cmd_out1, sizeof(s_topic_cmd_out1), "%s/out1", subscribe_base);
+        snprintf(s_topic_cmd_ota, sizeof(s_topic_cmd_ota), "%s/ota", subscribe_base);
     } else {
         snprintf(s_topic_cmd_out0, sizeof(s_topic_cmd_out0), "pm/%s/cmd/out0", s_device_id);
         snprintf(s_topic_cmd_out1, sizeof(s_topic_cmd_out1), "pm/%s/cmd/out1", s_device_id);
+        snprintf(s_topic_cmd_ota, sizeof(s_topic_cmd_ota), "pm/%s/cmd/ota", s_device_id);
     }
 }
 
@@ -222,6 +235,51 @@ static void handle_relay_command(int out_index, const char *data, int len)
     publish_io();  /* echo confirmed state */
 }
 
+/*
+ * pm/<id>/cmd/ota — {"action":"check"} or {"action":"update"[,"url":"..."]}.
+ *
+ * Both hand off to the OTA worker task and return immediately: this runs on the
+ * esp-mqtt event task, where blocking on a download would stall the keepalive
+ * and drop the connection mid-update. Progress comes back on pm/<id>/ota.
+ *
+ * "url" is honoured because a fleet may be staged from somewhere other than the
+ * compiled-in manifest, but it does not decide what gets installed — the
+ * descriptor inside the downloaded image still has to be newer (ota_manager.c).
+ */
+static void handle_ota_command(const char *data, int len)
+{
+    cJSON *root = cJSON_ParseWithLength(data, len);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "cmd/ota: payload is not valid JSON; ignored");
+        return;
+    }
+
+    const cJSON *action = cJSON_GetObjectItemCaseSensitive(root, "action");
+    if (!cJSON_IsString(action) || action->valuestring == NULL) {
+        ESP_LOGW(TAG, "cmd/ota: missing/invalid \"action\" string; ignored");
+        cJSON_Delete(root);
+        return;
+    }
+
+    esp_err_t ret;
+    if (strcmp(action->valuestring, "check") == 0) {
+        ret = ota_manager_request_check();
+    } else if (strcmp(action->valuestring, "update") == 0) {
+        const cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");
+        ret = ota_manager_request_update(cJSON_IsString(url) ? url->valuestring : NULL);
+    } else {
+        ESP_LOGW(TAG, "cmd/ota: action must be \"check\" or \"update\"; ignored");
+        cJSON_Delete(root);
+        return;
+    }
+    ESP_LOGI(TAG, "cmd/ota %s -> %s", action->valuestring, esp_err_to_name(ret));
+    cJSON_Delete(root);
+
+    /* Report either way: a rejected command ("busy", "OTA disabled") is exactly
+     * the case where the operator most needs to see the state. */
+    s_ota_report_pending = true;
+}
+
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data)
 {
@@ -241,6 +299,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         /* Subscribe to the relay command topics (QoS1). */
         esp_mqtt_client_subscribe(event->client, s_topic_cmd_out0, 1);
         esp_mqtt_client_subscribe(event->client, s_topic_cmd_out1, 1);
+        esp_mqtt_client_subscribe(event->client, s_topic_cmd_ota, 1);
+        /* Report the running version once the link is up, so a subscriber
+         * learns it without waiting out a whole publish period. The publish
+         * itself happens on the manager task: this handler runs on the
+         * esp-mqtt task, where s_client may not be assigned yet. */
+        s_ota_report_pending = true;
         break;
     case MQTT_EVENT_DISCONNECTED:
         s_connected = false;
@@ -255,6 +319,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         } else if (event->topic_len == (int)strlen(s_topic_cmd_out1) &&
                    strncmp(event->topic, s_topic_cmd_out1, event->topic_len) == 0) {
             handle_relay_command(1, event->data, event->data_len);
+        } else if (event->topic_len == (int)strlen(s_topic_cmd_ota) &&
+                   strncmp(event->topic, s_topic_cmd_ota, event->topic_len) == 0) {
+            handle_ota_command(event->data, event->data_len);
         }
         break;
     case MQTT_EVENT_ERROR:
@@ -951,6 +1018,52 @@ static void on_input_change(bool in0, bool in1, void *ctx)
     s_input_event_pending = true;
 }
 
+/*
+ * pm/<id>/ota — the OTA worker's state, retained so a subscriber that arrives
+ * after an update finished still learns what the device is running. QoS1: a
+ * dropped progress frame is harmless, but a dropped terminal state would leave
+ * a dashboard showing a download that never ends.
+ */
+static void publish_ota_state(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return;
+    }
+
+    int percent = 0;
+    char err[OTA_ERR_MAX];
+    ota_state_t st = ota_manager_get_state(&percent, err, sizeof(err));
+
+    static const char *const names[] = {
+        "idle", "checking", "check_done", "downloading", "reboot_pending", "failed",
+    };
+    cJSON_AddStringToObject(root, "state",
+                            (st < (ota_state_t)(sizeof(names) / sizeof(names[0])))
+                            ? names[st] : "?");
+    cJSON_AddStringToObject(root, "running", ota_manager_running_version());
+    if (st == OTA_STATE_DOWNLOADING) {
+        cJSON_AddNumberToObject(root, "percent", percent);
+    }
+    if (st == OTA_STATE_FAILED && err[0] != '\0') {
+        cJSON_AddStringToObject(root, "error", err);
+    }
+    if (ota_manager_pending_verify()) {
+        cJSON_AddBoolToObject(root, "pending_verify", true);
+    }
+
+    ota_release_t rel;
+    if (ota_manager_get_release(&rel)) {
+        cJSON_AddStringToObject(root, "latest", rel.latest);
+        cJSON_AddBoolToObject(root, "available", rel.available);
+        if (rel.notes[0] != '\0') {
+            cJSON_AddStringToObject(root, "notes", rel.notes);
+        }
+    }
+
+    publish_json(s_topic_ota, root, 1, 1);
+}
+
 /* pm/<id>/heartbeat — liveness + debug/monitoring fields (QoS0). */
 static void publish_heartbeat(void)
 {
@@ -1031,6 +1144,8 @@ static void mqtt_manager_task(void *arg)
     }
 
     int64_t last_publish_us = 0;
+    ota_state_t last_ota_state = OTA_STATE_IDLE;
+    int         last_ota_step  = -1;
     while (1) {
         mqtt_apply_request_t *request = NULL;
         if (xQueueReceive(s_apply_queue, &request, pdMS_TO_TICKS(250)) == pdTRUE) {
@@ -1070,6 +1185,22 @@ static void mqtt_manager_task(void *arg)
             s_input_event_pending = false;
             if (!periodic) {
                 publish_io();
+            }
+        }
+
+        /* OTA is reported on change, not on a clock: the publish period is far
+         * too slow for a progress bar and far too fast for an idle device.
+         * Quantising progress to 5% keeps a ~1.5 MB download to ~20 messages
+         * instead of one per 250 ms pass. */
+        {
+            int ota_percent = 0;
+            ota_state_t ota_st = ota_manager_get_state(&ota_percent, NULL, 0);
+            int step = ota_percent / 5;
+            if (s_ota_report_pending || ota_st != last_ota_state || step != last_ota_step) {
+                s_ota_report_pending = false;
+                last_ota_state = ota_st;
+                last_ota_step  = step;
+                publish_ota_state();
             }
         }
 

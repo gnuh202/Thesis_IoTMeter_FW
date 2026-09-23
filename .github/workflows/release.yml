@@ -1,0 +1,70 @@
+# Build a tagged release and publish the assets the device downloads.
+#
+# Triggered only by a v* tag, because the tag IS the version: ESP-IDF runs
+# `git describe` at build time and writes the result into the app descriptor,
+# which is the firmware's single source of truth for "what am I running".
+# That is also why the checkout takes fetch-depth: 0 -- a shallow clone has no
+# tags, `git describe` falls back to a bare commit hash, and the manifest
+# generator refuses to publish the result.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create the release and upload assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tagged commit with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build with ESP-IDF v5.5.1
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.1
+          target: esp32s3
+          # The action runs as root in a container, so git refuses to read a
+          # repository owned by another user; without this `git describe`
+          # fails silently and the version degrades to a hash.
+          command: git config --global --add safe.directory "$PWD" && idf.py build
+
+      - name: Read the release note from the tag
+        id: note
+        run: |
+          note=$(git tag -l --format='%(contents:subject)' "${GITHUB_REF_NAME}")
+          if [ -z "$note" ]; then
+            note=$(git log -1 --pretty=%s)
+          fi
+          echo "text=${note}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate manifest.json
+        run: |
+          python3 tools/make_manifest.py \
+            --bin build/luanvan_firmware.bin \
+            --tag "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --asset luanvan_firmware.bin \
+            --notes "${{ steps.note.outputs.text }}" \
+            --out manifest.json
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: ${{ steps.note.outputs.text }}
+          # make_manifest.py has already checked that the image's own descriptor
+          # matches the tag, so these two assets cannot disagree.
+          files: |
+            build/luanvan_firmware.bin
+            manifest.json

@@ -28,6 +28,7 @@
 #include "modbus_slave_task.h"
 #include "network_manager.h"
 #include "nvs.h"
+#include "ota_manager.h"
 #include "ping/ping_sock.h"
 #include "sdkconfig.h"
 #include "system_status.h"
@@ -1308,6 +1309,129 @@ static int cmd_rtc(int argc, char **argv)
     }
 
     printf("unknown subcommand '%s' (get|set|status|sync)\n", sub);
+    return 1;
+}
+
+/* ota: the same five operations the LCD menu and MQTT expose, on a wire an
+ * operator already has open. check and update return as soon as the worker
+ * task is spawned -- neither blocks the console while the network runs. */
+static struct {
+    struct arg_str *sub;
+    struct arg_str *url;
+    struct arg_end *end;
+} s_ota_args;
+
+static const char *ota_state_name(ota_state_t st)
+{
+    switch (st) {
+    case OTA_STATE_IDLE:            return "idle";
+    case OTA_STATE_CHECKING:        return "checking";
+    case OTA_STATE_CHECK_DONE:      return "check done";
+    case OTA_STATE_DOWNLOADING:     return "downloading";
+    case OTA_STATE_REBOOT_PENDING:  return "reboot pending";
+    case OTA_STATE_FAILED:          return "failed";
+    }
+    return "?";
+}
+
+static int cmd_ota(int argc, char **argv)
+{
+    int nerrors = arg_parse(argc, argv, (void **)&s_ota_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, s_ota_args.end, argv[0]);
+        return 1;
+    }
+
+    const char *sub = s_ota_args.sub->sval[0];
+
+    if (strcmp(sub, "status") == 0) {
+        int percent = 0;
+        char err[OTA_ERR_MAX];
+        ota_state_t st = ota_manager_get_state(&percent, err, sizeof(err));
+
+        printf("%-12s: %s\n", "running", ota_manager_running_version());
+        printf("%-12s: %s\n", "state", ota_state_name(st));
+        if (st == OTA_STATE_DOWNLOADING) {
+            printf("%-12s: %d%%\n", "progress", percent);
+        }
+        if (st == OTA_STATE_FAILED && err[0] != '\0') {
+            printf("%-12s: %s\n", "error", err);
+        }
+        printf("%-12s: %s\n", "probation", ota_manager_pending_verify() ? "yes (not committed)" : "no");
+
+        ota_release_t rel;
+        if (ota_manager_get_release(&rel)) {
+            printf("%-12s: %s%s\n", "latest", rel.latest,
+                   rel.available ? "  (update available)" : "  (up to date)");
+            if (rel.notes[0] != '\0') {
+                printf("%-12s: %s\n", "notes", rel.notes);
+            }
+            printf("%-12s: %s\n", "url", rel.url);
+        } else {
+            printf("%-12s: no check has completed yet\n", "latest");
+        }
+        return 0;
+    }
+
+    if (strcmp(sub, "check") == 0) {
+        esp_err_t ret = ota_manager_request_check();
+        if (ret == ESP_ERR_NOT_SUPPORTED) {
+            printf("OTA is disabled in this build (CONFIG_APP_OTA_ENABLE)\n");
+            return 1;
+        }
+        if (ret != ESP_OK) {
+            printf("check not started: %s\n", esp_err_to_name(ret));
+            return 1;
+        }
+        printf("checking the release manifest; run 'ota status' for the result\n");
+        return 0;
+    }
+
+    if (strcmp(sub, "update") == 0) {
+        const char *url = (s_ota_args.url->count > 0) ? s_ota_args.url->sval[0] : NULL;
+        esp_err_t ret = ota_manager_request_update(url);
+        if (ret == ESP_ERR_NOT_SUPPORTED) {
+            printf("OTA is disabled in this build (CONFIG_APP_OTA_ENABLE)\n");
+            return 1;
+        }
+        if (ret == ESP_ERR_INVALID_ARG) {
+            printf("no URL given and no check has completed; run 'ota check' first\n");
+            return 1;
+        }
+        if (ret != ESP_OK) {
+            printf("update not started: %s\n", esp_err_to_name(ret));
+            return 1;
+        }
+        printf("downloading; the device reboots into the new image when it lands\n");
+        return 0;
+    }
+
+    if (strcmp(sub, "confirm") == 0) {
+        if (!ota_manager_pending_verify()) {
+            printf("nothing to confirm: this image is already committed\n");
+            return 0;
+        }
+        esp_err_t ret = ota_manager_mark_valid();
+        if (ret != ESP_OK) {
+            printf("commit failed: %s\n", esp_err_to_name(ret));
+            return 1;
+        }
+        printf("image committed; the bootloader will keep it\n");
+        return 0;
+    }
+
+    if (strcmp(sub, "rollback") == 0) {
+        printf("rolling back to the previous image; the device restarts now\n");
+        fflush(stdout);
+        energy_meter_flush_persist();
+        vTaskDelay(pdMS_TO_TICKS(200));
+        esp_err_t ret = ota_manager_rollback();
+        /* Only reached when the other slot holds no valid image. */
+        printf("rollback refused: %s\n", esp_err_to_name(ret));
+        return 1;
+    }
+
+    printf("unknown subcommand '%s' (check|update|status|confirm|rollback)\n", sub);
     return 1;
 }
 
@@ -2653,6 +2777,18 @@ static esp_err_t register_meter_commands(void)
         .argtable = &s_rtc_args,
     };
     ESP_RETURN_ON_ERROR(esp_console_cmd_register(&rtc_cmd), TAG, "register rtc failed");
+
+    s_ota_args.sub = arg_str1(NULL, NULL, "<check|update|status|confirm|rollback>", "ota subcommand");
+    s_ota_args.url = arg_str0(NULL, "url", "<https://...>", "image URL (update; defaults to the last check)");
+    s_ota_args.end = arg_end(3);
+    const esp_console_cmd_t ota_cmd = {
+        .command = "ota",
+        .help = "Firmware update: ota check | ota update [--url ...] | ota status | ota confirm | ota rollback",
+        .hint = NULL,
+        .func = &cmd_ota,
+        .argtable = &s_ota_args,
+    };
+    ESP_RETURN_ON_ERROR(esp_console_cmd_register(&ota_cmd), TAG, "register ota failed");
 
     const esp_console_cmd_t btn_cmd = {
         .command = "btn",

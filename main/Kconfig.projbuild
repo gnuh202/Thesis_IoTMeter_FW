@@ -1154,4 +1154,86 @@ menu "Application Configuration"
 
     endmenu
 
+    menu "Firmware Update (OTA)"
+
+        config APP_OTA_ENABLE
+            bool "Enable over-the-air firmware update"
+            default y
+            help
+                Builds the OTA manager: the manifest check, the HTTPS download
+                into the spare app slot, and the LCD/console/MQTT/web controls
+                that drive them. With this off none of that code is linked and
+                the only way to update is USB.
+
+                This requires a dual-OTA partition table (ota_0/ota_1 plus an
+                otadata partition). partitions.csv already provides one.
+
+        config APP_OTA_MANIFEST_URL
+            string "Release manifest URL"
+            depends on APP_OTA_ENABLE
+            default "https://github.com/gnuh202/Thesis_IoTMeter_FW/releases/latest/download/manifest.json"
+            help
+                Where "check for updates" looks. The default points at the
+                manifest.json asset of the repository's newest GitHub release.
+
+                The /releases/latest/download/ form is deliberate: GitHub
+                resolves "latest" to the newest tag server-side, so the device
+                never touches api.github.com and never meets its 60-requests-
+                per-hour-per-IP limit. A fleet behind one NAT would otherwise
+                exhaust that between them.
+
+                HTTPS is verified against the bundled root CA list
+                (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE), so no certificate needs to
+                be uploaded to the device.
+
+        config APP_OTA_HTTP_TIMEOUT_MS
+            int "HTTP timeout ms"
+            depends on APP_OTA_ENABLE
+            range 5000 120000
+            default 20000
+            help
+                Per-request timeout for both the manifest fetch and the image
+                download. The image download is chunked, so this bounds one
+                chunk, not the whole transfer.
+
+        config APP_OTA_TASK_STACK_SIZE
+            int "OTA worker task stack size"
+            depends on APP_OTA_ENABLE
+            range 6144 16384
+            default 8192
+            help
+                Stack for the short-lived OTA worker. A TLS handshake is the
+                peak consumer; 8192 leaves margin over the ~6 KB mbedTLS needs
+                with the full CA bundle.
+
+        config APP_OTA_TASK_PRIORITY
+            int "OTA worker task priority"
+            depends on APP_OTA_ENABLE
+            range 1 20
+            default 4
+            help
+                Deliberately BELOW the comm tier (7) and the internal tier (6).
+                A firmware download must never starve metering, Modbus or MQTT:
+                the update can afford to take longer, the measurements cannot.
+
+        config APP_OTA_SELFTEST_DELAY_S
+            int "Self-test period before committing a new image (seconds)"
+            depends on APP_OTA_ENABLE
+            range 30 600
+            default 60
+            help
+                With rollback enabled (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) a
+                freshly flashed image boots as PENDING_VERIFY and must call
+                esp_ota_mark_app_valid_cancel_rollback() or the bootloader
+                reverts to the previous slot on the next reset.
+
+                This is how long the image must stay up, with the metering chip
+                answering, before the firmware commits itself.
+
+                The test deliberately does NOT require a network link: a device
+                whose cable is unplugged would otherwise roll back for ever,
+                which would make a field outage look like a bad build.
+
+    endmenu
+
 endmenu

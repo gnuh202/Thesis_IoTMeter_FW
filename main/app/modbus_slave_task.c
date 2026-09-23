@@ -16,6 +16,7 @@
 #include "io_expander.h"
 #include "mbcontroller.h"
 #include "network_manager.h"
+#include "ota_manager.h"
 #include "sdkconfig.h"
 #include "system_status.h"
 #include "time_source.h"
@@ -246,7 +247,10 @@ static esp_err_t slave_stack_start(const config_manager_t *cfg)
     modbus_refresh_inputs();
     modbus_refresh_io();
     s_input_regs[IR_DEVICE_ID] = 0x9032;
-    s_input_regs[IR_FW_VERSION] = 0x0100;
+    /* Derived from the running image's descriptor, not hardcoded: this register
+     * used to answer 0x0100 forever while MQTT and the LCD reported the real
+     * build. Reads 0x0000 on an untagged development build. */
+    s_input_regs[IR_FW_VERSION] = ota_manager_version_word(ota_manager_running_version());
     s_input_regs[IR_HW_VERSION] = 0x0100;
 
     void *handler = NULL;

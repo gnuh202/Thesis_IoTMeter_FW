@@ -22,6 +22,7 @@
 #include "modbus_meters.h"
 #include "modbus_slave_task.h"
 #include "network_manager.h"
+#include "ota_manager.h"
 #include "sd_card.h"
 #include "sdkconfig.h"
 #include "system_status.h"
@@ -1064,11 +1065,18 @@ static esp_err_t menu_device_info(lcd_menu_t *menu, const lcd_menu_item_t *item,
     /* Line 0: Device Name (truncate to fit) */
     snprintf(lines[total_lines++], sizeof(lines[0]), "Name: %.13s", cfg.device_name);
 
-    /* Line 1: Firmware build (OTA tracking from NVS) */
-    snprintf(lines[total_lines++], sizeof(lines[0]), "FW: %.15s", cfg.ota_fw_build);
-
-    /* Line 2: Version (OTA tracking from NVS) */
-    snprintf(lines[total_lines++], sizeof(lines[0]), "Ver: %.14s", cfg.ota_version);
+    /* Lines 1-2: the running image, read out of its own descriptor.
+     *
+     * These used to show cfg.ota_version / cfg.ota_fw_build, two NVS strings
+     * that nothing ever wrote — so every unit displayed "0.0.0" and
+     * "000000-00" no matter what it was running, while MQTT reported the real
+     * thing. A version that can disagree with the executing image is worse
+     * than no version at all, so the descriptor is now the only source. */
+    const esp_app_desc_t *app = esp_app_get_description();
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Ver: %.14s",
+             (app != NULL && app->version[0] != '\0') ? app->version : "?");
+    snprintf(lines[total_lines++], sizeof(lines[0]), "Built: %.13s",
+             (app != NULL) ? app->date : "?");
 
     /* Single-page display (all 3 lines fit), but use same navigation pattern */
     int cursor = 0;
@@ -3693,6 +3701,153 @@ static const lcd_menu_screen_t s_screen_energy = {
     .item_count = sizeof(s_items_energy) / sizeof(s_items_energy[0]),
 };
 
+/* ---- Firmware Update (Settings) ----
+ *
+ * One entry point for the whole OTA story: enter, and it checks the release
+ * manifest and says either "<version> is available" or "No fw available".
+ *
+ * The check runs on the OTA worker task, not here. A TLS handshake against
+ * GitHub wants ~6 KB of stack and can sit on the network for seconds; doing
+ * that on the HMI task would blow its stack and freeze the alarm/LED ticks
+ * that every other screen keeps pumping. This screen only polls and draws.
+ */
+#if CONFIG_APP_OTA_ENABLE
+
+/* 18 cells between the brackets makes the bar exactly the 20-column width.
+ * Plain '=' rather than the HD44780 full block (0xFF): the block renders as a
+ * solid cell on this display but travels through char buffers as a negative
+ * char, and a progress bar is not worth that argument. */
+static void fw_progress_bar(char *buf, size_t buf_size, int percent)
+{
+    char cells[19];
+    int filled = (percent * 18) / 100;
+    for (int i = 0; i < 18; i++) {
+        cells[i] = (i < filled) ? '=' : ' ';
+    }
+    cells[18] = '\0';
+    snprintf(buf, buf_size, "[%s]", cells);
+}
+
+static esp_err_t menu_fw_update(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
+{
+    (void)menu; (void)item; (void)ctx;
+
+    char running[HOME_LCD_WIDTH + 1];
+    snprintf(running, sizeof(running), "Now: %.14s", ota_manager_running_version());
+
+    if (ota_manager_busy()) {
+        show_info("FW UPDATE", "Busy, try again", running, "OK: Back");
+        return ESP_OK;
+    }
+    if (ota_manager_request_check() != ESP_OK) {
+        show_info("FW UPDATE", "Check failed", running, "OK: Back");
+        return ESP_OK;
+    }
+
+    put_line_centre(0, "FW UPDATE");
+    put_line_centre(1, "Checking...");
+    put_line(2, running);
+    put_line(3, "");
+
+    ota_state_t st;
+    char err[OTA_ERR_MAX];
+    do {
+        alarm_tick();
+        update_leds();
+        vTaskDelay(pdMS_TO_TICKS(HOME_POLL_MS));
+        st = ota_manager_get_state(NULL, err, sizeof(err));
+    } while (st == OTA_STATE_CHECKING);
+
+    ota_release_t rel;
+    if (st != OTA_STATE_CHECK_DONE || !ota_manager_get_release(&rel)) {
+        show_info("FW UPDATE", err[0] != '\0' ? err : "Check failed", running, "OK: Back");
+        return ESP_OK;
+    }
+
+    if (!rel.available) {
+        put_line_centre(0, "FW UPDATE");
+        put_line_centre(1, "No fw available");
+        put_line(2, running);
+        put_line(3, "OK: Back");
+        (void)wait_modal_ok_or_back();
+        return ESP_OK;
+    }
+
+    /* "1.2.0 is available" — the tag's leading 'v' is dropped so the sentence
+     * reads naturally and the 20-column line has room for the number. */
+    const char *shown = rel.latest;
+    if (*shown == 'v' || *shown == 'V') {
+        shown++;
+    }
+    char headline[HOME_LCD_WIDTH + 1];
+    snprintf(headline, sizeof(headline), "%.7s is available", shown);
+    put_line_centre(0, "FW UPDATE");
+    put_line_centre(1, headline);
+    put_line(2, running);
+    put_line(3, "OK: Install <:Back");
+    if (!wait_modal_ok_or_back()) {
+        return ESP_OK;
+    }
+
+    /* Second gate. Installing reboots the meter, which drops the Modbus link
+     * and leaves a gap in the log — the same class of disruption as starting
+     * the config portal, so it confirms the same way. */
+    put_line_centre(0, "INSTALL?");
+    put_line_centre(1, rel.latest);
+    put_line(2, "");
+    put_line_centre(3, "Device will reboot");
+    if (!wait_confirm_cancel()) {
+        return ESP_OK;
+    }
+
+    if (ota_manager_request_update(NULL) != ESP_OK) {
+        show_action_result(false);
+        return ESP_OK;
+    }
+
+    put_line_centre(0, "INSTALLING");
+    put_line(1, "");
+    put_line_centre(2, "0%");
+    put_line_centre(3, "Do not power off");
+
+    char bar[HOME_LCD_WIDTH + 1];
+    char pct[HOME_LCD_WIDTH + 1];
+    int percent = 0;
+    int drawn = -1;
+    do {
+        st = ota_manager_get_state(&percent, err, sizeof(err));
+        /* Redraw only on change: the LCD is on the shared I2C bus and a
+         * 50 Hz full-screen rewrite would fight the button reads for it. */
+        if (percent != drawn) {
+            fw_progress_bar(bar, sizeof(bar), percent);
+            put_line(1, bar);
+            snprintf(pct, sizeof(pct), "%d%%", percent);
+            put_line_centre(2, pct);
+            drawn = percent;
+        }
+        alarm_tick();
+        update_leds();
+        vTaskDelay(pdMS_TO_TICKS(HOME_POLL_MS));
+    } while (st == OTA_STATE_DOWNLOADING);
+
+    if (st != OTA_STATE_REBOOT_PENDING) {
+        show_info("FW UPDATE", err[0] != '\0' ? err : "Install failed", running, "OK: Back");
+        return ESP_OK;
+    }
+
+    /* ota_manager restarts the chip itself a few seconds from now — one
+     * behaviour whether the update came from here, the console or MQTT. Hold
+     * the result up until it does. */
+    put_line_centre(0, "FW UPDATE");
+    put_line_centre(1, "Installed");
+    put_line_centre(2, rel.latest);
+    put_line_centre(3, "Rebooting...");
+    pump_ticks_for_ms(6000);
+    return ESP_OK;
+}
+
+#endif /* CONFIG_APP_OTA_ENABLE */
+
 static const lcd_menu_item_t s_items_settings[] = {
     {.label = "Meter Setup",     .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_meter_setup},
     {.label = "Config Portal",   .type = LCD_MENU_ITEM_ACTION,  .action = menu_portal_start},
@@ -3703,6 +3858,9 @@ static const lcd_menu_item_t s_items_settings[] = {
     {.label = "Alarm Settings",  .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_settings},
     {.label = "Energy",          .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_energy},
     {.label = "Display & Keys",  .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_display},
+#if CONFIG_APP_OTA_ENABLE
+    {.label = "FW Update",       .type = LCD_MENU_ITEM_ACTION,  .action = menu_fw_update},
+#endif
     {.label = "Factory Reset",   .type = LCD_MENU_ITEM_ACTION,  .action = menu_factory_reset},
     {.label = "Back",            .type = LCD_MENU_ITEM_BACK},
 };

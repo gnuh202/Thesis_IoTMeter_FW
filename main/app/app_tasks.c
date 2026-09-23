@@ -14,6 +14,7 @@
 #include "mqtt_manager.h"
 #include "network_comm_task.h"
 #include "network_manager.h"
+#include "ota_manager.h"
 #include "sd_card.h"
 #include "system_status.h"
 #include "time_source.h"
@@ -43,6 +44,15 @@ esp_err_t app_tasks_start(void)
      * that NVS is up, before consumers read. Load-only: does not apply settings
      * or notify modules, so boot behavior is unchanged. */
     ESP_RETURN_ON_ERROR(config_manager_init(), TAG, "init configuration manager failed");
+
+    /* OTA bookkeeping. Runs this early for one reason: if the bootloader
+     * started us as PENDING_VERIFY, the self-test clock should begin at the
+     * top of boot, not after the slowest peripheral. It starts a timer and
+     * reads one partition entry -- no network, no task. */
+    esp_err_t ota_ret = ota_manager_init();
+    if (ota_ret != ESP_OK) {
+        ESP_LOGW(TAG, "OTA manager init failed: %s", esp_err_to_name(ota_ret));
+    }
 
     /* Wall-clock abstraction: timezone, boot counter, and the DS1307 on the
      * shared I2C bus. Runs here, before boot_manager_begin(), because the

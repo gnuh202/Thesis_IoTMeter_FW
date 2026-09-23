@@ -210,7 +210,7 @@ Từ PCF8574.
 | Addr | Tên             | Kiểu   | Ghi chú                    |
 | ---- | --------------- | ------ | -------------------------- |
 | 100  | DeviceID        | uint16 | 0x9032                     |
-| 101  | FirmwareVersion | uint16 | 0x0100 = v1.00             |
+| 101  | FirmwareVersion | uint16 | `major<<8 \| minor`, vd 0x0102 = v1.2.x |
 | 102  | HardwareVersion | uint16 | 0x0100                     |
 | 103  | MeasureValid    | uint16 | 1 = có số đo hợp lệ        |
 | 104  | Uptime_H        | uint16 | uptime giây, high word     |
@@ -219,6 +219,11 @@ Từ PCF8574.
 | 111  | Epoch_L         | uint16 | Unix epoch giây, low word  |
 | 112  | TimeQuality     | uint16 | mã ASCII: `'S'`=83, `'E'`=69, `'U'`=85 |
 | 113  | BootCount       | uint16 | số lần khởi động (lưu NVS) |
+
+> `FirmwareVersion` lấy từ app descriptor của ảnh đang chạy (`ota_manager_version_word()`),
+> không còn hardcode. Build chưa có tag đọc ra **0x0000** ("không rõ") thay vì một
+> con số bịa ra — xem [ota_release.md](ota_release.md). Chỉ có major/minor: thanh ghi
+> 16-bit không đủ chỗ cho patch.
 
 > Tổng số Input Register tăng **110 → 114**. Các địa chỉ 106–109 bỏ trống (dự
 > phòng); khối thời gian được **nối vào cuối** nên **không địa chỉ cũ nào bị dịch**.

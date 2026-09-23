@@ -85,6 +85,8 @@
 | `pm/<id>/status` | Publish | 1 | **Yes** | On connect + LWT | Online/offline presence |
 | `pm/<id>/cmd/out0` | Subscribe | 1 | — | On demand | Relay output 0 control |
 | `pm/<id>/cmd/out1` | Subscribe | 1 | — | On demand | Relay output 1 control |
+| `pm/<id>/ota` | Publish | 1 | **Yes** | On change (progress quantised to 5%) | Firmware update state |
+| `pm/<id>/cmd/ota` | Subscribe | 1 | — | On demand | Firmware update control |
 
 **Notes:**
 - Publish interval configurable via: LCD Menu (Settings → MQTT → Period), Web Portal (MQTT section), Console (`mqtt-cfg period`)
@@ -432,6 +434,56 @@ sách tin/không tin: [energy_logging.md §4](energy_logging.md#4-nguồn-thời
 - Retained flag ensures subscribers always see latest presence
 - No JSON wrapping — payload is literal string `online` or `offline`
 
+### 3.6. `pm/<id>/ota`
+
+**QoS:** 1 (reliable delivery)  
+**Retain:** **Yes** (a late subscriber must be able to see an update in flight)  
+**Publish trigger:** on state change, not on a clock
+
+**Purpose:** Report firmware update state and download progress.
+
+#### Payload Format
+
+```json
+{
+  "state": "downloading",
+  "running": "v1.0.0",
+  "percent": 45,
+  "pending_verify": false
+}
+```
+
+#### Fields
+
+| Field | Type | Always | Description |
+|-------|------|--------|-------------|
+| `state` | string | yes | `idle`, `checking`, `check_done`, `downloading`, `reboot_pending`, `failed` |
+| `running` | string | yes | version of the image currently executing, from its app descriptor |
+| `pending_verify` | bool | yes | `true` while the running image is on probation (not yet committed) |
+| `percent` | int | `downloading` only | 0-100, quantised to 5% steps |
+| `error` | string | `failed` only | short reason, e.g. `No network`, `Transfer failed`, `Same version` |
+| `latest` | string | after a check | version announced by the release manifest |
+| `available` | bool | after a check | `true` when `latest` is newer than `running` |
+| `notes` | string | after a check | release note, truncated to 47 characters |
+
+#### Examples
+
+```json
+{"state":"check_done","running":"v1.0.0","latest":"v1.1.0","available":true,"notes":"Fix PF sign with no mains","pending_verify":false}
+{"state":"downloading","running":"v1.0.0","percent":45,"pending_verify":false}
+{"state":"failed","running":"v1.0.0","error":"Transfer failed","pending_verify":false}
+```
+
+**Notes:**
+- Publishing on change rather than on the telemetry period keeps a ~1.5 MB
+  download to roughly 20 messages instead of one every 250 ms, while still
+  making a stalled download visible immediately.
+- The running version also appears in `heartbeat` as `fw_version`.
+- After a successful install the device **reboots by itself**; expect `status`
+  to go `offline` then `online`.
+
+---
+
 ---
 
 ## 4. Subscribed Topics (Broker → Device)
@@ -464,6 +516,45 @@ Plain string (NOT JSON):
 **Purpose:** Control relay output 1
 
 Same format and behavior as `cmd/out0`.
+
+### 4.3. `pm/<id>/cmd/ota`
+
+**QoS:** 1  
+**Purpose:** Trigger a firmware update check or install
+
+#### Payload Format
+
+JSON:
+
+```json
+{"action":"check"}
+{"action":"update"}
+{"action":"update","url":"https://github.com/gnuh202/Thesis_IoTMeter_FW/releases/download/v1.0.1/luanvan_firmware.bin"}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `action` | yes | `check` — fetch the manifest and compare versions; `update` — install |
+| `url` | no | install straight from this `.bin`, skipping the manifest |
+
+**Validation:**
+- `update` without `url` requires a prior successful `check`; otherwise it is
+  rejected and `pm/<id>/ota` reports the rejection.
+- A command arriving while the worker is busy is rejected the same way.
+
+**Response:**
+- No ACK message. Every accepted *and* rejected command forces a
+  `pm/<id>/ota` publish — a rejected command is exactly when an operator most
+  needs to see the current state.
+- On success the device installs, publishes `reboot_pending`, and **reboots**.
+
+**Notes:**
+- The device still reads the app descriptor inside the downloaded image and
+  refuses anything not strictly newer than what it is running, whatever the
+  manifest or `url` claims.
+- Full release and rollback procedure: [ota_release.md](ota_release.md).
+
+---
 
 ---
 
@@ -607,6 +698,7 @@ client.loop_forever()
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.6 | 2026-09-21 | • Thêm `pm/<id>/ota` (publish, QoS1 retained, theo thay đổi) và `pm/<id>/cmd/ota` (subscribe) cho cập nhật firmware OTA<br>• Tiến trình tải làm tròn 5% để giữ số message thấp |
 | 2.5 | 2026-09-20 | • `heartbeat`: thêm `ts` (epoch), `tq` (time quality `U`/`E`/`S`), `boot` (boot counter)<br>• Đính chính §3.2: energy KHÔNG nằm trong thanh ghi IC (thanh ghi là read-to-clear) — bộ đếm RAM + NVS 2-slot/CRC32 mới là chỉ số công-tơ<br>• Ghi rõ điểm commit NVS, chính sách reset, và Factory Reset không xoá energy<br>• Demand tính theo tích phân thời gian |
 | 2.4 | 2026-09-19 | • `io`: 2 digital input thành event-driven (đổi mức → publish ngay, trễ ≤ 250 ms)<br>• Thêm `warn_bits` (bitmap alarm từng pha, 16-bit) cạnh `warnings`<br>• Mô tả đầy đủ từng bit alarm: ý nghĩa, phục vụ cho gì, nguồn thanh ghi IC |
 | 2.3 | 2026-09-19 | - Alarm backend (ATM90E32AS native warning) nối vào `warnings`: bitmask latched 7 bit, reset bằng LCD Reset Latch |
@@ -624,3 +716,4 @@ client.loop_forever()
 - **Console Commands:** [console_commands.md](console_commands.md) (section: mqtt-cfg)
 - **Architecture Overview:** [architecture.md](architecture.md)
 - **Modbus Register Map:** [modbus_slave_register_map.md](modbus_slave_register_map.md)
+- **OTA firmware update & releases:** [ota_release.md](ota_release.md)
