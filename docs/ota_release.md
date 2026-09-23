@@ -159,7 +159,10 @@ git tag -a v1.0.0 -m "First production release"
 git push origin v1.0.0
 ```
 
-Tag sai thì xoá cả hai phía rồi tạo lại (chỉ làm khi CI **chưa** publish release):
+Tag sai thì xoá cả hai phía rồi tạo lại. Nếu release đã publish thì đẩy lại tag
+cùng tên sẽ khiến CI **cập nhật release hiện có** — thay đủ 2 asset cùng tên,
+nhưng **không đổi body** (hành vi của `softprops/action-gh-release`): body phải
+sửa tay trên web, hoặc xoá release trước khi re-cut. Học từ lần re-cut `v1.0.0`.
 
 ```bash
 git tag -d v1.0.0
