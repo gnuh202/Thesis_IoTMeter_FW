@@ -16,13 +16,25 @@
 
 #define ALARM_TAG "alarm_mgr"
 
-/* EMM status bits (datasheet: EMMState0 0x71 / EMMState1 0x72). */
+/* EMM status fields (datasheet: EMMState0 0x71 / EMMState1 0x72). Each
+ * per-phase field packs A,B,C from its MSB down: OV [12:10], OI [15:13],
+ * Sag [14:12], PhaseLoss [10:8]. */
 #define EMM0_OV_SHIFT   10
 #define EMM0_OI_SHIFT   13
 #define EMM1_SAG_SHIFT  12
 #define EMM1_PLOS_SHIFT 8
 #define EMM1_FHI_BIT    15
 #define EMM1_FLO_BIT    11
+
+/* The IC packs each per-phase field as A,B,C from the MSB down, while the
+ * firmware bitmap indexes phase A at the field's base bit -- taking the field
+ * straight through reported a phase C fault as phase A. Reverse the 3-bit
+ * field before shifting it into the bitmap. */
+static uint16_t emm_phase_bits(uint16_t st, unsigned shift, unsigned base)
+{
+    uint16_t f = (uint16_t)((st >> shift) & 0x7U);
+    return (uint16_t)((((f & 0x1U) << 2) | (f & 0x2U) | ((f >> 2) & 0x1U)) << base);
+}
 
 /* WarnOut = IC fatal-error pin (pin 29 -> MCU GPIO 41). High = fatal. */
 #ifdef CONFIG_APP_ATM90E32AS_WARN_GPIO
@@ -367,13 +379,13 @@ void alarm_manager_service(const atm90e32as_measurements_t *m)
      * threshold verdicts mean nothing and must not be evaluated. */
     if (armed) {
         if (en_ov) {
-            active |= (uint16_t)((st0 >> EMM0_OV_SHIFT) & 0x7U);
+            active |= emm_phase_bits(st0, EMM0_OV_SHIFT, ALARM_BIT_OV_A);
         }
         if (en_uv) {
-            active |= (uint16_t)(((st1 >> EMM1_SAG_SHIFT) & 0x7U) << ALARM_BIT_UV_A);
+            active |= emm_phase_bits(st1, EMM1_SAG_SHIFT, ALARM_BIT_UV_A);
         }
         if (en_pl) {
-            active |= (uint16_t)(((st1 >> EMM1_PLOS_SHIFT) & 0x7U) << ALARM_BIT_PL_A);
+            active |= emm_phase_bits(st1, EMM1_PLOS_SHIFT, ALARM_BIT_PL_A);
         }
         if (en_freq) {
             if (st1 & (1U << EMM1_FHI_BIT)) {
@@ -386,7 +398,7 @@ void alarm_manager_service(const atm90e32as_measurements_t *m)
     }
     /* OIth has its own anchor (it waits for load current), so it gates apart. */
     if (en_oc && oc_armed) {
-        active |= (uint16_t)(((st0 >> EMM0_OI_SHIFT) & 0x7U) << ALARM_BIT_OC_A);
+        active |= emm_phase_bits(st0, EMM0_OI_SHIFT, ALARM_BIT_OC_A);
     }
     /* WarnOut: fatal IC error (config CRC / internal). Always reportable. */
     if (gpio_get_level(ALARM_WARN_GPIO) > 0) {
