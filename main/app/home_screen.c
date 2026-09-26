@@ -1739,14 +1739,22 @@ static esp_err_t menu_rtu_slave_set_baud(lcd_menu_t *menu, const lcd_menu_item_t
 }
 
 /* ---- TCP Server (Modbus TCP) ----
- * Not implemented yet: no backend, no config field. The old submenu had two
- * leaves (Info + Active) that both just printed "Not available" — a customer
- * drilled one level in only to read the same dead end twice. Collapsed to a
- * single honest screen; when the backend lands this becomes a real toggle. */
+ * The EVN server itself lives in modbus_tcp_task.c, listens on :502 and takes
+ * no panel-side settings: the unit ID is a build constant and control setpoints
+ * arrive over the wire, so the only thing an operator at the panel can act on
+ * is knowing where a master has to dial. That is one read-only fact, hence a
+ * direct ACTION, not a submenu. */
 static esp_err_t menu_tcp_server(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
 {
     (void)menu; (void)item; (void)ctx;
-    show_info("TCP SERVER", "Not available yet", "", NULL);
+    network_status_t net = {0};
+    char ip_line[HOME_LCD_WIDTH + 1];
+    if (network_manager_get_status(&net) == ESP_OK && net.has_ip && net.ip[0] != '\0') {
+        snprintf(ip_line, sizeof(ip_line), "IP %s", net.ip);
+    } else {
+        snprintf(ip_line, sizeof(ip_line), "No IP address");
+    }
+    show_info("TCP SERVER", ip_line, "", NULL);
     return ESP_OK;
 }
 
@@ -3309,12 +3317,12 @@ static const lcd_menu_screen_t s_screen_alarm_output = {
  * constant (HOME_ALARM_*_MS) — it is an indicator characteristic, not an
  * operator setting. */
 static const lcd_menu_item_t s_items_alarm_settings[] = {
+    {.label = "Reset Latch", .type = LCD_MENU_ITEM_ACTION, .action = menu_alarm_reset_latch},
     {.label = "Detect", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_enable},
     {.label = "Limits", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_threshold},
     {.label = "Preset", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_preset},
     {.label = "Output", .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_alarm_output},
     ALARM_ITEM("Alarm Delay", ALARM_CFG_TRIGGER),
-    {.label = "Reset Latch", .type = LCD_MENU_ITEM_ACTION, .action = menu_alarm_reset_latch},
     {.label = "Sound", .type = LCD_MENU_ITEM_VALUE,
      .value_get = alarm_sound_value, .action = alarm_sound_toggle},
     {.label = "Back", .type = LCD_MENU_ITEM_BACK},
@@ -3554,25 +3562,23 @@ static esp_err_t mqtt_info_show(lcd_menu_t *m, const lcd_menu_item_t *it, void *
                 continue;
             }
 
-            /* Build display line with cursor and indent */
+            /* Build a full-width line: cursor + space + content, then pad with
+             * spaces to the last column. The padding is what makes the scroll
+             * marker visible: snprintf stops at the content's NUL and put_line
+             * draws by strlen, so a marker written past that NUL on a short
+             * line would never reach the screen. */
             char display[HOME_LCD_WIDTH + 1];
             char cursor_char = (idx == cursor) ? '>' : ' ';
-
-            /* Cursor + 1 space indent + content (truncate to fit 18 chars total) */
-            snprintf(display, sizeof(display), "%c %.16s", cursor_char, lines[idx]);
-
-            /* Add indicator if needed (reserve last 2 chars) */
-            bool mark = false;
-            if (row == 0 && has_above) {
-                mark = true;
-            } else if (row == 2 && has_below) {
-                mark = true;
+            snprintf(display, sizeof(display), "%c %.17s", cursor_char, lines[idx]);
+            size_t len = strlen(display);
+            while (len < HOME_LCD_WIDTH) {
+                display[len++] = ' ';
             }
+            display[HOME_LCD_WIDTH] = '\0';
 
-            if (mark) {
-                display[18] = '|';
-                display[19] = ' ';
-                display[20] = '\0';
+            /* Edge-of-list marker in the last column, as the engine draws it. */
+            if ((row == 0 && has_above) || (row == 2 && has_below)) {
+                display[HOME_LCD_WIDTH - 1] = '|';
             }
 
             put_line(lcd_row, display);
@@ -3587,19 +3593,30 @@ static esp_err_t mqtt_info_show(lcd_menu_t *m, const lcd_menu_item_t *it, void *
         previous = buttons;
 
         if (edges & HMI_BSP_BUTTON_TOP) {
-            if (cursor > 0) {
-                cursor--;
-                if (cursor < top) {
-                    top = cursor;
-                }
+            /* Wrap around like the lcd_menu engine (wrap_cursor): moving off
+             * the first line lands on the last one, on the bottom page. */
+            cursor--;
+            if (cursor < 0) {
+                cursor = total_lines - 1;
+            }
+            if (cursor < top) {
+                top = cursor;
+            }
+            if (cursor >= top + 3) {
+                top = cursor - 2;
             }
             button_click();
         } else if (edges & HMI_BSP_BUTTON_BOTTOM) {
-            if (cursor < total_lines - 1) {
-                cursor++;
-                if (cursor >= top + 3) {
-                    top = cursor - 2;
-                }
+            /* Off the last line wraps back to the first, on the top page. */
+            cursor++;
+            if (cursor >= total_lines) {
+                cursor = 0;
+            }
+            if (cursor < top) {
+                top = cursor;
+            }
+            if (cursor >= top + 3) {
+                top = cursor - 2;
             }
             button_click();
         } else if (edges & HMI_BSP_BUTTON_CENTER) {
