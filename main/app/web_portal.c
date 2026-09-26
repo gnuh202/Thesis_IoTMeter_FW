@@ -411,60 +411,6 @@ static const char *HTML_SCRIPT_CALIB =
     "});";
 #endif
 
-#if CONFIG_APP_OTA_ENABLE
-/*
- * Firmware section behaviour. It polls /api/ota rather than pushing state,
- * because the interesting transitions all happen on the device: an update
- * started from the LCD or over MQTT shows up on this page too. The poll runs at
- * 1 s while something is in flight and 10 s when idle, so an open browser tab
- * costs the device almost nothing.
- */
-static const char *HTML_SCRIPT_OTA =
-    "function fwParse(t){var o={};t.split('\\n').forEach(function(l){"
-    "var i=l.indexOf(' ');if(i>0)o[l.slice(0,i)]=l.slice(i+1);});return o;}"
-    "function fwSay(cls,msg){var s=document.getElementById('fw-st');"
-    "if(s){s.className='st'+(cls?' '+cls:'');s.textContent=msg;}}"
-    "function fwRender(o){"
-    "var r=document.getElementById('fw-run');"
-    "if(r)r.textContent=o.running||'?';"
-    "var inst=document.getElementById('fw-install');"
-    "var chk=document.getElementById('fw-check');"
-    "var busy=(o.state==='checking'||o.state==='downloading');"
-    "if(chk)chk.disabled=busy;"
-    "if(inst)inst.hidden=!(o.state==='check_done'&&o.available==='1');"
-    "if(inst)inst.disabled=busy;"
-    "if(o.state==='checking'){fwSay('','Checking...');}"
-    "else if(o.state==='downloading'){fwSay('','Downloading '+(o.percent||'0')+'%');}"
-    "else if(o.state==='reboot_pending'){fwSay('ok','Installed. Restarting...');}"
-    "else if(o.state==='failed'){fwSay('bad',o.error||'Update failed.');}"
-    "else if(o.state==='check_done'){fwSay(o.available==='1'?'ok':'',"
-    "o.available==='1'?(o.latest+' is available'+(o.notes?' - '+o.notes:'')):'Up to date.');}"
-    "else{fwSay('',o.pending_verify==='1'?'On probation; committing after the self-test.':'Idle.');}"
-    "return busy;}"
-    "function fwPoll(){"
-    "fetch('/api/ota').then(function(r){return r.text();}).then(function(t){"
-    "var busy=fwRender(fwParse(t));setTimeout(fwPoll,busy?1000:10000);})"
-    ".catch(function(){setTimeout(fwPoll,10000);});}"
-    "function fwPost(action){"
-    "fwSay('','Working...');"
-    "fetch('/api/ota',{method:'POST',"
-    "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
-    "body:'action='+action})"
-    ".then(function(r){return r.text().then(function(t){"
-    "if(!r.ok)fwSay('bad',t);else fwSay('',t);});})"
-    ".catch(function(){fwSay('bad','Lost connection to the device.');});}"
-    "document.addEventListener('DOMContentLoaded',function(){"
-    "var c=document.getElementById('fw-check');"
-    "var i=document.getElementById('fw-install');"
-    "if(!c)return;"
-    "c.addEventListener('click',function(){fwPost('check');});"
-    "if(i)i.addEventListener('click',function(){"
-    "if(confirm('Download and install the new firmware? The device restarts on its own.'))"
-    "fwPost('update');});"
-    "fwPoll();"
-    "});";
-#endif /* CONFIG_APP_OTA_ENABLE */
-
 static const char *HTML_SCRIPT =
     "document.addEventListener('submit',function(e){"
     "var f=e.target;if(!f.dataset.cert&&!f.dataset.calib)return;e.preventDefault();"
@@ -2249,29 +2195,10 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<button class=\"btn block\" type=\"submit\">Save and restart</button>"
         "</form></section>");
 
-#if CONFIG_APP_OTA_ENABLE
-    /* Firmware. Outside the config form on purpose: nothing here is a setting,
-     * and an accidental "Save and restart" in the middle of a download is the
-     * one thing this page must not make easy. Everything on it is filled in by
-     * the poll in HTML_SCRIPT_OTA, so the markup ships empty. */
-    httpd_resp_sendstr_chunk(req,
-        "<details class=\"section\" id=\"fw\"><summary>Firmware</summary><div class=\"sbody\">"
-        "<p>Running: <span id=\"fw-run\" class=\"st\">...</span></p>"
-        "<p>Status: <span id=\"fw-st\" class=\"st\">...</span></p>"
-        "<button class=\"btn\" type=\"button\" id=\"fw-check\">Check for updates</button> "
-        "<button class=\"btn\" type=\"button\" id=\"fw-install\" hidden>Install</button>"
-        "<p class=\"muted\">The device downloads into its spare slot and restarts by "
-        "itself. If the new image fails to start, the bootloader returns to this one.</p>"
-        "</div></details>");
-#endif
-
     /* At the end of the body so the handlers bind to a page that already exists. */
     httpd_resp_sendstr_chunk(req, "<script>");
 #if CONFIG_APP_WEB_CALIB_ENABLE
     httpd_resp_sendstr_chunk(req, HTML_SCRIPT_CALIB);
-#endif
-#if CONFIG_APP_OTA_ENABLE
-    httpd_resp_sendstr_chunk(req, HTML_SCRIPT_OTA);
 #endif
     httpd_resp_sendstr_chunk(req, HTML_SCRIPT);
     httpd_resp_sendstr_chunk(req, "</script>");
