@@ -276,9 +276,10 @@ ota rollback           # quay về slot cũ và reboot
 
 `ota status` in cả dòng `probation`, cho biết ảnh đang chạy đã commit hay chưa.
 
-### 6.3. Web portal — mục **Firmware**
+### 6.3. Web portal — API `/api/ota`
 
-`GET /api/ota` trả về text từng dòng `key value`; `POST /api/ota` nhận
+Portal không còn trang OTA trên giao diện web; kênh HTTP còn lại dành cho script
+và tích hợp ngoài. `GET /api/ota` trả về text từng dòng `key value`; `POST /api/ota` nhận
 `action=check` hoặc `action=update` (kèm `url=` tuỳ chọn).
 
 ```bash
@@ -286,9 +287,6 @@ curl http://192.168.4.1/api/ota
 curl -X POST http://192.168.4.1/api/ota -d "action=check"
 curl -X POST http://192.168.4.1/api/ota -d "action=update"
 ```
-
-Trang web tự poll `/api/ota` (1 s khi đang chạy, 10 s khi rảnh) nên một bản cập
-nhật khởi động từ LCD hay MQTT cũng hiện lên ở đây.
 
 ### 6.4. MQTT
 
@@ -344,6 +342,14 @@ Trường hợp biên đã xử lý: nếu `esp_timer_create()` thất bại th�
 **ngay lập tức**, vì không có timer thì ảnh không bao giờ commit được và sẽ bị
 rollback ở lần reset sau — thà commit sớm còn hơn bỏ rơi một thiết bị đang chạy tốt.
 
+**Đừng reset máy trong cửa sổ self-test.** Reset trước khi commit khiến bootloader
+đóng dấu ảnh mới là ABORTED và tự quay về bản cũ ngay lần boot kế — đó là rollback
+tự động hoạt động đúng thiết kế. Nhưng dấu ABORTED là vĩnh viễn với chu trình
+otadata hiện tại: ảnh đó sẽ không bao giờ được commit lại, và `ota rollback` sẽ bị
+từ chối với `ESP_ERR_OTA_ROLLBACK_FAILED` ("Rollback is not possible, do not have
+any suitable apps in slots") — máy lúc đó đang chạy bản cũ và không còn bản cũ nào
+khác để quay về. Máy không hỏng: lần `ota update` kế tiếp ghi đè otadata là tự sạch.
+
 ---
 
 ## 8. Khôi phục sự cố
@@ -358,7 +364,7 @@ rollback ở lần reset sau — thà commit sớm còn hơn bỏ rơi một thi
 | LCD `Image invalid` | ảnh hỏng hoặc không phải app image hợp lệ | build lại, kiểm `sha256` trong manifest |
 | Máy tự quay về bản cũ sau OTA | self-test không đạt | xem log: ATM90 có READY không, có crash trước 60 s không |
 | Đã commit nhầm một bản xấu | — | `ota rollback` qua console |
-| `ota rollback` báo lỗi | slot kia chưa có ảnh hợp lệ (máy mới flash lần đầu) | flash lại bằng USB |
+| `ota rollback` báo `ESP_ERR_OTA_ROLLBACK_FAILED` | ảnh slot kia đã bị đóng dấu ABORTED (máy từng bị reset trong cửa sổ self-test), hoặc máy mới flash lần đầu nên slot kia trống | chạy lại `ota update` — lần ghi otadata mới xoá dấu ABORTED; nếu slot trống thật sự thì flash lại bằng USB |
 
 Cứu hộ cuối cùng luôn là flash qua USB:
 
@@ -403,9 +409,9 @@ idf.py -p COMx flash
 | 35 | `ota update` khi ảnh trên server cùng version | `Same version`, không ghi flash |
 | 36 | Rút cáp giữa lúc tải | `Transfer failed`, máy vẫn chạy bản cũ |
 | 37 | MQTT publish `{"action":"check"}` lên `cmd/ota` | `pm/<id>/ota` báo `checking` rồi `check_done` |
-| 38 | Web portal mục Firmware, bấm Check | status đổi, nút Install hiện khi có bản mới |
+| 38 | `POST /api/ota` với `action=check` (curl) | trả 200, trạng thái chạy `checking` → `check_done` |
 | 39 | Đọc Modbus IR 101 sau khi chạy v1.2.0 | `0x0102` |
-| 40 | `ota rollback` trên máy đã OTA ít nhất một lần | reboot về slot cũ |
+| 40 | `ota rollback` khi ảnh cũ còn hợp lệ (đang trong cửa sổ self-test hoặc đã commit) | reboot về slot cũ |
 
 ---
 
