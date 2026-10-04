@@ -425,7 +425,7 @@ Command `phi-err` sẽ:
 ## 9. `ota` — cập nhật firmware từ GitHub Releases
 
 ```
-ota <status|check|update|confirm|rollback> [--url <URL>]
+ota <status|check|update|install|list|confirm|rollback> [--url <URL>] [<version>]
 ```
 
 | Subcommand | Việc |
@@ -433,10 +433,12 @@ ota <status|check|update|confirm|rollback> [--url <URL>]
 | `status` | version đang chạy, trạng thái worker, %, lỗi, `probation`, release mới nhất từ lần check gần nhất |
 | `check` | tải `manifest.json` và so version — không chặn console |
 | `update` | cài bản từ lần `check` gần nhất; `--url` để chỉ thẳng một `.bin` |
+| `install` | cài đúng release theo tag (ví dụ `v1.0.0`); cho phép hạ cấp, từ chối cài lại bản đang chạy |
+| `list` | liệt kê các release trên repo, mới nhất trước, đánh dấu bản đang chạy |
 | `confirm` | commit ảnh đang chạy ngay, bỏ qua cửa sổ self-test |
 | `rollback` | quay về slot cũ và reboot |
 
-`check` và `update` trả về ngay khi worker task đã được tạo; theo dõi tiến trình bằng
+`check`, `install` và `list` trả về ngay khi worker task đã được tạo; theo dõi tiến trình bằng
 `ota status` hoặc xem log. Cài xong máy **tự reboot**.
 
 ```
@@ -444,6 +446,8 @@ ota check
 ota status
 ota update
 ota update --url https://github.com/gnuh202/Thesis_IoTMeter_FW/releases/download/v1.0.1/luanvan_firmware.bin
+ota list
+ota install v1.0.0
 ```
 
 Dòng `probation` trong `ota status` cho biết ảnh đang chạy đã commit hay chưa:
