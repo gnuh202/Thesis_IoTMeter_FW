@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include "cert_store.h"
 #include "config_store.h"
 #include "energy_meter_task.h"
 #include "esp_app_desc.h"
@@ -1312,21 +1313,25 @@ esp_err_t config_manager_factory_reset(void)
 {
     ESP_RETURN_ON_FALSE(s_lock != NULL, ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
-    /* Config Store owns the configuration namespaces; the ATM90E32AS
-     * calibration blob is device calibration held in its own namespace by
-     * energy_meter_task, so the Configuration Manager erases it here too —
-     * factory reset must not leave a persisted calibration behind. Both errors
-     * are reported, but the first one wins so the caller sees a failure. */
+    /* Scope: everything an operator sets through the UI — the five settings
+     * namespaces plus the TLS certificate files uploaded through the portal.
+     * The ATM90E32AS calibration is deliberately NOT touched: it is not a
+     * setting but device calibration produced by the manufacturer's measurement
+     * procedure, and re-deriving it needs a reference source and a bench setup
+     * an end user at a live site does not have. A deliberate calibration wipe
+     * stays available on the console (meter-cal default --apply), which is a
+     * manufacturer tool. Errors are reported, but the first one wins so the
+     * caller sees a failure. */
     esp_err_t ret = config_store_factory_reset();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "erase configuration namespaces failed: %s", esp_err_to_name(ret));
     }
 
-    esp_err_t calib_ret = energy_meter_erase_calibration();
-    if (calib_ret != ESP_OK) {
-        ESP_LOGE(TAG, "erase calibration namespace failed: %s", esp_err_to_name(calib_ret));
+    esp_err_t cert_ret = cert_store_erase_all();
+    if (cert_ret != ESP_OK) {
+        ESP_LOGE(TAG, "erase certificate store failed: %s", esp_err_to_name(cert_ret));
         if (ret == ESP_OK) {
-            ret = calib_ret;
+            ret = cert_ret;
         }
     }
 

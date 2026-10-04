@@ -489,7 +489,10 @@ Cùng một bộ số liệu đi ra bốn hướng:
 
 > **Factory Reset KHÔNG xoá chỉ số công-tơ.** Đây là quyết định thiết kế: chỉ số đo
 > là **kết quả đo**, không phải một tuỳ chọn cấu hình. Xoá nó phải là một hành động
-> riêng, có xác nhận, và hiện rõ giá trị sắp mất.
+> riêng, có xác nhận, và hiện rõ giá trị sắp mất. Cùng một nguyên tắc áp cho
+> **hiệu chuẩn (calibration)**: gain/offset/Phi đã calib không thuộc phạm vi Factory
+> Reset — muốn làm lại hiệu chuẩn là hành động của nhà sản xuất trên console
+> (`meter-cal default --apply`), không phải của một cú reset người dùng.
 
 Hai mục LCD đều hiện giá trị hiện tại trước khi hỏi xác nhận (`Now: 12.35 kWh` /
 `Peak: 5010 W`), vì thao tác này **không hoàn tác được** — không có bản sao nào khác

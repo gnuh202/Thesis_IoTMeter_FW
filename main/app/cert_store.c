@@ -288,6 +288,27 @@ esp_err_t cert_store_delete(int profile, cert_slot_t slot)
     return ESP_OK;
 }
 
+esp_err_t cert_store_erase_all(void)
+{
+    if (!s_mounted) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t final_ret = ESP_OK;
+    for (int profile = 0; profile < CERT_STORE_PROFILE_COUNT; profile++) {
+        for (int slot = 0; slot < CERT_SLOT_COUNT; slot++) {
+            esp_err_t ret = cert_store_delete(profile, (cert_slot_t)slot);
+            if (ret != ESP_OK) {
+                final_ret = ret;
+            }
+        }
+    }
+    if (final_ret == ESP_OK) {
+        ESP_LOGI(TAG, "erased all certificate slots");
+    }
+    return final_ret;
+}
+
 /* Hash the file in chunks so an 8 KB PEM never needs a second full-size heap
  * buffer, and so no complete PEM is ever held for the sake of reporting. */
 static esp_err_t file_fingerprint(const char *path, char *out, size_t out_len)

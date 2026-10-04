@@ -1541,31 +1541,6 @@ esp_err_t energy_meter_load_calibration(bool apply)
     return ret;
 }
 
-/* Factory-reset entry point: drop the persisted calibration blob so the next
- * boot falls back to the bring-up defaults in energy_meter_init(). Runtime
- * registers are left alone on purpose — the caller reboots after a reset. */
-esp_err_t energy_meter_erase_calibration(void)
-{
-    ESP_RETURN_ON_ERROR(energy_meter_nvs_init(), TAG, "init NVS failed");
-
-    nvs_handle_t nvs;
-    esp_err_t ret = nvs_open(ENERGY_METER_NVS_NAMESPACE, NVS_READWRITE, &nvs);
-    if (ret == ESP_ERR_NVS_NOT_FOUND) {
-        return ESP_OK;  /* nothing persisted yet */
-    }
-    ESP_RETURN_ON_ERROR(ret, TAG, "open calibration NVS failed");
-
-    ret = nvs_erase_all(nvs);
-    if (ret == ESP_ERR_NVS_NOT_FOUND) {
-        ret = ESP_OK;
-    }
-    if (ret == ESP_OK) {
-        ret = nvs_commit(nvs);
-    }
-    nvs_close(nvs);
-    return ret;
-}
-
 esp_err_t energy_meter_export_blob(uint8_t *out, size_t out_cap, size_t *out_len)
 {
     ESP_RETURN_ON_FALSE(out != NULL && out_len != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
