@@ -3889,17 +3889,8 @@ static const lcd_menu_screen_t s_screen_settings = {
     .item_count = sizeof(s_items_settings) / sizeof(s_items_settings[0]),
 };
 
-/* Inert marker for the first release: an extra top row that names the menu
- * as the old firmware's. Entering it changes nothing. */
-static esp_err_t menu_old_version(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
-{
-    (void)menu; (void)item; (void)ctx;
-    return ESP_OK;
-}
-
 /* Main menu root */
 static const lcd_menu_item_t s_menu_items[] = {
-    {.label = "Old version",   .type = LCD_MENU_ITEM_ACTION,  .action = menu_old_version},
     {.label = "Device Info",   .type = LCD_MENU_ITEM_ACTION,  .action = menu_device_info},
     {.label = "Settings",      .type = LCD_MENU_ITEM_SUBMENU, .submenu = &s_screen_settings},
     {.label = "Back",          .type = LCD_MENU_ITEM_BACK,    .action = menu_back},
