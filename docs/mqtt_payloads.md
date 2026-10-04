@@ -327,6 +327,11 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
 - **Reset:** `imp_kwh`/`exp_kwh`/`imp_kvarh`/`exp_kvarh` chỉ về 0 khi người dùng chủ
   động chọn **LCD → Settings → Energy → Reset Energy**. **Factory Reset KHÔNG xoá
   energy** — chỉ số đo là kết quả đo, không phải một tuỳ chọn cấu hình.
+- **Desktop app:** subscription `pm/+/energy` — app gộp 4 tổng tích luỹ
+  (`imp_kwh`/`exp_kwh`/`imp_kvarh`/`exp_kvarh`) vào thiết bị chính trên trang
+  Devices (card ENERGY đủ 4 dòng). Firmware publish topic này cùng chu kỳ với
+  `telemetry` nên độ trễ hiển thị như nhau; payload thiếu field nào thì dòng đó
+  giữ giá trị đã có, không bị xoá trắng.
 - Demand values in **Watts** (not kW) for precision
 - **Demand tính theo tích phân thời gian** (`Σ P·dt / Σ dt`), không phải trung bình
   cộng số mẫu — cửa sổ mặc định 15 phút, đổi được; `dmd_max_w` reset riêng bằng
