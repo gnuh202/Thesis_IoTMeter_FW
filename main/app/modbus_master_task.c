@@ -358,6 +358,8 @@ static void poll_pm710_slot(uint8_t slot, uint8_t addr)
         {PM710_REG_PF_TOTAL, &local.power_factor, 1.0f},
         {PM710_REG_FREQ_HZ, &local.frequency, 1.0f},
         {PM710_REG_ENERGY_KWH, &local.active_energy, 1.0f},
+        {PM710_REG_ENERGY_KVARH, &local.reactive_energy_kvarh, 1.0f},
+        {PM710_REG_ENERGY_KVAH, &local.apparent_energy_kvah, 1.0f},
     };
 
     for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++) {

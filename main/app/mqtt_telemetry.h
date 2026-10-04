@@ -63,4 +63,8 @@ typedef struct {
     float power_factor;         // total (0 for EM07K)
     float frequency;            // Hz
     float active_energy_kwh;    // kWh
+    // PM710 energy totals (Table B-2 registers 1004/1002). EM-07K has no
+    // such counters — published as 0, per the fields-stay-zero convention.
+    float energy_kvarh;         // kvarh
+    float energy_kvah;          // kVAh
 } mqtt_telemetry_slave_t;
