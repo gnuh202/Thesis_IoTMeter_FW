@@ -4,7 +4,14 @@
 > Source code: [main/app/mqtt_manager.c](../main/app/mqtt_manager.c)  
 > Data structures: [main/app/mqtt_telemetry.h](../main/app/mqtt_telemetry.h)
 
-**Phiên bản tài liệu:** 2.5 (cập nhật 2026-09-20)  
+**Phiên bản tài liệu:** 2.7 (cập nhật 2026-10-04)  
+**Thay đổi chính (2.7):**
+- `telemetry`: thêm `q_kvar_ph[3]` / `s_kva_ph[3]` (công suất phản kháng / biểu kiến
+  từng pha) và `wiring` (`"3p4w"` / `"3p3w"` — giải nghĩa ý nghĩa của mảng `v[]`)
+- `energy`: thêm `dmd_window_min` — độ dài cửa sổ demand đang dùng (phút)
+- `heartbeat`: thêm `last_sync` (epoch lần sync thành công cuối; 0 = chưa bao giờ)
+  và `rtc` (RTC có trả lời hay không)
+
 **Thay đổi chính (2.5):**
 - `heartbeat`: thêm `ts` (epoch giây), `tq` (time quality: `U`/`E`/`S`) và `boot`
   (số lần khởi động). **Phải đọc `tq` trước khi tin `ts`** — xem [§3.4](#34-pmidheartbeat)
@@ -116,7 +123,9 @@
     "p_kw": 3.45,
     "p_kw_ph": [1.10, 1.15, 1.20],
     "q_kvar": 0.23,
+    "q_kvar_ph": [0.05, 0.08, 0.10],
     "s_kva": 3.46,
+    "s_kva_ph": [1.10, 1.15, 1.21],
     "pf_total": 0.98,
     "freq": 50.01,
     "temp": 42.3,
@@ -163,7 +172,10 @@
 | `p_kw_ph` | number[3] | kW | Active power per phase (L1, L2, L3) | **2 decimals** |
 | `q_kvar` | number | kvar | Total reactive power | **2 decimals** |
 | `s_kva` | number | kVA | Total apparent power | **2 decimals** |
+| `q_kvar_ph` | number[3] | kvar | Reactive power per phase (L1, L2, L3) | **2 decimals** |
+| `s_kva_ph` | number[3] | kVA | Apparent power per phase (L1, L2, L3) | **2 decimals** |
 | `pf_total` | number | — | System power factor | -1.0 to 1.0 |
+| `wiring` | string | — | Ý nghĩa của `v[]`: `"3p4w"` = pha–neutral (Uan/Ubn/Ucn), `"3p3w"` = dây–dây (Uab/—/Ucb) | đổi qua LCD/console |
 | `freq` | number | Hz | Line frequency | 45-65 Hz typical |
 | `temp` | number | °C | ATM90E32AS chip temperature | Internal sensor |
 | `energy_kwh` | number | kWh | Accumulated active energy (import) | Bộ đếm trong RAM + NVS, xem [§3.2](#32-pmidenergy) |
@@ -268,7 +280,8 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
   "imp_kvarh": 123.45,
   "exp_kvarh": 0.00,
   "dmd_w": 3450.5,
-  "dmd_max_w": 5000.0
+  "dmd_max_w": 5000.0,
+  "dmd_window_min": 15
 }
 ```
 
@@ -282,6 +295,7 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
 | `exp_kvarh` | number | kvarh | Reactive energy export |
 | `dmd_w` | number | W | Current demand (sliding window) |
 | `dmd_max_w` | number | W | Maximum demand since reset |
+| `dmd_window_min` | number | phút | Độ dài cửa sổ demand đang dùng (mặc định 15) — đổi qua Modbus holding register, cho subscriber biết `dmd_w` là trung bình của bao nhiêu phút |
 
 **Notes:**
 
@@ -371,7 +385,9 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
   "fw_version": "1.0.0",
   "active_broker": "Main-Broker",
   "iface": "wifi",
-  "ip": "192.168.1.100"
+  "ip": "192.168.1.100",
+  "last_sync": 1759560000,
+  "rtc": true
 }
 ```
 
@@ -388,6 +404,8 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
 | `active_broker` | string | — | Broker name from config (`cfg.mqtt.name`) |
 | `iface` | string | — | Active network interface: `"eth"`, `"wifi"`, or `"none"` |
 | `ip` | string | — | Current IP address |
+| `last_sync` | number | seconds | Unix epoch của lần NTP sync thành công gần nhất; `0` = chưa từng sync thành công | Fleet monitoring: `tq` rơi khỏi `"S"` trong khi `last_sync` đứng yên là dấu hiệu mạng đứt, không phải RTC chết |
+| `rtc` | boolean | — | RTC DS1307 đang có trên bus và trả lời (`true`/`false`) | `false` kết hợp `tq="E"` là dấu hiệu pin RTC yếu hoặc chip không lên; đọc cùng `last_sync` để tách nguyên nhân mạng khỏi nguyên nhân RTC |
 
 #### Time quality (`tq`) — đọc trước khi dùng `ts`
 
@@ -698,6 +716,7 @@ client.loop_forever()
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.7 | 2026-10-04 | • `telemetry`: thêm `q_kvar_ph`/`s_kva_ph` (Q/S từng pha) và `wiring` (3p4w/3p3w)<br>• `energy`: thêm `dmd_window_min`<br>• `heartbeat`: thêm `last_sync` + `rtc` (chẩn đoán nguồn thời gian cho fleet monitoring) |
 | 2.6 | 2026-09-21 | • Thêm `pm/<id>/ota` (publish, QoS1 retained, theo thay đổi) và `pm/<id>/cmd/ota` (subscribe) cho cập nhật firmware OTA<br>• Tiến trình tải làm tròn 5% để giữ số message thấp |
 | 2.5 | 2026-09-20 | • `heartbeat`: thêm `ts` (epoch), `tq` (time quality `U`/`E`/`S`), `boot` (boot counter)<br>• Đính chính §3.2: energy KHÔNG nằm trong thanh ghi IC (thanh ghi là read-to-clear) — bộ đếm RAM + NVS 2-slot/CRC32 mới là chỉ số công-tơ<br>• Ghi rõ điểm commit NVS, chính sách reset, và Factory Reset không xoá energy<br>• Demand tính theo tích phân thời gian |
 | 2.4 | 2026-09-19 | • `io`: 2 digital input thành event-driven (đổi mức → publish ngay, trễ ≤ 250 ms)<br>• Thêm `warn_bits` (bitmap alarm từng pha, 16-bit) cạnh `warnings`<br>• Mô tả đầy đủ từng bit alarm: ý nghĩa, phục vụ cho gì, nguồn thanh ghi IC |

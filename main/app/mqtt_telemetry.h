@@ -20,6 +20,9 @@ typedef struct {
     float active_power_kw_ph[3]; // kW per phase (L1, L2, L3)
     float reactive_power_kvar;  // kvar (total)
     float apparent_power_kva;   // kVA (total)
+    float reactive_kvar_ph[3];  // kvar per phase (L1, L2, L3)
+    float apparent_kva_ph[3];   // kVA per phase (L1, L2, L3)
+    uint8_t wiring_mode;        // atm90e32as_wiring_mode_t: 0=3P4W, 1=3P3W
     float power_factor[3];      // per phase
     float total_power_factor;
     float frequency;            // Hz

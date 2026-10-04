@@ -812,6 +812,11 @@ static void prepare_main_telemetry(mqtt_telemetry_main_t *out)
     }
     out->reactive_power_kvar = round_kw(m.total_reactive_power);
     out->apparent_power_kva = round_kw(m.total_apparent_power);
+    for (int ph = 0; ph < 3; ph++) {
+        out->reactive_kvar_ph[ph] = round_kw(m.reactive_power[ph]);
+        out->apparent_kva_ph[ph] = round_kw(m.apparent_power[ph]);
+    }
+    out->wiring_mode = (uint8_t)m.wiring_mode;
 
     out->active_energy_kwh = e.active_import_kwh;
 
@@ -896,9 +901,23 @@ static void publish_telemetry(void)
     }
     cJSON_AddNumberToObject(main_obj, "in", main.current_neutral);
     cJSON_AddNumberToObject(main_obj, "p_kw", main.active_power_kw);
+    /* Per-phase reactive/apparent: measured by the same IC read that produced
+     * p_kw_ph, so they cost nothing to publish and dashboards can plot Q/S
+     * per phase alongside P. */
+    cJSON *q_ph = cJSON_AddArrayToObject(main_obj, "q_kvar_ph");
+    cJSON *s_ph = cJSON_AddArrayToObject(main_obj, "s_kva_ph");
+    for (int ph = 0; ph < 3; ph++) {
+        cJSON_AddItemToArray(q_ph, cJSON_CreateNumber(main.reactive_kvar_ph[ph]));
+        cJSON_AddItemToArray(s_ph, cJSON_CreateNumber(main.apparent_kva_ph[ph]));
+    }
     cJSON_AddNumberToObject(main_obj, "q_kvar", main.reactive_power_kvar);
     cJSON_AddNumberToObject(main_obj, "s_kva", main.apparent_power_kva);
     cJSON_AddNumberToObject(main_obj, "pf_total", main.total_power_factor);
+    /* What the v[] entries mean: 3P4W = phase-neutral (Uan/Ubn/Ucn),
+     * 3P3W = line-to-line (Uab/—/Ucb). Without this a 3P3W dashboard shows
+     * line voltages under phase labels. */
+    cJSON_AddStringToObject(main_obj, "wiring",
+                            main.wiring_mode == ATM90E32AS_WIRING_3P3W ? "3p3w" : "3p4w");
     cJSON_AddNumberToObject(main_obj, "freq", main.frequency);
     cJSON_AddNumberToObject(main_obj, "temp", main.temperature);
     cJSON_AddNumberToObject(main_obj, "energy_kwh", main.active_energy_kwh);
@@ -979,6 +998,14 @@ static void publish_energy(void)
     if (have_d) {
         cJSON_AddNumberToObject(root, "dmd_w", d.active_power_demand_w);
         cJSON_AddNumberToObject(root, "dmd_max_w", d.active_power_demand_max_w);
+    }
+
+    /* The demand window is settable over Modbus (HR_DEMAND_WINDOW), so a
+     * consumer watching dmd_w needs the window length to interpret it. The
+     * getter reads RAM (default 15); publish it once we publish at all. */
+    uint16_t window_min = 0;
+    if (energy_meter_get_demand_window_minutes(&window_min) == ESP_OK) {
+        cJSON_AddNumberToObject(root, "dmd_window_min", window_min);
     }
 
     publish_json(s_topic_energy, root, 1, 0);
@@ -1096,6 +1123,12 @@ static void publish_heartbeat(void)
         cJSON_AddStringToObject(root, "iface", iface);
         cJSON_AddStringToObject(root, "ip", st.ip);
     }
+
+    /* Clock provenance for fleet monitoring: when NTP last succeeded and
+     * whether an RTC is on the bus at all. A tq that drops from 'S' with
+     * last_sync frozen is the signature of a dead link, not a dead RTC. */
+    cJSON_AddNumberToObject(root, "last_sync", (double)time_source_last_sync());
+    cJSON_AddBoolToObject(root, "rtc", time_source_rtc_present());
 
     publish_json(s_topic_heartbeat, root, 0, 0);
 }
