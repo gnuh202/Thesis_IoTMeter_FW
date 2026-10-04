@@ -4,7 +4,15 @@
 > Source code: [main/app/mqtt_manager.c](../main/app/mqtt_manager.c)  
 > Data structures: [main/app/mqtt_telemetry.h](../main/app/mqtt_telemetry.h)
 
-**Phiên bản tài liệu:** 2.7 (cập nhật 2026-10-04)  
+**Phiên bản tài liệu:** 2.8 (cập nhật 2026-10-04)  
+**Thay đổi chính (2.8):**
+- `telemetry` → `slaves`: thêm `energy_kvarh` (tổng điện năng phản kháng, kvarh) và
+  `energy_kvah` (tổng điện năng biểu kiến, kVAh) — PM710 đọc từ thanh ghi 1004/1002
+  (bảng B-2, manual 63230-501-209A1). EM07K không có thanh ghi này → publish 0,
+  đúng quy ước "thanh ghi meter không có thì về 0"
+- Lưu ý: PM710 chỉ có **tổng** — bảng B-2 không tách nhập/xuất, nên slave PM710
+  không có "Reactive Import/Export" riêng như thiết bị chính (ATM90)
+
 **Thay đổi chính (2.7):**
 - `telemetry`: thêm `q_kvar_ph[3]` / `s_kva_ph[3]` (công suất phản kháng / biểu kiến
   từng pha) và `wiring` (`"3p4w"` / `"3p3w"` — giải nghĩa ý nghĩa của mảng `v[]`)
@@ -152,7 +160,9 @@
       "s_kva": 1.53,
       "pf": 0.99,
       "freq": 50.00,
-      "energy_kwh": 567.89
+      "energy_kwh": 567.89,
+      "energy_kvarh": 43.20,
+      "energy_kvah": 570.10
     }
   ]
 }
@@ -251,6 +261,8 @@ lại ngưỡng, trong lúc đó alarm tạm ngưng đánh giá.
 | `pf` | number | — | Total power factor | 0 for EM07K |
 | `freq` | number | Hz | Line frequency | Same as main |
 | `energy_kwh` | number | kWh | Accumulated active energy | Device's internal counter |
+| `energy_kvarh` | number | kvarh | Total reactive energy | PM710 register 1004; 0 for EM07K |
+| `energy_kvah` | number | kVAh | Total apparent energy | PM710 register 1002; 0 for EM07K |
 
 **Notes:**
 - Maximum 5 slaves (firmware limit for stack safety)
@@ -594,6 +606,8 @@ JSON:
 | `freq` | Line frequency | Hz | telemetry (main/slaves) |
 | `temp` | Chip temperature | °C | telemetry (main only) |
 | `energy_kwh` | Active energy import | kWh | telemetry (main/slaves), energy |
+| `energy_kvarh` | Reactive energy total (slaves) | kvarh | telemetry (slaves) |
+| `energy_kvah` | Apparent energy total (slaves) | kVAh | telemetry (slaves) |
 | `relay1` / `relay2` | Relay outputs | boolean | telemetry (main only) |
 | `input1` / `input2` | Digital inputs | boolean | telemetry (main only) |
 | `warnings` | Warning flags, gộp nhóm | bitmask 8-bit | telemetry (main only) |

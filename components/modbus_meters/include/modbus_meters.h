@@ -40,7 +40,12 @@ typedef struct {
     float apparent_power;    /* total apparent power (VA) */
     float power_factor;      /* total PF; 0 on EM-07K */
     float frequency;         /* line frequency (Hz) */
-    float active_energy;     /* imported active energy (kWh) */
+    float active_energy;     /* active energy total (kWh) */
+    /* Energy totals are what the meters expose — PM710 Table B-2 has only
+     * Real/Apparent/Reactive totals, no import/export split; EM-07K has just
+     * the per-phase active counters. These stay 0 on EM-07K. */
+    float reactive_energy_kvarh; /* reactive energy total (kvarh) */
+    float apparent_energy_kvah;  /* apparent energy total (kVAh) */
 } meter_readings_t;
 
 /*
@@ -52,6 +57,8 @@ typedef struct {
  * Energy is already kWh.
  */
 #define PM710_REG_ENERGY_KWH     1000  /* Real Energy Total, float, kWh */
+#define PM710_REG_ENERGY_KVAH    1002  /* Apparent Energy Total, float, kVAh */
+#define PM710_REG_ENERGY_KVARH   1004  /* Reactive Energy Total, float, kVARh */
 #define PM710_REG_P_TOTAL_KW     1006  /* Real Power Total, float, kW */
 #define PM710_REG_S_TOTAL_KVA    1008  /* Apparent Power Total, float, kVA */
 #define PM710_REG_Q_TOTAL_KVAR   1010  /* Reactive Power Total, float, kVAR */

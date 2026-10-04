@@ -867,6 +867,8 @@ static uint8_t prepare_slave_telemetry(mqtt_telemetry_slave_t slaves[MQTT_TELEME
                 s->power_factor = r.power_factor;
                 s->frequency = r.frequency;
                 s->active_energy_kwh = r.active_energy;
+                s->energy_kvarh = r.reactive_energy_kvarh;
+                s->energy_kvah = r.apparent_energy_kvah;
             }
         }
     }
@@ -966,6 +968,10 @@ static void publish_telemetry(void)
             cJSON_AddNumberToObject(slave_obj, "pf", s->power_factor);
             cJSON_AddNumberToObject(slave_obj, "freq", s->frequency);
             cJSON_AddNumberToObject(slave_obj, "energy_kwh", s->active_energy_kwh);
+            /* PM710 energy totals (payloads doc 2.8). EM-07K has no such
+             * counters and publishes the zero default. */
+            cJSON_AddNumberToObject(slave_obj, "energy_kvarh", s->energy_kvarh);
+            cJSON_AddNumberToObject(slave_obj, "energy_kvah", s->energy_kvah);
 
             cJSON_AddItemToArray(slaves_arr, slave_obj);
         }
