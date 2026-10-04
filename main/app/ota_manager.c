@@ -4,6 +4,7 @@
 
 #include "ota_manager.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -123,6 +124,7 @@ uint16_t ota_manager_version_word(const char *s)
 typedef enum {
     OTA_REQ_CHECK = 0,
     OTA_REQ_UPDATE,
+    OTA_REQ_UPDATE_VERSION,
 } ota_req_t;
 
 static SemaphoreHandle_t s_lock;
@@ -134,6 +136,7 @@ static bool          s_have_release;
 static ota_release_t s_release;
 static ota_req_t     s_req;
 static char          s_req_url[OTA_URL_MAX];
+static char          s_req_version[OTA_VERSION_MAX];
 
 static bool                s_pending_verify;
 static esp_timer_handle_t  s_selftest_timer;
@@ -181,7 +184,7 @@ static esp_err_t http_event(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static esp_err_t fetch_manifest(char *buf, size_t cap)
+static esp_err_t fetch_text(const char *url, char *buf, size_t cap)
 {
     http_sink_t sink = { .buf = buf, .cap = cap, .len = 0 };
     buf[0] = '\0';
@@ -195,7 +198,7 @@ static esp_err_t fetch_manifest(char *buf, size_t cap)
      * so the redirect kept failing until buffer_size_tx was raised as well.
      */
     esp_http_client_config_t cfg = {
-        .url               = CONFIG_APP_OTA_MANIFEST_URL,
+        .url               = url,
         .timeout_ms        = CONFIG_APP_OTA_HTTP_TIMEOUT_MS,
         .buffer_size       = 4096,
         .buffer_size_tx    = 4096,
@@ -218,11 +221,11 @@ static esp_err_t fetch_manifest(char *buf, size_t cap)
     esp_http_client_cleanup(client);
 
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "manifest fetch failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "fetch %s failed: %s", url, esp_err_to_name(ret));
         return ret;
     }
     if (status != 200) {
-        ESP_LOGE(TAG, "manifest HTTP %d", status);
+        ESP_LOGE(TAG, "HTTP %d from %s", status, url);
         return ESP_ERR_INVALID_RESPONSE;
     }
     if (sink.len == 0) {
@@ -273,7 +276,7 @@ static void do_check(void)
         return;
     }
 
-    esp_err_t ret = fetch_manifest(body, OTA_MANIFEST_MAX);
+    esp_err_t ret = fetch_text(CONFIG_APP_OTA_MANIFEST_URL, body, OTA_MANIFEST_MAX);
     if (ret != ESP_OK) {
         free(body);
         set_failed(ret == ESP_ERR_INVALID_RESPONSE ? "Bad server reply" : "Download failed");
@@ -310,6 +313,13 @@ static void do_update(const char *url)
         set_failed("No network");
         return;
     }
+
+    /* Both entry paths land here once the image URL is known. The state moves
+     * to DOWNLOADING only now: an install-by-version spends its first seconds
+     * in CHECKING while it reads that release's manifest. */
+    lock();
+    s_state = OTA_STATE_DOWNLOADING;
+    unlock();
 
     ESP_LOGI(TAG, "downloading %s", url);
 
@@ -399,6 +409,197 @@ static void do_update(const char *url)
     esp_restart();
 }
 
+/* ---------------- install a named release ---------------- */
+
+/*
+ * Everything here derives from the one manifest Kconfig: the default points at
+ * `<repo>/releases/latest/download/manifest.json`, and the same repo serves
+ * every tagged release at `<repo>/releases/download/<tag>/manifest.json` —
+ * release.yml publishes both assets for each v* tag, so the pattern holds for
+ * every released version without a second URL to configure.
+ */
+static esp_err_t releases_base(char *out, size_t cap)
+{
+    const char *mark = strstr(CONFIG_APP_OTA_MANIFEST_URL, "/releases/");
+    if (mark == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    size_t base_len = (size_t)(mark - CONFIG_APP_OTA_MANIFEST_URL);
+    if (base_len == 0 || base_len + 1 > cap) {
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(out, CONFIG_APP_OTA_MANIFEST_URL, base_len);
+    out[base_len] = '\0';
+    return ESP_OK;
+}
+
+/*
+ * Install one specific release: read THAT release's manifest, make sure it is
+ * the release that was asked for, and hand its asset URL to the ordinary
+ * install path. Downgrades pass; the only version refused is the one already
+ * running, and it is refused here before a byte is downloaded -- do_update()
+ * re-checks the same rule against the image descriptor afterwards.
+ */
+static void do_update_version(const char *manifest_url, const char *want)
+{
+    network_status_t net = {0};
+    if (network_manager_get_status(&net) != ESP_OK || !net.has_ip) {
+        set_failed("No network");
+        return;
+    }
+
+    char *body = malloc(OTA_MANIFEST_MAX);
+    if (body == NULL) {
+        set_failed("Out of memory");
+        return;
+    }
+
+    esp_err_t ret = fetch_text(manifest_url, body, OTA_MANIFEST_MAX);
+    if (ret != ESP_OK) {
+        free(body);
+        /* The fetch layer reports HTTP != 200 (a missing release's 404 among
+         * them) as ESP_ERR_INVALID_RESPONSE, so the console shows one honest
+         * "bad server reply" rather than a guess between 404 and a corrupt
+         * body. */
+        set_failed(ret == ESP_ERR_INVALID_RESPONSE ? "Bad server reply" : "Download failed");
+        return;
+    }
+
+    ota_release_t rel = {0};
+    strlcpy(rel.running, ota_manager_running_version(), sizeof(rel.running));
+    ret = parse_manifest(body, &rel);
+    free(body);
+    if (ret != ESP_OK) {
+        set_failed("Bad manifest");
+        return;
+    }
+    if (ota_manager_version_compare(rel.latest, want) != 0) {
+        set_failed("Wrong release");
+        return;
+    }
+    if (ota_manager_version_compare(rel.latest, rel.running) == 0) {
+        set_failed("Same version");
+        return;
+    }
+    ESP_LOGI(TAG, "release %s -> %s", rel.latest, rel.url);
+    do_update(rel.url);
+}
+
+/* ---------------- release list ---------------- */
+
+/*
+ * `ota list` needs the set of tags that can be installed. The GitHub API's
+ * tag list answers as one small JSON array (unlike the releases endpoint,
+ * whose per-release objects would dwarf the buffer), so that is what is
+ * fetched — filtered to parseable v* tags and sorted newest first. The
+ * unauthenticated API allows 60 requests per hour per IP; an operator who
+ * needs more than that should be scripting against the repo, not the device.
+ */
+#define OTA_TAGS_MAX      8192   /* 30 tags of GitHub tag JSON fits with room */
+#define OTA_TAGS_PER_PAGE 30
+
+typedef struct {
+    char  *out;   /* caller's buffer, written once the fetch completes */
+    size_t cap;
+} list_job_t;
+
+/* qsort comparator: newest (largest semver) first. */
+static int tag_cmp(const void *a, const void *b)
+{
+    const char *const *ta = a;
+    const char *const *tb = b;
+    return ota_manager_version_compare((*tb), (*ta));
+}
+
+static void fetch_tags(list_job_t *job)
+{
+    job->out[0] = '\0';
+
+    network_status_t net = {0};
+    if (network_manager_get_status(&net) != ESP_OK || !net.has_ip) {
+        return;
+    }
+
+    char base[OTA_URL_MAX];
+    if (releases_base(base, sizeof(base)) != ESP_OK) {
+        return;
+    }
+
+    /* api.github.com requires the repository as owner/name. A mirror host in
+     * the manifest Kconfig therefore gets no list; installs still work. */
+    const char *gh = strstr(base, "github.com/");
+    if (gh == NULL) {
+        return;
+    }
+
+    char url[OTA_URL_MAX];
+    int n = snprintf(url, sizeof(url), "https://api.github.com/repos/%s/tags?per_page=%d",
+                     gh + strlen("github.com/"), OTA_TAGS_PER_PAGE);
+    if (n < 0 || (size_t)n >= sizeof(url)) {
+        return;
+    }
+
+    char *body = malloc(OTA_TAGS_MAX);
+    if (body == NULL) {
+        return;
+    }
+
+    esp_err_t ret = fetch_text(url, body, OTA_TAGS_MAX);
+    if (ret != ESP_OK) {
+        free(body);
+        return;
+    }
+
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (root == NULL || !cJSON_IsArray(root)) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    const char *names[OTA_TAGS_PER_PAGE] = {0};
+    int count = 0;
+    const cJSON *entry = NULL;
+    cJSON_ArrayForEach(entry, root) {
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(entry, "name");
+        if (cJSON_IsString(name) && name->valuestring != NULL &&
+            count < OTA_TAGS_PER_PAGE &&
+            ota_manager_version_compare(name->valuestring, "0") > 0) {
+            names[count++] = name->valuestring;
+            if (count == OTA_TAGS_PER_PAGE) {
+                break;
+            }
+        }
+    }
+
+    qsort(names, count, sizeof(names[0]), tag_cmp);
+
+    size_t len = 0;
+    for (int i = 0; i < count; i++) {
+        size_t room = (len + 1 < job->cap) ? (job->cap - 1 - len) : 0;
+        int written = snprintf(job->out + len, room + 1, "%s\n", names[i]);
+        if (written < 0 || (size_t)written > room) {
+            break;   /* buffer full; the newest tags made it in */
+        }
+        len += (size_t)written;
+    }
+
+    cJSON_Delete(root);
+}
+
+static void list_task(void *arg)
+{
+    fetch_tags((list_job_t *)arg);
+    free(arg);
+
+    lock();
+    s_busy = false;
+    unlock();
+    vTaskDelete(NULL);
+}
+
+/* ---------------- worker dispatch ---------------- */
+
 static void ota_task(void *arg)
 {
     (void)arg;
@@ -407,10 +608,14 @@ static void ota_task(void *arg)
     ota_req_t req = s_req;
     char url[OTA_URL_MAX];
     strlcpy(url, s_req_url, sizeof(url));
+    char version[OTA_VERSION_MAX];
+    strlcpy(version, s_req_version, sizeof(version));
     unlock();
 
     if (req == OTA_REQ_CHECK) {
         do_check();
+    } else if (req == OTA_REQ_UPDATE_VERSION) {
+        do_update_version(url, version);
     } else {
         do_update(url);
     }
@@ -421,7 +626,7 @@ static void ota_task(void *arg)
     vTaskDelete(NULL);
 }
 
-static esp_err_t spawn(ota_req_t req, const char *url)
+static esp_err_t spawn(ota_req_t req, const char *url, const char *version)
 {
     lock();
     if (s_busy) {
@@ -431,7 +636,8 @@ static esp_err_t spawn(ota_req_t req, const char *url)
     s_busy = true;
     s_req = req;
     strlcpy(s_req_url, url != NULL ? url : "", sizeof(s_req_url));
-    s_state = (req == OTA_REQ_CHECK) ? OTA_STATE_CHECKING : OTA_STATE_DOWNLOADING;
+    strlcpy(s_req_version, version != NULL ? version : "", sizeof(s_req_version));
+    s_state = (req == OTA_REQ_UPDATE) ? OTA_STATE_DOWNLOADING : OTA_STATE_CHECKING;
     s_percent = 0;
     s_err[0] = '\0';
     unlock();
@@ -451,7 +657,7 @@ static esp_err_t spawn(ota_req_t req, const char *url)
 
 esp_err_t ota_manager_request_check(void)
 {
-    return spawn(OTA_REQ_CHECK, NULL);
+    return spawn(OTA_REQ_CHECK, NULL, NULL);
 }
 
 esp_err_t ota_manager_request_update(const char *url)
@@ -471,7 +677,78 @@ esp_err_t ota_manager_request_update(const char *url)
             return ESP_ERR_INVALID_ARG;   /* nothing checked, nothing given */
         }
     }
-    return spawn(OTA_REQ_UPDATE, chosen);
+    return spawn(OTA_REQ_UPDATE, chosen, NULL);
+}
+
+esp_err_t ota_manager_request_update_version(const char *version)
+{
+    if (version == NULL || version[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Accept "1.0.1" as "v1.0.1": every release tag starts with v, and an
+     * operator who just saw the list should not have to remember that. */
+    char tag[OTA_VERSION_MAX];
+    if (version[0] == 'v' || version[0] == 'V') {
+        strlcpy(tag, version, sizeof(tag));
+    } else {
+        int n = snprintf(tag, sizeof(tag), "v%s", version);
+        if (n < 0 || (size_t)n >= sizeof(tag)) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+
+    char manifest_url[OTA_URL_MAX];
+    char base[OTA_URL_MAX];
+    esp_err_t ret = releases_base(base, sizeof(base));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    int n = snprintf(manifest_url, sizeof(manifest_url),
+                     "%s/releases/download/%s/manifest.json", base, tag);
+    if (n < 0 || (size_t)n >= sizeof(manifest_url)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return spawn(OTA_REQ_UPDATE_VERSION, manifest_url, tag);
+}
+
+esp_err_t ota_manager_request_list(char *out, size_t cap)
+{
+    if (out == NULL || cap < 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lock();
+    if (s_busy) {
+        unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_busy = true;
+    s_err[0] = '\0';
+    unlock();
+
+    out[0] = '\0';
+    list_job_t *job = malloc(sizeof(list_job_t));
+    if (job == NULL) {
+        lock();
+        s_busy = false;
+        unlock();
+        return ESP_ERR_NO_MEM;
+    }
+    job->out = out;
+    job->cap = cap;
+
+    BaseType_t ok = xTaskCreate(list_task, "ota_list",
+                                CONFIG_APP_OTA_TASK_STACK_SIZE, job,
+                                CONFIG_APP_OTA_TASK_PRIORITY, NULL);
+    if (ok != pdPASS) {
+        free(job);
+        lock();
+        s_busy = false;
+        unlock();
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 ota_state_t ota_manager_get_state(int *percent, char *err, size_t err_len)
@@ -611,6 +888,10 @@ esp_err_t ota_manager_init(void)
 esp_err_t   ota_manager_init(void)                       { return ESP_OK; }
 esp_err_t   ota_manager_request_check(void)              { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t   ota_manager_request_update(const char *url)  { (void)url; return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t   ota_manager_request_update_version(const char *v)
+                                                         { (void)v; return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t   ota_manager_request_list(char *out, size_t cap)
+                                                         { (void)out; (void)cap; return ESP_ERR_NOT_SUPPORTED; }
 bool        ota_manager_get_release(ota_release_t *out)  { (void)out; return false; }
 bool        ota_manager_busy(void)                       { return false; }
 bool        ota_manager_pending_verify(void)             { return false; }

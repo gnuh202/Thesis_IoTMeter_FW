@@ -1312,14 +1312,20 @@ static int cmd_rtc(int argc, char **argv)
     return 1;
 }
 
-/* ota: the same five operations the LCD menu and MQTT expose, on a wire an
- * operator already has open. check and update return as soon as the worker
- * task is spawned -- neither blocks the console while the network runs. */
+/* ota: the operations the LCD menu and MQTT expose — plus version selection,
+ * which stays console-only on purpose. check/update return as soon as the
+ * worker task is spawned -- neither blocks the console while the network
+ * runs; list waits on its worker with a short busy-poll. */
 static struct {
     struct arg_str *sub;
+    struct arg_str *version;
     struct arg_str *url;
     struct arg_end *end;
 } s_ota_args;
+
+/* Result buffer for `ota list`: tag strings only; the JSON body lives in a
+ * buffer the list worker mallocs and frees itself. */
+static char s_ota_tags[2048];
 
 static const char *ota_state_name(ota_state_t st)
 {
@@ -1387,6 +1393,31 @@ static int cmd_ota(int argc, char **argv)
         return 0;
     }
 
+    if (strcmp(sub, "install") == 0) {
+        if (s_ota_args.version->count == 0) {
+            printf("usage: ota install <version>   (run 'ota list' first to see the releases)\n");
+            return 1;
+        }
+        const char *ver = s_ota_args.version->sval[0];
+        esp_err_t ret = ota_manager_request_update_version(ver);
+        if (ret == ESP_ERR_NOT_SUPPORTED) {
+            printf("OTA is disabled in this build (CONFIG_APP_OTA_ENABLE)\n");
+            return 1;
+        }
+        if (ret == ESP_ERR_INVALID_STATE) {
+            printf("another OTA version-select operation is already running\n");
+            return 1;
+        }
+        if (ret != ESP_OK) {
+            /* Also covers a manifest Kconfig that does not name a GitHub
+             * releases path, where no per-release base URL can be derived. */
+            printf("install not started: %s\n", esp_err_to_name(ret));
+            return 1;
+        }
+        printf("downloading %s; the device reboots into it when it lands\n", ver);
+        return 0;
+    }
+
     if (strcmp(sub, "update") == 0) {
         const char *url = (s_ota_args.url->count > 0) ? s_ota_args.url->sval[0] : NULL;
         esp_err_t ret = ota_manager_request_update(url);
@@ -1403,6 +1434,35 @@ static int cmd_ota(int argc, char **argv)
             return 1;
         }
         printf("downloading; the device reboots into the new image when it lands\n");
+        return 0;
+    }
+
+    if (strcmp(sub, "list") == 0) {
+        esp_err_t ret = ota_manager_request_list(s_ota_tags, sizeof(s_ota_tags));
+        if (ret == ESP_ERR_NOT_SUPPORTED) {
+            printf("OTA is disabled in this build (CONFIG_APP_OTA_ENABLE)\n");
+            return 1;
+        }
+        if (ret != ESP_OK) {
+            printf("list not started: %s\n", esp_err_to_name(ret));
+            return 1;
+        }
+        while (ota_manager_busy()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (s_ota_tags[0] == '\0') {
+            printf("list failed: no network, or the repository answered oddly (see the log)\n");
+            return 1;
+        }
+        const char *running = ota_manager_running_version();
+        printf("available releases (newest first):\n");
+        char *line = strtok(s_ota_tags, "\n");
+        while (line != NULL) {
+            printf("  %s%s\n", line,
+                   ota_manager_version_compare(line, running) == 0 ? "   <- running" : "");
+            line = strtok(NULL, "\n");
+        }
+        printf("install one with: ota install <version>\n");
         return 0;
     }
 
@@ -1431,7 +1491,7 @@ static int cmd_ota(int argc, char **argv)
         return 1;
     }
 
-    printf("unknown subcommand '%s' (check|update|status|confirm|rollback)\n", sub);
+    printf("unknown subcommand '%s' (check|update|install|list|status|confirm|rollback)\n", sub);
     return 1;
 }
 
@@ -2778,12 +2838,13 @@ static esp_err_t register_meter_commands(void)
     };
     ESP_RETURN_ON_ERROR(esp_console_cmd_register(&rtc_cmd), TAG, "register rtc failed");
 
-    s_ota_args.sub = arg_str1(NULL, NULL, "<check|update|status|confirm|rollback>", "ota subcommand");
+    s_ota_args.sub = arg_str1(NULL, NULL, "<check|update|install|list|status|confirm|rollback>", "ota subcommand");
+    s_ota_args.version = arg_str0(NULL, NULL, "<vX.Y.Z>", "release to install (install)");
     s_ota_args.url = arg_str0(NULL, "url", "<https://...>", "image URL (update; defaults to the last check)");
-    s_ota_args.end = arg_end(3);
+    s_ota_args.end = arg_end(4);
     const esp_console_cmd_t ota_cmd = {
         .command = "ota",
-        .help = "Firmware update: ota check | ota update [--url ...] | ota status | ota confirm | ota rollback",
+        .help = "Firmware update: ota check | ota update [--url ...] | ota install <version> | ota list | ota status | ota confirm | ota rollback",
         .hint = NULL,
         .func = &cmd_ota,
         .argtable = &s_ota_args,
