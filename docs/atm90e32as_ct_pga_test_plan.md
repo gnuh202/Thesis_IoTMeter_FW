@@ -168,8 +168,8 @@ Công thức đọc nhanh: dùng `meter-reg read 0x61 0x62 0x64 0x65 0x67 0x68`.
 | W01 | Auto-cal V không đụng CT | Sau CT Apply, chạy `meter-cal auto --field u --phase a --value 230` + Save | CT không đổi; Ugain thay đổi; NVS CT params còn | ☐ PASS ☐ FAIL | |
 | W02 | Auto-cal I không tăng PGA | Sau CT Apply, `meter-cal auto --field i --phase a --value 5` | Igain tính lại trên PGA hiện tại; **không** auto tăng PGA | ☐ PASS ☐ FAIL | |
 | W03 | Wiring switch không reset CT | Sau CT Apply, chuyển 3P4W↔3P3W (LCD) | CT params còn; PGA còn | ☐ PASS ☐ FAIL | |
-| W04 | Factory reset | LCD → Settings → Factory Reset → Confirm | CT params về default (2000/100/75), PGA theo lại, gain = `0x8000` cả 2 profile | ☐ PASS ☐ FAIL | |
-| W05 | Reboot sau factory reset | W04 → reboot → `meter-cal show` + `meter-reg read` | CT=2000/100/75, gain=0x8000, PGA theo CT | ☐ PASS ☐ FAIL | |
+| W04 | Factory reset | LCD → Settings → Factory Reset → Confirm | CT params về default (2000/100/75), PGA theo lại; **calib gain/offset/Phi giữ nguyên** (không thuộc factory reset) | ☐ PASS ☐ FAIL | |
+| W05 | Reboot sau factory reset | W04 → reboot → `meter-cal show` + `meter-reg read` | CT=2000/100/75, gain **như trước khi reset** (không về `0x8000`), PGA theo CT | ☐ PASS ☐ FAIL | |
 | W06 | Web Portal không sửa CT | Mở portal, đổi các field khác (WiFi, MQTT), Save and restart | CT params không bị reset về default | ☐ PASS ☐ FAIL | |
 | W07 | Console `meter-cal show` hiện CT | `meter-cal show` | Có 3 dòng `CT: ratio=… rated=… expected=…` | ☐ PASS ☐ FAIL | |
 

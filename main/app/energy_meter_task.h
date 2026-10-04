@@ -229,9 +229,6 @@ esp_err_t energy_meter_set_wiring_mode(atm90e32as_wiring_mode_t mode, bool apply
 esp_err_t energy_meter_save_calibration(void);
 esp_err_t energy_meter_load_calibration(bool apply);
 esp_err_t energy_meter_reset_calibration_defaults(bool apply);
-/* Erase the persisted calibration blob (factory reset). Safe to call before the
- * meter task exists; the next boot then uses the bring-up defaults. */
-esp_err_t energy_meter_erase_calibration(void);
 
 /* Export current RAM calibration state (single profile, no version) into an
  * NVS-compatible blob. out_len receives the actual blob size on success. */

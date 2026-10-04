@@ -2689,19 +2689,21 @@ static esp_err_t menu_calib_import_sd(lcd_menu_t *menu, const lcd_menu_item_t *i
 }
 
 /* ---- Factory Reset ----
- * Destructive: erases config_store + calibration NVS and reloads defaults. It was
- * a two-leaf submenu (Confirm Reset / Cancel) whose title screen "FACTORY RESET?"
- * was already the real confirm. Collapsed to one direct ACTION that does the
- * confirm itself; LEFT/Cancel aborts. Done!/Failed! flash stays — unlike an inline
- * toggle there is nothing on the row to show the outcome. */
+ * Destructive: erases the settings namespaces + the uploaded TLS certificates
+ * and reloads defaults. Calibration is deliberately out of scope (a wipe is a
+ * manufacturer console action, not a user reset). It was a two-leaf submenu
+ * (Confirm Reset / Cancel) whose title screen "FACTORY RESET?" was already the
+ * real confirm. Collapsed to one direct ACTION that does the confirm itself;
+ * LEFT/Cancel aborts. Done!/Failed! flash stays — unlike an inline toggle there
+ * is nothing on the row to show the outcome. */
 static esp_err_t menu_factory_reset(lcd_menu_t *menu, const lcd_menu_item_t *item, void *ctx)
 {
     (void)menu; (void)item; (void)ctx;
     put_line_centre(0, "FACTORY RESET?");
     /* One self-contained line. It used to read "Erases all saved" / "config +
-     * calib" across two rows, but calibration is developer-only (it lives in the
-     * engineering menu, not SETTINGS), so naming it here would advertise a
-     * concept the end user is never meant to see or touch. */
+     * calib" across two rows; the calib mention is gone now for a different
+     * reason than before — calibration is genuinely not erased any more, and
+     * TLS certificates are infra the end user should not have to think about. */
     put_line_centre(1, "Erases all settings");
     put_line(2, "");
     put_line(3, "");

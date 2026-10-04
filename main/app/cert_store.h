@@ -89,6 +89,11 @@ esp_err_t cert_store_write(int profile, cert_slot_t slot, const char *pem, size_
 /* Remove the slot's file. Returns ESP_OK when it was already absent. */
 esp_err_t cert_store_delete(int profile, cert_slot_t slot);
 
+/* Remove every uploaded PEM across all profiles and slots (factory reset).
+ * Absent files are not an error; fails only if the store is not mounted or a
+ * delete fails on a file that exists. */
+esp_err_t cert_store_erase_all(void);
+
 /* Presence, size and short fingerprint. Never returns file content. */
 esp_err_t cert_store_stat(int profile, cert_slot_t slot, cert_slot_info_t *out);
 
