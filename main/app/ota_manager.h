@@ -74,6 +74,21 @@ esp_err_t ota_manager_request_check(void);
  * successful check. */
 esp_err_t ota_manager_request_update(const char *url);
 
+/* Kick off a download+install of one named release. `version` is a release tag
+ * or bare semver ("v1.0.1" / "1.0.1"). Older versions are allowed on purpose —
+ * this is the operator's roll-back-by-choice path; the only version refused is
+ * the one already running. The release's own manifest.json is fetched first,
+ * then the normal install flow runs (descriptor check, spare slot, reboot,
+ * probation). */
+esp_err_t ota_manager_request_update_version(const char *version);
+
+/* Start fetching the repository's release tags into `out` — newline-separated,
+ * newest first, NUL-terminated. Like the other request_* calls this returns as
+ * soon as the worker is spawned; wait for ota_manager_busy() to go false
+ * before reading `out`. An empty string means the fetch failed (no network, or
+ * the repository answered oddly — details are in the log). */
+esp_err_t ota_manager_request_list(char *out, size_t cap);
+
 /* Current state. percent and err may be NULL. percent is 0..100 and only
  * meaningful while DOWNLOADING; err is set only in the FAILED state. */
 ota_state_t ota_manager_get_state(int *percent, char *err, size_t err_len);

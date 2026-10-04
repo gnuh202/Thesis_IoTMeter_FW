@@ -244,6 +244,32 @@ curl -L https://github.com/gnuh202/Thesis_IoTMeter_FW/releases/latest/download/m
 Phải trả về đúng JSON ở trên. Nếu ra HTML thì release chưa publish hoặc asset
 chưa upload xong.
 
+### 5.6. Nhiều release cùng lúc: thứ tự đẩy tag
+
+GitHub gắn nhãn **Latest** cho release được *publish sau cùng*, không phải
+release có số version cao nhất. Thiết bị chạy bản cũ kéo manifest từ URL
+`releases/latest/download/`, nên khi phải cắt hai bản cùng một lúc (ví dụ dựng
+lại baseline và bản mới) thứ tự là bất di bất dịch:
+
+```bash
+git push origin v1.0.0        # bản cũ trước
+# chờ CI xong; curl manifest của v1.0.0 trả đúng version rồi hẵng tiếp tục
+git push origin v1.0.1        # bản mới sau — "Latest" rơi vào đây
+```
+
+Đẩy ngược thứ tự thì "Latest" là bản cũ và mọi thiết bị sẽ tin rằng mình đã là
+bản mới nhất.
+
+Trên máy phát triển có hai thư mục source, vai trò cố định:
+
+| Thư mục | Nhánh | Vai trò |
+|---|---|---|
+| `uart_echo/` | dòng chính | nơi phát triển mọi tính năng; tag phát hành từ đây |
+| `uart_echo_v100/` | `legacy/v1.0.0` | bản chụp release đầu (main menu có thêm dòng "Old version" ở vị trí đầu). Chỉ dùng để demo downgrade, không phát triển tính năng ở đây |
+
+Kịch bản demo hai chiều, sau lần nạp USB đầu tiên thì không cần nạp lại: flash
+USB v1.0.0 → `ota install v1.0.1` (lên) → `ota install v1.0.0` (xuống).
+
 ---
 
 ## 6. Cập nhật từ phía thiết bị
@@ -270,11 +296,23 @@ ota check              # tải manifest, không chặn console
 ota status             # version đang chạy, trạng thái, %, lỗi, release mới nhất
 ota update             # cài bản từ lần check gần nhất
 ota update --url https://.../luanvan_firmware.bin
+ota list               # liệt kê các release trên repo, mới nhất trước
+ota install v1.0.0     # cài đúng bản chỉ định theo tag, kể cả hạ cấp
 ota confirm            # commit ngay, bỏ qua cửa sổ self-test
 ota rollback           # quay về slot cũ và reboot
 ```
 
 `ota status` in cả dòng `probation`, cho biết ảnh đang chạy đã commit hay chưa.
+
+`ota install` và `ota list` có từ v1.0.1. `install` lấy base URL từ
+`CONFIG_APP_OTA_MANIFEST_URL`, kéo manifest của đúng release được chỉ định
+(`<base>/releases/download/<tag>/manifest.json`), đối chiếu `version` trong
+manifest, rồi đi vào cùng một đường cài đặt với `update`. Hạ cấp được cho phép
+(vì cố tình không bật anti-rollback, mục 11); bản *đang chạy* thì bị từ chối
+ngay ở khâu so sánh, vì `version_compare` bỏ qua đuôi `-N-gHash` của
+`git describe`. `ota list` hỏi danh sách tag qua
+`api.github.com/repos/<owner>/<repo>/tags` — 60 request/giờ/IP, đủ cho việc
+tra tay — lọc lấy tên parse được semver rồi sắp giảm dần, đánh dấu bản đang chạy.
 
 ### 6.3. Web portal — API `/api/ota`
 
@@ -358,7 +396,7 @@ khác để quay về. Máy không hỏng: lần `ota update` kế tiếp ghi đ
 |---|---|---|
 | LCD `No network` | chưa có IP | cắm Ethernet hoặc kiểm tra WiFi STA |
 | LCD `Bad server reply` / `Download failed` | URL sai, release chưa publish, DNS chết | `curl` thử URL manifest từ PC cùng mạng |
-| log `HTTP_CLIENT: Out of buffer` | GitHub trả 302 sang CDN; theo redirect nghĩa là phải **gửi** `GET <path ký ~1,4 KB> HTTP/1.1`, mà dòng request được dựng trong buffer **TX** mặc định 512 B | phải set **cả hai**: `buffer_size` *và* `buffer_size_tx` = 4096. `buffer_size` chỉ map sang `buffer_size_rx` — đó là lý do lần sửa đầu (chỉ `buffer_size`) không hết lỗi. Đã sửa sau v1.0.1; các bản ≤ v1.0.1 phải flash lại qua USB |
+| log `HTTP_CLIENT: Out of buffer` | GitHub trả 302 sang CDN; theo redirect nghĩa là phải **gửi** `GET <path ký ~1,4 KB> HTTP/1.1`, mà dòng request được dựng trong buffer **TX** mặc định 512 B | phải set **cả hai**: `buffer_size` *và* `buffer_size_tx` = 4096. `buffer_size` chỉ map sang `buffer_size_rx` — đó là lý do lần sửa đầu (chỉ `buffer_size`) không hết lỗi. Cả hai release hiện hành đều đã chứa sửa này; bản hỏng chỉ tồn tại trong các release cũ đã xoá khỏi repo |
 | LCD `Bad manifest` | JSON thiếu `version` hoặc `url` | chạy lại `tools/make_manifest.py` |
 | LCD `Same version` | ảnh tải về không mới hơn ảnh đang chạy | tag lại cho đúng; đây là chốt chặn ở nguyên tắc 1.2 đang làm việc |
 | LCD `Image invalid` | ảnh hỏng hoặc không phải app image hợp lệ | build lại, kiểm `sha256` trong manifest |
@@ -383,7 +421,8 @@ idf.py -p COMx flash
 [ ] git tag -a vX.Y.Z -m "Ghi chú ngắn (<= 47 ký tự)"
 [ ] git push origin vX.Y.Z
 [ ] CI xanh, release xuất hiện với đủ 2 asset
-[ ] curl -L .../releases/latest/download/manifest.json trả đúng version
+[ ] curl manifest của đúng tag vừa đẩy trả "version" khớp tag
+[ ] Khi cắt nhiều bản cùng lúc: đẩy tag cũ trước, chờ release đó lên, rồi mới đẩy tag mới (mục 5.6)
 [ ] Một thiết bị thật: check → install → reboot → chạy được
 [ ] Sau ~60 s: log "self-test passed; image committed"
 [ ] ota status báo probation: no
