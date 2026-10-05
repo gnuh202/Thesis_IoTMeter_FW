@@ -101,17 +101,25 @@ sdkconfig.defaults   # cấu hình sống qua regenerate (flash, partition, TLS,
 
 Điểm cốt lõi: bước 3-4 (đo + Modbus) **không phụ thuộc** bước 1,6-9 (mạng). Mạng hỏng không ảnh hưởng đo.
 
-### 4.1. Tạm dừng khi AP config portal mở
+### 4.1. Tạm dừng khi AP config portal mở hoặc OTA đang chạy
 
 `network_manager_is_config_mode()` (đọc `network_status_t.ap_active`) là **nguồn sự
-thật duy nhất**. Khi portal mở, energy task / mqtt_manager / modbus master **tự bỏ
-qua phần thân vòng lặp** (cooperative, không `vTaskSuspend`) nên không mutex/UART/SPI
-nào bị bỏ dở — thoát portal là resume ngay ở tick kế tiếp. Modbus **slave** vẫn chạy
-(phải tiếp tục trả lời master phía trên).
+thật duy nhất** cho portal; còn `ota_manager_busy()` (true suốt vòng đời worker —
+cả check lẫn download, tới khi worker thoát) là nguồn sự thật cho OTA. Khi một trong
+hai flag bật, energy task / mqtt_manager / modbus master **tự bỏ qua phần thân vòng
+lặp** (cooperative, không `vTaskSuspend`) nên không mutex/UART/SPI nào bị bỏ dở —
+hết pause là resume ngay ở tick kế tiếp. Modbus **slave** vẫn chạy (phải tiếp tục
+trả lời master phía trên).
 
-Ngoại lệ quan trọng: energy task vẫn **drain thanh ghi read-to-clear mỗi 10 s** trong
-suốt thời gian portal mở, nếu không tải lớn sẽ làm tràn count uint16 (trần 204.8 Wh)
-và mất năng lượng — chi tiết ở [energy_logging.md §1.1](energy_logging.md#11-trần-2048-wh-mỗi-cửa-sổ-đọc).
+Động cơ của pause-OTA: tải firmware qua W5500 (SPI) tranh bus SPI với ATM90E32AS và
+SD card, đồng thời TLS ăn nhiều CPU — khi MQTT/RTU master vẫn chạy cùng lúc thì
+download "lúc được lúc không". Pause cho download chạy riêng nên không còn fail.
+
+Hai ngoại lệ trong lúc OTA: mqtt_manager **vẫn publish trạng thái OTA on-change**
+(cứ mỗi 5% tiến độ một message) để server theo dõi được tiến trình; energy task vẫn
+**drain thanh ghi read-to-clear mỗi 10 s** trong suốt thời gian pause, nếu không tải
+lớn sẽ làm tràn count uint16 (trần 204.8 Wh) và mất năng lượng — chi tiết ở
+[energy_logging.md §1.1](energy_logging.md#11-trần-2048-wh-mỗi-cửa-sổ-đọc).
 
 ---
 

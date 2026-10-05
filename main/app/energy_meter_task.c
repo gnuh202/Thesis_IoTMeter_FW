@@ -17,6 +17,7 @@
 #include "measurement_data.h"
 #include "modbus_master_task.h"
 #include "network_manager.h"
+#include "ota_manager.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
@@ -938,17 +939,21 @@ static void energy_meter_task(void *arg)
 #if CONFIG_APP_ENERGY_SD_LOG_ENABLE
     int64_t sd_log_last_us = esp_timer_get_time();
 #endif
-    /* While the config portal is open the poll body is skipped, but the
-     * read-to-clear energy registers keep filling: a uint16 count caps at
-     * 204.8 Wh, so a 2 kW load overflows them in about 6 minutes of portal
-     * time and the energy is lost silently. Drain them on this slower tick. */
+    /* While the config portal is open, or an OTA check/download owns the
+     * network, the poll body is skipped, but the read-to-clear energy
+     * registers keep filling: a uint16 count caps at 204.8 Wh, so a 2 kW load
+     * overflows them in about 6 minutes and the energy is lost silently. Drain
+     * them on this slower tick. */
     int64_t config_mode_drain_us = 0;
 
     while (1) {
-        /* Config portal active: the operator is doing settings, so pause the
-         * measurement poll (cooperative; resumes on the tick after it closes).
-         * Energy counts are still drained periodically — see above. */
-        if (network_manager_is_config_mode()) {
+        /* Config portal active, or an OTA check/download in flight: pause the
+         * measurement poll (cooperative; resumes on the tick after the busy
+         * window ends). The OTA pause is the same deal as the portal one — the
+         * download shares the SPI bus with the meter and TLS eats the CPU, so
+         * the poll would come back flaky or slow it down. Energy counts are
+         * still drained periodically — see above. */
+        if (network_manager_is_config_mode() || ota_manager_busy()) {
             int64_t now_us = esp_timer_get_time();
             if ((now_us - config_mode_drain_us) >= 10LL * 1000000LL) {
                 config_mode_drain_us = now_us;
@@ -959,7 +964,7 @@ static void energy_meter_task(void *arg)
                     energy_meter_accumulate(&energy_counts, 1.0f);
                 }
             }
-            /* The demand window must not count portal time as measured data. */
+            /* The demand window must not count pause time as measured data. */
             s_demand_last_us = 0;
             vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_ENERGY_METER_POLL_PERIOD_MS));
             continue;

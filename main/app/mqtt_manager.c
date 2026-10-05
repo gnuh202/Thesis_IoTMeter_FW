@@ -1201,12 +1201,13 @@ static void mqtt_manager_task(void *arg)
             last_iface = st.active_iface;
         }
 
-        /* Config portal active: the operator is doing settings. Keep the loop
-         * and Apply servicing alive but pause publishing; on portal close the
-         * next tick publishes immediately (period already elapsed). */
-        if (network_manager_is_config_mode()) {
-            continue;
-        }
+        /* Config portal active, or an OTA check/download owns the network:
+         * pause the periodic publishes. Keep the loop, Apply servicing and the
+         * OTA on-change report below alive — a download must still stream its
+         * progress to the broker. As with the portal pause, no timestamp is
+         * taken while paused, so the first tick after it ends publishes
+         * immediately. */
+        bool publish_paused = network_manager_is_config_mode() || ota_manager_busy();
 
         if (!s_connected || s_client == NULL) {
             continue;
@@ -1219,10 +1220,11 @@ static void mqtt_manager_task(void *arg)
         /* Input edge: push the io snapshot straight away instead of waiting out
          * the publish period. Cleared before publishing so an edge that lands
          * during the publish is not swallowed (it costs one redundant message
-         * at worst, never a missed transition). */
+         * at worst, never a missed transition; while paused the snapshot still
+         * goes out with the first periodic publish after the pause ends). */
         if (s_input_event_pending) {
             s_input_event_pending = false;
-            if (!periodic) {
+            if (!periodic && !publish_paused) {
                 publish_io();
             }
         }
@@ -1243,7 +1245,7 @@ static void mqtt_manager_task(void *arg)
             }
         }
 
-        if (periodic) {
+        if (periodic && !publish_paused) {
             last_publish_us = now;
             publish_telemetry();
             publish_energy();

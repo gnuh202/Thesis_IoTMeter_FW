@@ -14,6 +14,7 @@
 #include "mbcontroller.h"
 #include "modbus_meters.h"
 #include "network_manager.h"
+#include "ota_manager.h"
 #include "sdkconfig.h"
 #include "system_status.h"
 
@@ -562,9 +563,11 @@ static void modbus_master_task(void *arg)
             }
         }
 
-        /* Config portal active: the operator is doing settings, so pause
-         * polling (cooperative; resumes within ~50 ms of portal close). */
-        if (network_manager_is_config_mode()) {
+        /* Config portal active, or an OTA check/download owns the network:
+         * pause polling (cooperative; resumes on the pass after the busy
+         * window ends — same deal as the portal pause, so the OTA download
+         * gets the shared SPI bus and the CPU to itself). */
+        if (network_manager_is_config_mode() || ota_manager_busy()) {
             delay_interruptible(MB_MASTER_RECFG_POLL_MS);
             continue;
         }

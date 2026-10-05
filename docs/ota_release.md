@@ -42,6 +42,16 @@ quay về slot cũ. Điều kiện commit (xem `selftest_tick()`):
 bị rút sẽ không phân biệt được với một bản build hỏng, và mỗi lần switch của trạm
 chết là một ảnh hoàn toàn tốt bị rollback.
 
+**1.4. Trong lúc check/download, các task đo và đẩy dữ liệu nhường đường.**
+`ota_manager_busy()` bật suốt vòng đời worker (từ lúc nhận request tới khi worker
+thoát) và energy task / modbus master / MQTT publish tạm dừng theo đúng cơ chế
+cooperative của pause khi portal mở (chi tiết
+[architecture.md §4.1](architecture.md#41-tạm-dừng-khi-ap-config-portal-mở-hoặc-ota-đang-chạy)).
+Lý do: download qua W5500 (SPI) tranh bus với chip đo và SD card, TLS lại ăn CPU —
+để MQTT/RTU chạy cùng thì download hay fail. Dữ liệu đo ngừng trong thời gian đó và
+không tính vào demand window; trạng thái OTA vẫn được publish lên broker on-change
+(cứ 5% tiến độ) để server theo dõi được. Modbus slave không dừng.
+
 ---
 
 ## 2. Cấu hình build (đã set sẵn)
