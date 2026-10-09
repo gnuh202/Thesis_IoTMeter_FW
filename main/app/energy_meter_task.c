@@ -742,10 +742,11 @@ static esp_err_t energy_meter_init(void)
 
 /* Noise-floor cleanup, applied once per poll BEFORE the snapshot is published
  * anywhere (LCD, Modbus slave, MQTT, demand accumulator). A de-energised or
- * idling meter still shows sub-LSB chip noise, but |PF| < 0.1 and
+ * idling meter still shows sub-LSB chip noise, but |U| < 3 (V), |PF| < 0.1 and
  * |P|/|Q|/|S| < 1 (W/var/VA) are not physical values in any real installation,
  * so they are reported as exactly 0. Calibration paths never go through here —
  * they must see the raw chip truth. */
+#define ENERGY_METER_VOLTAGE_NOISE_FLOOR 3.0f
 #define ENERGY_METER_PF_NOISE_FLOOR 0.1f
 #define ENERGY_METER_POWER_NOISE_FLOOR 1.0f
 #define ENERGY_METER_NOLOAD_CURRENT_A ((float)CONFIG_APP_METER_NOLOAD_CURRENT_MA / 1000.0f)
@@ -768,6 +769,13 @@ static bool energy_meter_phase_is_loaded(float current_a, bool was_loaded)
 static void energy_meter_apply_noise_floor(atm90e32as_measurements_t *m)
 {
     for (int i = 0; i < ATM90E32AS_PHASE_COUNT; i++) {
+        /* Voltage first, and above the no-load gate below: a de-energised
+         * phase draws no current either, so the gate's early continue would
+         * otherwise leave the voltage noise in place. Voltage does not depend
+         * on load — an energised but idle phase keeps its real 230 V here. */
+        if (m->voltage[i] < ENERGY_METER_VOLTAGE_NOISE_FLOOR) {
+            m->voltage[i] = 0.0f;
+        }
         if (!energy_meter_phase_is_loaded(m->current[i], s_phase_loaded[i])) {
             /* No real load on this phase: the current is crosstalk pickup,
              * so every value derived from it is meaningless — report a
