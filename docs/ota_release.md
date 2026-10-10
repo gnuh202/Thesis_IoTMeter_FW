@@ -158,8 +158,10 @@ git pull origin main
 
 ### 5.1. Tạo tag có chú thích
 
-Dòng đầu (subject) của tag chính là release note mà CI sẽ đưa vào manifest và
-hiển thị lên LCD, nên viết ngắn — thiết bị chỉ giữ **47 ký tự đầu**.
+Dòng đầu (subject) của tag chính là release note mà CI sẽ đưa vào manifest. Thiết
+bị chỉ giữ **47 ký tự đầu**, nên viết ngắn. Note hiện ra ở `ota check` trên console,
+trong payload MQTT trạng thái OTA và trên trang OTA của web portal — **không** lên
+LCD (màn 20×4 chỉ còn chỗ cho số phiên bản).
 
 ```bash
 git checkout main
