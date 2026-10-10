@@ -1085,10 +1085,12 @@ menu "Application Configuration"
         config APP_NET_AP_IDLE_TIMEOUT_MS
             int "Config portal AP idle auto-stop ms"
             range 5000 600000
-            default 60000
+            default 180000
             help
                 After the user-launched config portal SoftAP has been up without any
                 station associated, stop it automatically and reconnect the STA.
+                Sized for a human: finding the SSID on a phone, joining it and
+                opening 192.168.4.1 does not fit in one minute.
                 No effect on the legacy auto-AP recovery path.
 
     endmenu
@@ -1210,11 +1212,14 @@ menu "Application Configuration"
             int "OTA worker task priority"
             depends on APP_OTA_ENABLE
             range 1 20
-            default 4
+            default 7
             help
-                Deliberately BELOW the comm tier (7) and the internal tier (6).
-                A firmware download must never starve metering, Modbus or MQTT:
-                the update can afford to take longer, the measurements cannot.
+                Comm tier (7), level with Modbus and MQTT. The download owns the
+                shared SPI bus and the CPU for its duration anyway — metering,
+                Modbus master and MQTT telemetry stand down cooperatively while
+                it runs (see docs/architecture.md 4.1) — so leaving the worker
+                below them only made the transfer itself flaky without
+                protecting anything.
 
         config APP_OTA_SELFTEST_DELAY_S
             int "Self-test period before committing a new image (seconds)"

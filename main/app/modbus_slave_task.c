@@ -395,14 +395,11 @@ static void modbus_slave_task(void *arg)
             if (s_reconfigure_done != NULL) xSemaphoreGive(s_reconfigure_done);
             continue;
         }
-        /* Config portal active: the operator is doing settings. Pause frame
-         * servicing (cooperative; resumes within ~50 ms of portal close).
-         * The reconfigure branch above still runs, so an Apply made during
-         * the portal is never lost. */
-        if (network_manager_is_config_mode()) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
+        /* No config-portal pause here, unlike the master/energy/MQTT tasks:
+         * this meter is a slave on someone else's bus, and a slave that stops
+         * answering reads as a dead device to the SCADA master upstream.
+         * Servicing frames costs only the RS485 UART, which the portal does
+         * not touch. */
         /* Do not block indefinitely in mbc_slave_check_event(): a reconfigure
          * request must be able to take ownership even while the bus is idle.
          * The controller callback has already queued mb_param_info_t for each

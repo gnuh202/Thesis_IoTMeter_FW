@@ -563,11 +563,12 @@ static void modbus_master_task(void *arg)
             }
         }
 
-        /* Config portal active, or an OTA check/download owns the network:
-         * pause polling (cooperative; resumes on the pass after the busy
-         * window ends — same deal as the portal pause, so the OTA download
-         * gets the shared SPI bus and the CPU to itself). */
-        if (network_manager_is_config_mode() || ota_manager_busy()) {
+        /* Config portal active, or an OTA download owns the network: pause
+         * polling (cooperative; resumes on the pass after the busy window
+         * ends — same deal as the portal pause, so the OTA download gets the
+         * shared SPI bus and the CPU to itself). A version check does not
+         * pause: it is too short to be worth losing a poll pass over. */
+        if (network_manager_is_config_mode() || ota_manager_is_downloading()) {
             delay_interruptible(MB_MASTER_RECFG_POLL_MS);
             continue;
         }

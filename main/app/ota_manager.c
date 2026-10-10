@@ -787,6 +787,14 @@ bool ota_manager_busy(void)
     return busy;
 }
 
+bool ota_manager_is_downloading(void)
+{
+    lock();
+    bool dl = (s_state == OTA_STATE_DOWNLOADING);
+    unlock();
+    return dl;
+}
+
 /* ---------------- rollback / self-test ---------------- */
 
 bool ota_manager_pending_verify(void)
@@ -894,6 +902,7 @@ esp_err_t   ota_manager_request_list(char *out, size_t cap)
                                                          { (void)out; (void)cap; return ESP_ERR_NOT_SUPPORTED; }
 bool        ota_manager_get_release(ota_release_t *out)  { (void)out; return false; }
 bool        ota_manager_busy(void)                       { return false; }
+bool        ota_manager_is_downloading(void)             { return false; }
 bool        ota_manager_pending_verify(void)             { return false; }
 esp_err_t   ota_manager_mark_valid(void)                 { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t   ota_manager_rollback(void)                   { return ESP_ERR_NOT_SUPPORTED; }

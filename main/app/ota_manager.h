@@ -99,6 +99,12 @@ bool ota_manager_get_release(ota_release_t *out);
 /* True while the worker task is running. */
 bool ota_manager_busy(void);
 
+/* True only while the firmware image is actually streaming down. Narrower than
+ * ota_manager_busy(): a version check or release listing is cheap and must not
+ * make the metering/comm tasks stand down. This is the flag those tasks pause
+ * on — see docs/architecture.md §4.1. */
+bool ota_manager_is_downloading(void);
+
 /* True when the running image is on probation and has not committed yet. */
 bool ota_manager_pending_verify(void);
 

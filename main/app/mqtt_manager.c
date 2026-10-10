@@ -1201,13 +1201,15 @@ static void mqtt_manager_task(void *arg)
             last_iface = st.active_iface;
         }
 
-        /* Config portal active, or an OTA check/download owns the network:
-         * pause the periodic publishes. Keep the loop, Apply servicing and the
-         * OTA on-change report below alive — a download must still stream its
-         * progress to the broker. As with the portal pause, no timestamp is
-         * taken while paused, so the first tick after it ends publishes
-         * immediately. */
-        bool publish_paused = network_manager_is_config_mode() || ota_manager_busy();
+        /* Config portal active, or an OTA download owns the network: pause the
+         * periodic publishes. Keep the loop, Apply servicing and the OTA
+         * on-change report below alive — a download must still stream its
+         * progress to the broker. A version check does not pause telemetry; it
+         * is triggerable from the broker, and standing down on it would let a
+         * remote poll blank the data feed for 20-40 s. As with the portal
+         * pause, no timestamp is taken while paused, so the first tick after
+         * it ends publishes immediately. */
+        bool publish_paused = network_manager_is_config_mode() || ota_manager_is_downloading();
 
         if (!s_connected || s_client == NULL) {
             continue;

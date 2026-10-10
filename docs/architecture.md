@@ -101,25 +101,39 @@ sdkconfig.defaults   # cấu hình sống qua regenerate (flash, partition, TLS,
 
 Điểm cốt lõi: bước 3-4 (đo + Modbus) **không phụ thuộc** bước 1,6-9 (mạng). Mạng hỏng không ảnh hưởng đo.
 
-### 4.1. Tạm dừng khi AP config portal mở hoặc OTA đang chạy
+### 4.1. Tạm dừng khi AP config portal mở hoặc OTA đang tải
 
 `network_manager_is_config_mode()` (đọc `network_status_t.ap_active`) là **nguồn sự
-thật duy nhất** cho portal; còn `ota_manager_busy()` (true suốt vòng đời worker —
-cả check lẫn download, tới khi worker thoát) là nguồn sự thật cho OTA. Khi một trong
+thật duy nhất** cho portal; còn `ota_manager_is_downloading()` (chỉ true khi image
+đang stream về, không tính check/list) là nguồn sự thật cho OTA. Khi một trong
 hai flag bật, energy task / mqtt_manager / modbus master **tự bỏ qua phần thân vòng
 lặp** (cooperative, không `vTaskSuspend`) nên không mutex/UART/SPI nào bị bỏ dở —
 hết pause là resume ngay ở tick kế tiếp. Modbus **slave** vẫn chạy (phải tiếp tục
-trả lời master phía trên).
+trả lời master phía trên) — nó chỉ dùng UART RS485, thứ mà portal/OTA không tranh.
+
+Chốt phạm vi: **check version không pause gì cả**. Trước đây gate theo
+`ota_manager_busy()` (true suốt vòng đời worker) nên chỉ bấm xem phiên bản là mất
+20–40 s dữ liệu, và vì MQTT `cmd/ota {"action":"check"}` gọi được từ broker nên một
+lệnh từ xa có thể làm trắng luồng telemetry. `ota_manager_busy()` giờ chỉ dùng cho
+UI (LCD/console chờ worker xong).
 
 Động cơ của pause-OTA: tải firmware qua W5500 (SPI) tranh bus SPI với ATM90E32AS và
 SD card, đồng thời TLS ăn nhiều CPU — khi MQTT/RTU master vẫn chạy cùng lúc thì
 download "lúc được lúc không". Pause cho download chạy riêng nên không còn fail.
+Worker OTA nằm ở **priority 7** (comm tier, ngang Modbus/MQTT): để nó dưới các task
+đó chỉ làm transfer chập chờn chứ không bảo vệ được gì, vì chúng đã nhường đường.
 
 Hai ngoại lệ trong lúc OTA: mqtt_manager **vẫn publish trạng thái OTA on-change**
 (cứ mỗi 5% tiến độ một message) để server theo dõi được tiến trình; energy task vẫn
 **drain thanh ghi read-to-clear mỗi 10 s** trong suốt thời gian pause, nếu không tải
 lớn sẽ làm tràn count uint16 (trần 204.8 Wh) và mất năng lượng — chi tiết ở
 [energy_logging.md §1.1](energy_logging.md#11-trần-2048-wh-mỗi-cửa-sổ-đọc).
+
+Lần drain đó cũng là bằng chứng chip còn sống, nên nó **cập nhật luôn
+`SYS_MODULE_ATM90`**. Nếu không, trạng thái sẽ đứng nguyên ở giá trị lúc bắt đầu
+pause và self-test OTA — chỉ commit khi ATM90 báo `READY`, xem
+[ota_release.md](ota_release.md) — sẽ không bao giờ đạt được trong lúc pause: bản
+firmware mới khi đó **bị rollback ở lần reset kế tiếp**.
 
 ---
 

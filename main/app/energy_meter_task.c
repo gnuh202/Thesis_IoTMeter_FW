@@ -955,13 +955,15 @@ static void energy_meter_task(void *arg)
     int64_t config_mode_drain_us = 0;
 
     while (1) {
-        /* Config portal active, or an OTA check/download in flight: pause the
+        /* Config portal active, or an OTA download in flight: pause the
          * measurement poll (cooperative; resumes on the tick after the busy
          * window ends). The OTA pause is the same deal as the portal one — the
          * download shares the SPI bus with the meter and TLS eats the CPU, so
-         * the poll would come back flaky or slow it down. Energy counts are
-         * still drained periodically — see above. */
-        if (network_manager_is_config_mode() || ota_manager_busy()) {
+         * the poll would come back flaky or slow it down. A version check or
+         * release listing does NOT pause anything: it is two short HTTPS
+         * requests, and standing down for it cost 20-40 s of data. Energy
+         * counts are still drained periodically — see above. */
+        if (network_manager_is_config_mode() || ota_manager_is_downloading()) {
             int64_t now_us = esp_timer_get_time();
             if ((now_us - config_mode_drain_us) >= 10LL * 1000000LL) {
                 config_mode_drain_us = now_us;
@@ -971,6 +973,14 @@ static void energy_meter_task(void *arg)
                 if (drain_ret == ESP_OK) {
                     energy_meter_accumulate(&energy_counts, 1.0f);
                 }
+                /* The drain is a real SPI round-trip, so it is proof the chip
+                 * is alive — publish that. Without this the status would stay
+                 * at whatever it was when the pause began, and the OTA
+                 * self-test (which commits the new image only once ATM90 reads
+                 * READY, ota_manager.c) could never pass while paused: the
+                 * image would then roll back on the next reset. */
+                system_status_set(SYS_MODULE_ATM90,
+                                  drain_ret == ESP_OK ? SYS_STATUS_READY : SYS_STATUS_ERROR);
             }
             /* The demand window must not count pause time as measured data. */
             s_demand_last_us = 0;
